@@ -171,6 +171,9 @@ val_dataset = TaskMixture([OOADialogues("{DRIVE_DIR}/sft/val.jsonl")])"""
     s = s[:a] + new + s[b:]
     open(p, "w").write(s)
     print("patched chat_sft.py")
+# remove old SFT checkpoints: nanochat loads the highest step number, so a stale step-100 would hide a newer, shorter run
+import shutil
+shutil.rmtree(os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatsft_checkpoints"), ignore_errors=True)
 !python -m scripts.chat_sft --max-seq-len={SFT_SEQ} --device-batch-size={SFT_DEVICE_BATCH} \\
     --total-batch-size={SFT_SEQ*SFT_DEVICE_BATCH*4} --num-iterations={SFT_ITERS} \\
     --eval-every=100 --eval-tokens={SFT_SEQ*SFT_DEVICE_BATCH*8} --chatcore-every=-1 --run=dummy
