@@ -5,7 +5,7 @@ Each example: a natural-language request -> minified Flow JSON (nanochat {"messa
 Flows are 1-4 steps. A step's required inputs come from earlier outputs of a matching type when possible,
 otherwise they become declared flow inputs. Every flow is checked before it is kept:
   JSON schema (flow.v1.json), action exists in catalog, input and output names exist, every $variable is declared.
-Limits (v1): chains stay inside one toolkit (so they stay plausible), linear chains only (no loops / if / try yet), required inputs only, no credential actions.
+Limits (v1): chains stay inside one toolkit (so they stay plausible), optionally wrapped in one loop / if / try container, required inputs only, no credential actions.
 """
 import json, random, re, sys
 from pathlib import Path
@@ -54,6 +54,7 @@ def build(cat_actions, rng):
         return n
 
     prev = None
+    descs_steps = []
     for si in range(n_steps):
         cands = cat_actions
         if prev is not None and avail:
@@ -92,17 +93,62 @@ def build(cat_actions, rng):
         if out:
             step["out"] = out
         steps.append(step)
+        descs_steps.append(step)
         descs.append(clean_desc(e["description"]))
         prev = e
+    # optionally wrap the chain in a control-flow container (loop / if / try)
+    wrap_kind = rng.choices(["none", "loop", "if", "try"], weights=[55, 17, 14, 14])[0]
+    prefix, suffix = "", ""
+    body = steps
+    if wrap_kind == "loop":
+        items = new_name("items"); item = new_name("item")
+        variables.append({"name": items, "type": "List", "direction": "input", "required": True,
+                          "description": "The items to process, one per loop pass."})
+        variables.append({"name": item, "type": "Any", "direction": "local"})
+        in_names.append(items)
+        body = [{"id": "w1", "action": "core/loop", "description": "Repeat for each item",
+                 "args": {"iterator": "list", "over": "$" + items, "as": item}, "children": steps}]
+        prefix = f"For each entry in {items}: "
+    elif wrap_kind == "if":
+        flag = new_name(rng.choice(["proceed", "enabled", "send_it", "is_active"]))
+        variables.append({"name": flag, "type": "Boolean", "direction": "input", "required": True,
+                          "description": "Run the steps only when true."})
+        in_names.append(flag)
+        body = [{"id": "w1", "action": "core/if", "description": "Only when the flag is true",
+                 "args": {"condition": "$" + flag}, "children": steps}]
+        prefix = f"Only when {flag} is true: "
+    elif wrap_kind == "try":
+        body = [{"id": "w1", "action": "core/try", "description": "Handle errors", "children": steps,
+                 "catch": [{"codes": [], "children": [{"id": "w2", "action": "core/log", "args": {
+                     "message": rng.choice(["Step failed", "Something went wrong", "Error in this flow"]),
+                     "level": "error"}}]}]}]
+        suffix = " If anything fails, write an error to the log."
+    # sequential, unique ids over the whole tree
+    counter = [0]
+    def renumber(nodes):
+        for n in nodes:
+            counter[0] += 1
+            n["id"] = f"s{counter[0]}"
+            for k in ("children", "else", "finally"):
+                if isinstance(n.get(k), list):
+                    renumber(n[k])
+            for c in n.get("catch") or []:
+                renumber(c.get("children", []))
+    renumber(body)
+    steps = body
     # last step's outputs become flow outputs
     out_names = []
-    if steps and "out" in steps[-1]:
-        for vn in steps[-1]["out"].values():
+    last_chain = descs_steps[-1] if descs_steps else None
+    if last_chain and "out" in last_chain:
+        for vn in last_chain["out"].values():
             for v in variables:
                 if v["name"] == vn:
                     v["direction"] = "output"
                     out_names.append(vn)
     chain = ", then ".join(d[:1].lower() + d[1:] if k else d for k, d in enumerate(descs)) + "."
+    if prefix:
+        chain = prefix + chain[:1].lower() + chain[1:]
+    chain += suffix
     extra = ""
     if in_names:
         extra += f" The flow takes {', '.join(in_names)} as input."
@@ -123,7 +169,22 @@ def make_validator(repo, catalog):
     def validate(flow):
         jsonschema.validate(flow, schema)
         declared = {v["name"] for v in flow["variables"]}
-        for s in flow["steps"]:
+        def walk(nodes):
+            for n in nodes:
+                yield n
+                for k in ("children", "else", "finally"):
+                    if isinstance(n.get(k), list):
+                        yield from walk(n[k])
+                for c in n.get("catch") or []:
+                    yield from walk(c.get("children", []))
+        ids = []
+        for s in walk(flow["steps"]):
+            ids.append(s["id"])
+            if s["action"].startswith("core/"):
+                for v in s.get("args", {}).values():
+                    if isinstance(v, str) and v.startswith("$"):
+                        assert v[1:] in declared, f"undeclared {v}"
+                continue
             e = cat[s["action"]]
             ins = {i["name"] for i in e["inputs"]}
             outs = {o["name"] for o in e["outputs"]}
@@ -136,6 +197,7 @@ def make_validator(repo, catalog):
                     assert v[1:] in declared, f"undeclared {v}"
             for v in s.get("out", {}).values():
                 assert v in declared, f"undeclared out {v}"
+        assert len(ids) == len(set(ids)), "duplicate step ids"
     return validate
 
 
