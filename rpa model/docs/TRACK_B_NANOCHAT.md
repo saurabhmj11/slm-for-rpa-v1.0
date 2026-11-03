@@ -49,3 +49,10 @@ fine-tuned Qwen on open-ended requests and long contexts. Track A (Qwen QLoRA, s
   tokens at vocab 4096, so pretrain with a longer window, or SFT will truncate large flows.
 - nanochat's own tokenizer is also BPE (rustbpe/tiktoken), with 9 special tokens; the Stage 2 vocab-4096 experiment
   can be redone with `scripts/tok_train.py`.
+
+## Colab notebook (end to end)
+`training/ooa_nanochat_colab.ipynb` (regenerate with `training/make_colab_notebook.py`): setup, tokenizer, pretrain on a
+free T4 (resumes from Drive after disconnects), seed SFT data from the platform repo (`build_sft_data.py`),
+patched `chat_sft.py`, held-out test with schema + catalog scoring. Profiles: `smoke` (pipeline check), `t4`, `a100`.
+Written and syntax-checked without a GPU: not yet run on Colab. Seed data: about 60 flow dialogues (x3 wordings) plus
+about 2,100 catalog dialogues; 5 held-out eval prompts, so results are only a smoke signal.
