@@ -51,7 +51,9 @@ NUM_ITERS = P["tokens"] // P["total_batch"]
 # SFT (training on our use case)
 SFT_SEQ = 2048             # flows longer than this get cut; the T4 cannot afford much more
 SFT_DEVICE_BATCH = 4
-SFT_ITERS = 60 if PROFILE == "smoke" else 400
+SFT_EPOCHS = 2 if PROFILE == "smoke" else 6      # passes over the OOA data (the seed set is small)
+FLOW_REPEAT = 15           # each flow example is repeated this many times per pass so flows are about a third of the data
+SFT_ITERS = 400            # upper limit; training also stops when the data runs out
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
 MAX_FLOW_CHARS = 9000      # skip training flows longer than this (about SFT_SEQ tokens)
 print(PROFILE, P, "iterations:", NUM_ITERS)
@@ -146,7 +148,8 @@ if "OOADialogues" not in s:
     s = s.replace("from tasks.smoltalk import SmolTalk", "from tasks.smoltalk import SmolTalk\\nfrom tasks.ooa import OOADialogues")
     a = s.index("train_tasks = [")
     b = s.index("\\n", s.index("# total: 24K"))
-    new = f"""train_tasks = [OOADialogues("{DRIVE_DIR}/sft/train.jsonl") for _ in range(3)]
+    new = f"""train_tasks = ([OOADialogues("{DRIVE_DIR}/sft/train_flows.jsonl") for _ in range({FLOW_REPEAT})]
+               + [OOADialogues("{DRIVE_DIR}/sft/train_catalog.jsonl")]) * {SFT_EPOCHS}
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)

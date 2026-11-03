@@ -96,7 +96,11 @@ def main():
     train = train + cat_rows[cut:]
     rng.shuffle(train)
 
-    for name, rows in (("train", train), ("val", val), ("eval", evals)):
+    # separate files so the trainer can weight flows against the (much more numerous) catalog rows
+    flow_rows = [r for r in train if len(r["messages"][1]["content"]) > 800 and r["messages"][1]["content"].startswith("{")]
+    cat_only = [r for r in train if r not in flow_rows]
+    for name, rows in (("train", train), ("train_flows", flow_rows), ("train_catalog", cat_only),
+                       ("val", val), ("eval", evals)):
         with open(out / f"{name}.jsonl", "w", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
