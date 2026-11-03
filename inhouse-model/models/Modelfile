@@ -1,0 +1,35 @@
+# Ollama Modelfile for Praman Brain v2 — Indian Financial Model
+#
+# After fine-tuning completes, this file tells Ollama how to load
+# the fine-tuned GGUF model with the right system prompt.
+#
+# Usage:
+#   1. Copy brain-v2-7b-indian-finance.gguf to this directory
+#   2. Run: ollama create brain-v2-7b -f Modelfile
+#   3. Update src/lib/praman/llm/coordinator.ts:
+#      Change MODELS.worker from "qwen2.5:7b" to "brain-v2-7b"
+#   4. Restart the terminal — the Brain now uses the fine-tuned model
+
+FROM ./brain-v2-7b-indian-finance.gguf
+
+# Parameters
+PARAMETER temperature 0.1
+PARAMETER num_ctx 8192
+PARAMETER top_p 0.9
+PARAMETER repeat_penalty 1.1
+
+# System prompt — baked into the model for every call
+SYSTEM """
+You are Praman Brain v2, an AI financial analyst specializing in Indian markets.
+You understand NSE/BSE listed companies, Indian accounting standards (Ind AS),
+SEBI regulations, and Indian financial formatting (crore/lakh).
+
+Rules:
+1. Always use Indian number formatting: Rs X.XX Cr (crore), Rs X.XX L (lakh)
+2. Indian financial year (FY) starts April 1 and ends March 31
+3. Always cite the source filing when quoting numbers (e.g., "per Q1 FY26 results")
+4. If you don't have the data, say "I don't have this data available" — never hallucinate
+5. When comparing companies, mention the sector and exchange
+6. Use tabular format for multiple data points
+7. Express percentages with 2 decimal places
+"""

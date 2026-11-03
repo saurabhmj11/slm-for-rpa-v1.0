@@ -1,0 +1,800 @@
+[\u0000] 0
+[\u0001] 1
+[\u0002] 2
+[\u0003] 3
+[\u0004] 4
+[\u0005] 5
+[\u0006] 6
+[\u0007] 7
+[\u0008] 8
+[\u0009] 9
+[\u000a] 10
+[\u000b] 11
+[\u000c] 12
+[\u000d] 13
+[\u000e] 14
+[\u000f] 15
+[\u0010] 16
+[\u0011] 17
+[\u0012] 18
+[\u0013] 19
+[\u0014] 20
+[\u0015] 21
+[\u0016] 22
+[\u0017] 23
+[\u0018] 24
+[\u0019] 25
+[\u001a] 26
+[\u001b] 27
+[\u001c] 28
+[\u001d] 29
+[\u001e] 30
+[\u001f] 31
+[ ] 32
+[!] 33
+["] 34
+[#] 35
+[$] 36
+[%] 37
+[&] 38
+['] 39
+[(] 40
+[)] 41
+[*] 42
+[+] 43
+[,] 44
+[-] 45
+[.] 46
+[/] 47
+[0] 48
+[1] 49
+[2] 50
+[3] 51
+[4] 52
+[5] 53
+[6] 54
+[7] 55
+[8] 56
+[9] 57
+[:] 58
+[;] 59
+[<] 60
+[=] 61
+[>] 62
+[?] 63
+[@] 64
+[A] 65
+[B] 66
+[C] 67
+[D] 68
+[E] 69
+[F] 70
+[G] 71
+[H] 72
+[I] 73
+[J] 74
+[K] 75
+[L] 76
+[M] 77
+[N] 78
+[O] 79
+[P] 80
+[Q] 81
+[R] 82
+[S] 83
+[T] 84
+[U] 85
+[V] 86
+[W] 87
+[X] 88
+[Y] 89
+[Z] 90
+[[] 91
+[\] 92
+[]] 93
+[^] 94
+[_] 95
+[`] 96
+[a] 97
+[b] 98
+[c] 99
+[d] 100
+[e] 101
+[f] 102
+[g] 103
+[h] 104
+[i] 105
+[j] 106
+[k] 107
+[l] 108
+[m] 109
+[n] 110
+[o] 111
+[p] 112
+[q] 113
+[r] 114
+[s] 115
+[t] 116
+[u] 117
+[v] 118
+[w] 119
+[x] 120
+[y] 121
+[z] 122
+[{] 123
+[|] 124
+[}] 125
+[~] 126
+[\u007f] 127
+[�] 128
+[�] 129
+[�] 130
+[�] 131
+[�] 132
+[�] 133
+[�] 134
+[�] 135
+[�] 136
+[�] 137
+[�] 138
+[�] 139
+[�] 140
+[�] 141
+[�] 142
+[�] 143
+[�] 144
+[�] 145
+[�] 146
+[�] 147
+[�] 148
+[�] 149
+[�] 150
+[�] 151
+[�] 152
+[�] 153
+[�] 154
+[�] 155
+[�] 156
+[�] 157
+[�] 158
+[�] 159
+[�] 160
+[�] 161
+[�] 162
+[�] 163
+[�] 164
+[�] 165
+[�] 166
+[�] 167
+[�] 168
+[�] 169
+[�] 170
+[�] 171
+[�] 172
+[�] 173
+[�] 174
+[�] 175
+[�] 176
+[�] 177
+[�] 178
+[�] 179
+[�] 180
+[�] 181
+[�] 182
+[�] 183
+[�] 184
+[�] 185
+[�] 186
+[�] 187
+[�] 188
+[�] 189
+[�] 190
+[�] 191
+[�] 192
+[�] 193
+[�] 194
+[�] 195
+[�] 196
+[�] 197
+[�] 198
+[�] 199
+[�] 200
+[�] 201
+[�] 202
+[�] 203
+[�] 204
+[�] 205
+[�] 206
+[�] 207
+[�] 208
+[�] 209
+[�] 210
+[�] 211
+[�] 212
+[�] 213
+[�] 214
+[�] 215
+[�] 216
+[�] 217
+[�] 218
+[�] 219
+[�] 220
+[�] 221
+[�] 222
+[�] 223
+[�] 224
+[�] 225
+[�] 226
+[�] 227
+[�] 228
+[�] 229
+[�] 230
+[�] 231
+[�] 232
+[�] 233
+[�] 234
+[�] 235
+[�] 236
+[�] 237
+[�] 238
+[�] 239
+[�] 240
+[�] 241
+[�] 242
+[�] 243
+[�] 244
+[�] 245
+[�] 246
+[�] 247
+[�] 248
+[�] 249
+[�] 250
+[�] 251
+[�] 252
+[�] 253
+[�] 254
+[�] 255
+[>][ ] -> [> ] 256
+[e][n] -> [en] 257
+[s][t] -> [st] 258
+[e][r] -> [er] 259
+[ ][<] -> [ <] 260
+[i][m] -> [im] 261
+[a][t] -> [at] 262
+[o][n] -> [on] 263
+[o][u] -> [ou] 264
+[e][ ] -> [e ] 265
+[s][ ] -> [s ] 266
+[<][|] -> [<|] 267
+[<|][im] -> [<|im] 268
+[<|im][_] -> [<|im_] 269
+[st][a] -> [sta] 270
+[s][er] -> [ser] 271
+[en][t] -> [ent] 272
+[a][c] -> [ac] 273
+[i][on] -> [ion] 274
+[r][t] -> [rt] 275
+[n][t] -> [nt] 276
+[en][d] -> [end] 277
+[<|im_][sta] -> [<|im_sta] 278
+[<|im_sta][rt] -> [<|im_start] 279
+[<|im_start][|] -> [<|im_start|] 280
+[<|im_start|][> ] -> [<|im_start|> ] 281
+[u][ser] -> [user] 282
+[ion][> ] -> [ion> ] 283
+[>][\u000a] -> [>\u000a] 284
+[>\u000a][<|im_start|> ] -> [>\u000a<|im_start|> ] 285
+[o][r] -> [or] 286
+[t][o] -> [to] 287
+[t][h] -> [th] 288
+[ou][t] -> [out] 289
+[c][a] -> [ca] 290
+[l][l] -> [ll] 291
+[r][out] -> [rout] 292
+[ ][f] -> [ f] 293
+[e][t] -> [et] 294
+[g][h] -> [gh] 295
+[gh][t] -> [ght] 296
+[i][n] -> [in] 297
+[ent][ <] -> [ent <] 298
+[ac][t] -> [act] 299
+[u][r] -> [ur] 300
+[i][t] -> [it] 301
+[ ][w] -> [ w] 302
+[s][s] -> [ss] 303
+[_][a] -> [_a] 304
+[_][ca] -> [_ca] 305
+[o][c] -> [oc] 306
+[or][ ] -> [or ] 307
+[o][b] -> [ob] 308
+[rout][e] -> [route] 309
+[ w][a] -> [ wa] 310
+[y][ ] -> [y ] 311
+[ ][i] -> [ i] 312
+[user][\u000a] -> [user\u000a] 313
+[<|im_][end] -> [<|im_end] 314
+[<|im_end][|] -> [<|im_end|] 315
+[<|im_end|][>\u000a<|im_start|> ] -> [<|im_end|>\u000a<|im_start|> ] 316
+[<|im_end|>\u000a<|im_start|> ][a] -> [<|im_end|>\u000a<|im_start|> a] 317
+[<|im_end|>\u000a<|im_start|> a][ss] -> [<|im_end|>\u000a<|im_start|> ass] 318
+[<|im_end|>\u000a<|im_start|> ass][i] -> [<|im_end|>\u000a<|im_start|> assi] 319
+[<|im_end|>\u000a<|im_start|> assi][sta] -> [<|im_end|>\u000a<|im_start|> assista] 320
+[<|im_end|>\u000a<|im_start|> assista][nt] -> [<|im_end|>\u000a<|im_start|> assistant] 321
+[<|im_end|>\u000a<|im_start|> assistant][\u000a] -> [<|im_end|>\u000a<|im_start|> assistant\u000a] 322
+[<|im_end|>\u000a<|im_start|> assistant\u000a][<] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<] 323
+[<|im_end|>\u000a<|im_start|> assistant\u000a<][th] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<th] 324
+[<|im_end|>\u000a<|im_start|> assistant\u000a<th][ou] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thou] 325
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thou][ght] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought] 326
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought][> ] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> ] 327
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> ][user] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user] 328
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user][ wa] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wa] 329
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wa][nt] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user want] 330
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user want][s ] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants ] 331
+[route][> ] -> [route> ] 332
+[_a][g] -> [_ag] 333
+[_ag][ent <] -> [_agent <] 334
+[_agent <][to] -> [_agent <to] 335
+[_agent <to][o] -> [_agent <too] 336
+[_agent <too][l] -> [_agent <tool] 337
+[_agent <tool][_ca] -> [_agent <tool_ca] 338
+[_agent <tool_ca][ll] -> [_agent <tool_call] 339
+[_agent <tool_call][> ] -> [_agent <tool_call> ] 340
+[ob][ser] -> [obser] 341
+[obser][v] -> [observ] 342
+[observ][at] -> [observat] 343
+[observat][ion> ] -> [observation> ] 344
+[ <][act] -> [ <act] 345
+[ <act][ion> ] -> [ <action> ] 346
+[.][<] -> [.<] 347
+[.<][end] -> [.<end] 348
+[.<end][>\u000a<|im_start|> ] -> [.<end>\u000a<|im_start|> ] 349
+[.<end>\u000a<|im_start|> ][user\u000a] -> [.<end>\u000a<|im_start|> user\u000a] 350
+[h][i] -> [hi] 351
+[ <][observation> ] -> [ <observation> ] 352
+[1][0] -> [10] 353
+[r][e] -> [re] 354
+[e][d] -> [ed] 355
+[p][ac] -> [pac] 356
+[t][r] -> [tr] 357
+[ f][or ] -> [ for ] 358
+[ ][s] -> [ s] 359
+[ <action> ][T] -> [ <action> T] 360
+[ <action> T][h] -> [ <action> Th] 361
+[ <action> Th][e ] -> [ <action> The ] 362
+[ <][route> ] -> [ <route> ] 363
+[a][n] -> [an] 364
+[i][c] -> [ic] 365
+[et][ur] -> [etur] 366
+[etur][n] -> [eturn] 367
+[hi][p] -> [hip] 368
+[l][i] -> [li] 369
+[ i][s ] -> [ is ] 370
+[r][eturn] -> [return] 371
+[S][H] -> [SH] 372
+[SH][P] -> [SHP] 373
+[SHP][10] -> [SHP10] 374
+[:][ ] -> [: ] 375
+[in][g] -> [ing] 376
+[c][ur] -> [cur] 377
+[cur][r] -> [curr] 378
+[curr][ent] -> [current] 379
+[e][c] -> [ec] 380
+[pac][it] -> [pacit] 381
+[ ][c] -> [ c] 382
+[e][x] -> [ex] 383
+[?][<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants ] -> [?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants ] 384
+[i][ght] -> [ight] 385
+[e][st] -> [est] 386
+[ ][d] -> [ d] 387
+[pacit][y] -> [pacity] 388
+[o][m] -> [om] 389
+[e][l] -> [el] 390
+[_agent <tool_call> ][g] -> [_agent <tool_call> g] 391
+[_agent <tool_call> g][et] -> [_agent <tool_call> get] 392
+[_agent <tool_call> get][_] -> [_agent <tool_call> get_] 393
+[k][ ] -> [k ] 394
+[0][0] -> [00] 395
+[a][l] -> [al] 396
+[in][v] -> [inv] 397
+[est][im] -> [estim] 398
+[estim][at] -> [estimat] 399
+[re][ight] -> [reight] 400
+[o][st] -> [ost] 401
+[h][ec] -> [hec] 402
+[s][u] -> [su] 403
+[su][p] -> [sup] 404
+[sup][p] -> [supp] 405
+[supp][li] -> [suppli] 406
+[suppli][er] -> [supplier] 407
+[rout][e ] -> [route ] 408
+[th][e ] -> [the ] 409
+[st][at] -> [stat] 410
+[stat][u] -> [statu] 411
+[u][ll] -> [ull] 412
+[hip][m] -> [hipm] 413
+[p][r] -> [pr] 414
+[at][ ] -> [at ] 415
+[current][l] -> [currentl] 416
+[currentl][y ] -> [currently ] 417
+[to][ ] -> [to ] 418
+[s][ <route> ] -> [s <route> ] 419
+[L][A] -> [LA] 420
+[o][rt] -> [ort] 421
+[s][ <observation> ] -> [s <observation> ] 422
+[ ][(] -> [ (] 423
+[o][f] -> [of] 424
+[ca][pacity] -> [capacity] 425
+[ i][s] -> [ is] 426
+[ ][on] -> [ on] 427
+[ex][tr] -> [extr] 428
+[extr][act] -> [extract] 429
+[ f][r] -> [ fr] 430
+[ fr][om] -> [ from] 431
+[u][m] -> [um] 432
+[a][f] -> [af] 433
+[ is ][currently ] -> [ is currently ] 434
+[c][hec] -> [chec] 435
+[f][reight] -> [freight] 436
+[ c][ost] -> [ cost] 437
+[pr][oc] -> [proc] 438
+[proc][e] -> [proce] 439
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants ][to ] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to ] 440
+[st][oc] -> [stoc] 441
+[ ][C] -> [ C] 442
+[inv][ent] -> [invent] 443
+[invent][or] -> [inventor] 444
+[inventor][y] -> [inventory] 445
+[-][t] -> [-t] 446
+[-t][im] -> [-tim] 447
+[a][r] -> [ar] 448
+[ ][SHP10] -> [ SHP10] 449
+[a][re] -> [are] 450
+[are][h] -> [areh] 451
+[areh][ou] -> [arehou] 452
+[arehou][s] -> [arehous] 453
+[ is][: ] -> [ is: ] 454
+[hipm][ent] -> [hipment] 455
+[tr][ac] -> [trac] 456
+[0][%] -> [0%] 457
+[0%][ f] -> [0% f] 458
+[0% f][ull] -> [0% full] 459
+[a][s ] -> [as ] 460
+[oc][um] -> [ocum] 461
+[ocum][ent <] -> [ocument <] 462
+[N][Y] -> [NY] 463
+[_agent <tool_call> ][chec] -> [_agent <tool_call> chec] 464
+[_agent <tool_call> chec][k] -> [_agent <tool_call> check] 465
+[f][or ] -> [for ] 466
+[a][v] -> [av] 467
+[ cost][ ] -> [ cost ] 468
+[u][th] -> [uth] 469
+[m][et] -> [met] 470
+[met][r] -> [metr] 471
+[metr][ic] -> [metric] 472
+[%][ on] -> [% on] 473
+[% on][-tim] -> [% on-tim] 474
+[an][s] -> [ans] 475
+[ans][it] -> [ansit] 476
+[g][en] -> [gen] 477
+[gen][er] -> [gener] 478
+[gener][at] -> [generat] 479
+[generat][ed] -> [generated] 480
+[at][ion] -> [ation] 481
+[ for ][SHP10] -> [ for SHP10] 482
+[l][e] -> [le] 483
+[ ][t] -> [ t] 484
+[ing][_agent <tool_call> get_] -> [ing_agent <tool_call> get_] 485
+[_][statu] -> [_statu] 486
+[_statu][s <observation> ] -> [_status <observation> ] 487
+[LA][ ] -> [LA ] 488
+[LA ][P] -> [LA P] 489
+[LA P][ort] -> [LA Port] 490
+[a][ll] -> [all] 491
+[a][ ] -> [a ] 492
+[ is ][the ] -> [ is the ] 493
+[f][t] -> [ft] 494
+[ft][ ] -> [ft ] 495
+[v][er] -> [ver] 496
+[a][y] -> [ay] 497
+[)][ <action> The ] -> [) <action> The ] 498
+[)][.<end>\u000a<|im_start|> user\u000a] -> [).<end>\u000a<|im_start|> user\u000a] 499
+[ s][hip] -> [ ship] 500
+[g][o] -> [go] 501
+[5][0] -> [50] 502
+[T][r] -> [Tr] 503
+[Tr][ansit] -> [Transit] 504
+[Transit][ C] -> [Transit C] 505
+[ d][at] -> [ dat] 506
+[ dat][a] -> [ data] 507
+[ data][ from] -> [ data from] 508
+[supplier][ ] -> [supplier ] 509
+[p][er] -> [per] 510
+[per][f] -> [perf] 511
+[perf][or] -> [perfor] 512
+[perfor][m] -> [perform] 513
+[perform][an] -> [performan] 514
+[performan][c] -> [performanc] 515
+[performanc][e ] -> [performance ] 516
+[arehous][e ] -> [arehouse ] 517
+[s ][for ] -> [s for ] 518
+[s for ][route ] -> [s for route ] 519
+[to][ ship] -> [to ship] 520
+[in][it] -> [init] 521
+[init][i] -> [initi] 522
+[initi][at] -> [initiat] 523
+[stoc][k] -> [stock] 524
+[current][ ] -> [current ] 525
+[u][c] -> [uc] 526
+[of][ ] -> [of ] 527
+[proce][s] -> [proces] 528
+[proces][s ] -> [process ] 529
+[process ][a ] -> [process a ] 530
+[process a ][return] -> [process a return] 531
+[ ][u] -> [ u] 532
+[ u][n] -> [ un] 533
+[ un][it] -> [ unit] 534
+[ unit][s] -> [ units] 535
+[0% full][ (] -> [0% full (] 536
+[10][0] -> [100] 537
+[w][h] -> [wh] 538
+[wh][at] -> [what] 539
+[what][ is the ] -> [what is the ] 540
+[c][on] -> [con] 541
+[.][00] -> [.00] 542
+[a][m] -> [am] 543
+[o][w] -> [ow] 544
+[hipment][ SHP10] -> [hipment SHP10] 545
+[% on-tim][e] -> [% on-time] 546
+[trac][k ] -> [track ] 547
+[s ][on] -> [s on] 548
+[el][ay] -> [elay] 549
+[v][e] -> [ve] 550
+[b][el] -> [bel] 551
+[a][g] -> [ag] 552
+[ ][D] -> [ D] 553
+[of][ s] -> [of s] 554
+[NY][ ] -> [NY ] 555
+[NY ][H] -> [NY H] 556
+[NY H][u] -> [NY Hu] 557
+[NY Hu][b] -> [NY Hub] 558
+[tr][af] -> [traf] 559
+[traf][f] -> [traff] 560
+[traff][ic] -> [traffic] 561
+[ f][or] -> [ for] 562
+[hi][ca] -> [hica] 563
+[hica][go] -> [hicago] 564
+[hicago][ ] -> [hicago ] 565
+[hicago ][W] -> [hicago W] 566
+[all][as ] -> [allas ] 567
+[allas ][Transit C] -> [allas Transit C] 568
+[allas Transit C][ent] -> [allas Transit Cent] 569
+[allas Transit Cent][er] -> [allas Transit Center] 570
+[inventory][ for ] -> [inventory for ] 571
+[inv][o] -> [invo] 572
+[invo][ic] -> [invoic] 573
+[d][o] -> [do] 574
+[do][ w] -> [do w] 575
+[do w][e ] -> [do we ] 576
+[do we ][h] -> [do we h] 577
+[do we h][av] -> [do we hav] 578
+[do we hav][e ] -> [do we have ] 579
+[d][e] -> [de] 580
+[de][li] -> [deli] 581
+[deli][ver] -> [deliver] 582
+[l][a] -> [la] 583
+[w][e] -> [we] 584
+[?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants ][w] -> [?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants w] 585
+[?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants w][arehouse ] -> [?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse ] 586
+[?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse ][capacity] -> [?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity] 587
+[?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity][ <route> ] -> [?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity <route> ] 588
+[?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity <route> ][capacity] -> [?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity <route> capacity] 589
+[?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity <route> capacity][_agent <tool_call> check] -> [?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity <route> capacity_agent <tool_call> check] 590
+[?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity <route> capacity_agent <tool_call> check][_ca] -> [?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity <route> capacity_agent <tool_call> check_ca] 591
+[?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity <route> capacity_agent <tool_call> check_ca][pacity] -> [?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity <route> capacity_agent <tool_call> check_capacity] 592
+[?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity <route> capacity_agent <tool_call> check_capacity][ <observation> ] -> [?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants warehouse capacity <route> capacity_agent <tool_call> check_capacity <observation> ] 593
+[ation][ for SHP10] -> [ation for SHP10] 594
+[M][I] -> [MI] 595
+[MI][A] -> [MIA] 596
+[MIA][-] -> [MIA-] 597
+[MIA-][A] -> [MIA-A] 598
+[MIA-A][T] -> [MIA-AT] 599
+[MIA-AT][L] -> [MIA-ATL] 600
+[$][1] -> [$1] 601
+[2][00] -> [200] 602
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to ][extract] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract] 603
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract][ t] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract t] 604
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract t][ex] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract tex] 605
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract tex][t] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text] 606
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text][ from] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from] 607
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from][ d] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from d] 608
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from d][ocument <] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <] 609
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <][route> ] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ] 610
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ][oc] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> oc] 611
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> oc][r] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr] 612
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr][_agent <tool_call> ] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> ] 613
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> ][proce] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> proce] 614
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> proce][ss] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> process] 615
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> process][_] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> process_] 616
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> process_][d] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> process_d] 617
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> process_d][ocument <] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> process_document <] 618
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> process_document <][observation> ] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to extract text from document <route> ocr_agent <tool_call> process_document <observation> ] 619
+[ <action> The ][extract] -> [ <action> The extract] 620
+[ <action> The extract][ed] -> [ <action> The extracted] 621
+[ <action> The extracted][ data from] -> [ <action> The extracted data from] 622
+[ <action> The extracted data from][ ] -> [ <action> The extracted data from ] 623
+[ <action> The extracted data from ][the ] -> [ <action> The extracted data from the ] 624
+[at][h] -> [ath] 625
+[ath][er] -> [ather] 626
+[.<end>\u000a<|im_start|> user\u000a][what is the ] -> [.<end>\u000a<|im_start|> user\u000awhat is the ] 627
+[G][l] -> [Gl] 628
+[Gl][ob] -> [Glob] 629
+[Glob][al] -> [Global] 630
+[Global][P] -> [GlobalP] 631
+[GlobalP][ac] -> [GlobalPac] 632
+[GlobalPac][k] -> [GlobalPack] 633
+[LA][-] -> [LA-] 634
+[LA-][S] -> [LA-S] 635
+[LA-S][F] -> [LA-SF] 636
+[ ][of ] -> [ of ] 637
+[re][p] -> [rep] 638
+[rep][ort] -> [report] 639
+[in][ ] -> [in ] 640
+[ ][?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants ] -> [ ?<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants ] 641
+[freight][ cost ] -> [freight cost ] 642
+[freight cost ][estimat] -> [freight cost estimat] 643
+[freight cost estimat][ion] -> [freight cost estimation] 644
+[freight cost estimation][ <route> ] -> [freight cost estimation <route> ] 645
+[freight cost estimation <route> ][c] -> [freight cost estimation <route> c] 646
+[freight cost estimation <route> c][ost] -> [freight cost estimation <route> cost] 647
+[freight cost estimation <route> cost][_agent <tool_call> get_] -> [freight cost estimation <route> cost_agent <tool_call> get_] 648
+[freight cost estimation <route> cost_agent <tool_call> get_][freight] -> [freight cost estimation <route> cost_agent <tool_call> get_freight] 649
+[freight cost estimation <route> cost_agent <tool_call> get_freight][_] -> [freight cost estimation <route> cost_agent <tool_call> get_freight_] 650
+[freight cost estimation <route> cost_agent <tool_call> get_freight_][estimat] -> [freight cost estimation <route> cost_agent <tool_call> get_freight_estimat] 651
+[freight cost estimation <route> cost_agent <tool_call> get_freight_estimat][e] -> [freight cost estimation <route> cost_agent <tool_call> get_freight_estimate] 652
+[freight cost estimation <route> cost_agent <tool_call> get_freight_estimate][ <observation> ] -> [freight cost estimation <route> cost_agent <tool_call> get_freight_estimate <observation> ] 653
+[ <action> The ][estimat] -> [ <action> The estimat] 654
+[ <action> The estimat][ed] -> [ <action> The estimated] 655
+[ <action> The estimated][ f] -> [ <action> The estimated f] 656
+[ <action> The estimated f][reight] -> [ <action> The estimated freight] 657
+[ <action> The estimated freight][ cost ] -> [ <action> The estimated freight cost ] 658
+[ <action> The estimated freight cost ][to ship] -> [ <action> The estimated freight cost to ship] 659
+[ ][route ] -> [ route ] 660
+[an][y ] -> [any ] 661
+[4][50] -> [450] 662
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to ][process a return] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return] 663
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return][ <route> ] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> ] 664
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> ][return] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> return] 665
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> return][s] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns] 666
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns][_agent <tool_call> ] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> ] 667
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> ][initiat] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiat] 668
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiat][e] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate] 669
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate][_] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_] 670
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_][return] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return] 671
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return][ <observation> ] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> ] 672
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> ][return] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return] 673
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return][_a] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_a] 674
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_a][uth] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth] 675
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth][_] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_] 676
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_][generated] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated] 677
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated][ <action> ] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> ] 678
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> ][R] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> R] 679
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> R][eturn] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return] 680
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return][ ] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return ] 681
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return ][a] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return a] 682
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return a][uth] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return auth] 683
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return auth][or] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return author] 684
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return author][i] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return authori] 685
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return authori][z] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return authoriz] 686
+[<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return authoriz][ation for SHP10] -> [<|im_end|>\u000a<|im_start|> assistant\u000a<thought> user wants to process a return <route> returns_agent <tool_call> initiate_return <observation> return_auth_generated <action> Return authorization for SHP10] 687
+[ ][h] -> [ h] 688
+[supplier ][an] -> [supplier an] 689
+[supplier an][al] -> [supplier anal] 690
+[supplier anal][y] -> [supplier analy] 691
+[supplier analy][t] -> [supplier analyt] 692
+[supplier analyt][ic] -> [supplier analytic] 693
+[supplier analytic][s <route> ] -> [supplier analytics <route> ] 694
+[supplier analytics <route> ][supplier] -> [supplier analytics <route> supplier] 695
+[supplier analytics <route> supplier][_agent <tool_call> get_] -> [supplier analytics <route> supplier_agent <tool_call> get_] 696
+[supplier analytics <route> supplier_agent <tool_call> get_][supplier] -> [supplier analytics <route> supplier_agent <tool_call> get_supplier] 697
+[supplier analytics <route> supplier_agent <tool_call> get_supplier][_] -> [supplier analytics <route> supplier_agent <tool_call> get_supplier_] 698
+[supplier analytics <route> supplier_agent <tool_call> get_supplier_][metric] -> [supplier analytics <route> supplier_agent <tool_call> get_supplier_metric] 699
+[supplier analytics <route> supplier_agent <tool_call> get_supplier_metric][s <observation> ] -> [supplier analytics <route> supplier_agent <tool_call> get_supplier_metrics <observation> ] 700
+[performance ][metric] -> [performance metric] 701
+[performance metric][ for ] -> [performance metric for ] 702
+[ h][as ] -> [ has ] 703
+[ has ][b] -> [ has b] 704
+[ has b][e] -> [ has be] 705
+[ has be][en] -> [ has been] 706
+[ has been][ s] -> [ has been s] 707
+[ has been s][uc] -> [ has been suc] 708
+[ has been suc][c] -> [ has been succ] 709
+[ has been succ][e] -> [ has been succe] 710
+[ has been succe][ss] -> [ has been success] 711
+[ has been success][f] -> [ has been successf] 712
+[ has been successf][ull] -> [ has been successfull] 713
+[ has been successfull][y ] -> [ has been successfully ] 714
+[ has been successfully ][generated] -> [ has been successfully generated] 715
+[to][ c] -> [to c] 716
+[to c][hec] -> [to chec] 717
+[to chec][k ] -> [to check ] 718
+[to check ][stoc] -> [to check stoc] 719
+[to check stoc][k ] -> [to check stock ] 720
+[to check stock ][le] -> [to check stock le] 721
+[to check stock le][v] -> [to check stock lev] 722
+[to check stock lev][el] -> [to check stock level] 723
+[to check stock level][s <route> ] -> [to check stock levels <route> ] 724
+[to check stock levels <route> ][inventory] -> [to check stock levels <route> inventory] 725
+[to check stock levels <route> inventory][_agent <tool_call> check] -> [to check stock levels <route> inventory_agent <tool_call> check] 726
+[to check stock levels <route> inventory_agent <tool_call> check][_] -> [to check stock levels <route> inventory_agent <tool_call> check_] 727
+[to check stock levels <route> inventory_agent <tool_call> check_][stock] -> [to check stock levels <route> inventory_agent <tool_call> check_stock] 728
+[to check stock levels <route> inventory_agent <tool_call> check_stock][ <observation> ] -> [to check stock levels <route> inventory_agent <tool_call> check_stock <observation> ] 729
+[5][00] -> [500] 730
+[route ][con] -> [route con] 731
+[route con][d] -> [route cond] 732
+[route cond][it] -> [route condit] 733
+[route condit][ion] -> [route condition] 734
+[route condition][s <route> ] -> [route conditions <route> ] 735
+[route conditions <route> ][rout] -> [route conditions <route> rout] 736
+[route conditions <route> rout][ing_agent <tool_call> get_] -> [route conditions <route> routing_agent <tool_call> get_] 737
+[route conditions <route> routing_agent <tool_call> get_][route] -> [route conditions <route> routing_agent <tool_call> get_route] 738
+[route conditions <route> routing_agent <tool_call> get_route][_status <observation> ] -> [route conditions <route> routing_agent <tool_call> get_route_status <observation> ] 739
+[ <action> The ][current ] -> [ <action> The current ] 740
+[ <action> The current ][statu] -> [ <action> The current statu] 741
+[ <action> The current statu][s for route ] -> [ <action> The current status for route ] 742
+[H][I] -> [HI] 743
+[HI][-] -> [HI-] 744
+[HI-][D] -> [HI-D] 745
+[HI-D][A] -> [HI-DA] 746
+[HI-DA][L] -> [HI-DAL] 747
+[i][s ] -> [is ] 748
+[M][i] -> [Mi] 749
+[Mi][am] -> [Miam] 750
+[Miam][i] -> [Miami] 751
+[Miami][ D] -> [Miami D] 752
+[Miami D][oc] -> [Miami Doc] 753
+[Miami Doc][k] -> [Miami Dock] 754
+[c][i] -> [ci] 755
+[h][ow] -> [how] 756
+[af][et] -> [afet] 757
+[afet][y ] -> [afety ] 758
+[afety ][g] -> [afety g] 759
+[afety g][e] -> [afety ge] 760
+[afety ge][ar] -> [afety gear] 761
+[track ][a] -> [track a] 762
+[track a][ s] -> [track a s] 763
+[track a s][hipm] -> [track a shipm] 764
+[track a shipm][ent <] -> [track a shipment <] 765
+[track a shipment <][route> ] -> [track a shipment <route> ] 766
+[track a shipment <route> ][trac] -> [track a shipment <route> trac] 767
+[track a shipment <route> trac][k] -> [track a shipment <route> track] 768
+[track a shipment <route> track][ing_agent <tool_call> get_] -> [track a shipment <route> tracking_agent <tool_call> get_] 769
+[track a shipment <route> tracking_agent <tool_call> get_][s] -> [track a shipment <route> tracking_agent <tool_call> get_s] 770
+[track a shipment <route> tracking_agent <tool_call> get_s][hipment] -> [track a shipment <route> tracking_agent <tool_call> get_shipment] 771
+[track a shipment <route> tracking_agent <tool_call> get_shipment][_status <observation> ] -> [track a shipment <route> tracking_agent <tool_call> get_shipment_status <observation> ] 772
+[ <action> ][S] -> [ <action> S] 773
+[ <action> S][hipment SHP10] -> [ <action> Shipment SHP10] 774
+[ d][elay] -> [ delay] 775
+[ delay][s] -> [ delays] 776
+[e][av] -> [eav] 777
+[.<end>\u000a<|im_start|> user\u000a][do we have ] -> [.<end>\u000a<|im_start|> user\u000ado we have ] 778
+[pac][k] -> [pack] 779
+[pack][ag] -> [packag] 780
+[packag][ing] -> [packaging] 781
+[packaging][ t] -> [packaging t] 782
+[packaging t][a] -> [packaging ta] 783
+[packaging ta][p] -> [packaging tap] 784
+[packaging tap][e ] -> [packaging tape ] 785
+[NY][-] -> [NY-] 786
+[NY-][B] -> [NY-B] 787
+[NY-B][O] -> [NY-BO] 788
+[NY-BO][S] -> [NY-BOS] 789
+[D][allas Transit Center] -> [Dallas Transit Center] 790
+[2][0% full (] -> [20% full (] 791
+[20% full (][p] -> [20% full (p] 792
+[20% full (p][l] -> [20% full (pl] 793
+[20% full (pl][ent] -> [20% full (plent] 794
+[20% full (plent][y ] -> [20% full (plenty ] 795
+[20% full (plenty ][of s] -> [20% full (plenty of s] 796
+[20% full (plenty of s][pac] -> [20% full (plenty of spac] 797
+[20% full (plenty of spac][e] -> [20% full (plenty of space] 798
+[ for][k] -> [ fork] 799

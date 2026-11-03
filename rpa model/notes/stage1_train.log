@@ -1,0 +1,290 @@
+﻿python.exe : F:\model slm 100 k parameter\nanoGPT-master\nanoGPT-master\train.py:196: FutureWarning: 
+`torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+At line:1 char:367
++ ... PT-master"; & "F:\model slm 100 k parameter\rpa model\.venv\Scripts\p ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (F:\model slm 10...s...)` instead.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+F:\model slm 100 k parameter\rpa model\.venv\Lib\site-packages\torch\cuda\amp\grad_scaler.py:31: UserWarning: 
+torch.cuda.amp.GradScaler is enabled, but CUDA is not available.  Disabling.
+  super().__init__(
+Overriding config with config/train_shakespeare_char.py:
+# train a miniature character-level shakespeare model
+# good for debugging and playing on macbooks and such
+
+out_dir = 'out-shakespeare-char'
+eval_interval = 250 # keep frequent because we'll overfit
+eval_iters = 200
+log_interval = 10 # don't print too too often
+
+# we expect to overfit on this small dataset, so only save when val improves
+always_save_checkpoint = False
+
+wandb_log = False # override via command line if you like
+wandb_project = 'shakespeare-char'
+wandb_run_name = 'mini-gpt'
+
+dataset = 'shakespeare_char'
+gradient_accumulation_steps = 1
+batch_size = 64
+block_size = 256 # context of up to 256 previous characters
+
+# baby GPT model :)
+n_layer = 6
+n_head = 6
+n_embd = 384
+dropout = 0.2
+
+learning_rate = 1e-3 # with baby networks can afford to go a bit higher
+max_iters = 5000
+lr_decay_iters = 5000 # make equal to max_iters usually
+min_lr = 1e-4 # learning_rate / 10 usually
+beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
+
+warmup_iters = 100 # not super necessary potentially
+
+# on macbook also add
+# device = 'cpu'  # run on cpu only
+# compile = False # do not torch compile the model
+
+Overriding: device = cpu
+Overriding: compile = False
+Overriding: eval_iters = 20
+Overriding: log_interval = 10
+Overriding: block_size = 64
+Overriding: batch_size = 12
+Overriding: n_layer = 4
+Overriding: n_head = 4
+Overriding: n_embd = 128
+Overriding: max_iters = 2000
+Overriding: lr_decay_iters = 2000
+Overriding: dropout = 0.0
+Overriding: eval_interval = 250
+Overriding: out_dir = F:\model slm 100 k parameter\rpa model\training\out-shakespeare-char
+tokens per iteration will be: 768
+found vocab_size = 65 (inside data\shakespeare_char\meta.pkl)
+Initializing a new model from scratch
+number of parameters: 0.80M
+num decayed parameter tensors: 18, with 802,944 parameters
+num non-decayed parameter tensors: 9, with 1,152 parameters
+using fused AdamW: False
+step 0: train loss 4.1676, val loss 4.1649
+iter 0: loss 4.1828, time 545.35ms, mfu -100.00%
+iter 10: loss 3.7366, time 51.19ms, mfu 0.02%
+iter 20: loss 3.5233, time 43.40ms, mfu 0.03%
+iter 30: loss 3.3294, time 40.68ms, mfu 0.03%
+iter 40: loss 3.0920, time 40.81ms, mfu 0.03%
+iter 50: loss 2.9336, time 39.12ms, mfu 0.03%
+iter 60: loss 2.7890, time 39.52ms, mfu 0.03%
+iter 70: loss 2.7069, time 36.86ms, mfu 0.03%
+iter 80: loss 2.6128, time 39.22ms, mfu 0.03%
+iter 90: loss 2.6146, time 38.12ms, mfu 0.03%
+iter 100: loss 2.6635, time 42.68ms, mfu 0.03%
+iter 110: loss 2.5880, time 42.19ms, mfu 0.03%
+iter 120: loss 2.6186, time 42.26ms, mfu 0.03%
+iter 130: loss 2.5422, time 41.86ms, mfu 0.03%
+iter 140: loss 2.4921, time 38.72ms, mfu 0.03%
+iter 150: loss 2.5425, time 38.94ms, mfu 0.03%
+iter 160: loss 2.5243, time 37.68ms, mfu 0.03%
+iter 170: loss 2.4741, time 39.32ms, mfu 0.03%
+iter 180: loss 2.4928, time 38.50ms, mfu 0.03%
+iter 190: loss 2.5444, time 40.70ms, mfu 0.03%
+iter 200: loss 2.5039, time 40.59ms, mfu 0.03%
+iter 210: loss 2.4330, time 38.98ms, mfu 0.03%
+iter 220: loss 2.4903, time 38.61ms, mfu 0.03%
+iter 230: loss 2.4648, time 39.16ms, mfu 0.03%
+iter 240: loss 2.5144, time 43.05ms, mfu 0.03%
+step 250: train loss 2.4293, val loss 2.4447
+saving checkpoint to F:\model slm 100 k parameter\rpa model\training\out-shakespeare-char
+iter 250: loss 2.4904, time 657.78ms, mfu 0.03%
+iter 260: loss 2.4461, time 43.27ms, mfu 0.03%
+iter 270: loss 2.4044, time 40.97ms, mfu 0.03%
+iter 280: loss 2.3788, time 41.25ms, mfu 0.03%
+iter 290: loss 2.3959, time 38.26ms, mfu 0.03%
+iter 300: loss 2.3350, time 40.11ms, mfu 0.03%
+iter 310: loss 2.3489, time 46.35ms, mfu 0.03%
+iter 320: loss 2.4062, time 52.98ms, mfu 0.03%
+iter 330: loss 2.3390, time 41.84ms, mfu 0.03%
+iter 340: loss 2.3313, time 48.26ms, mfu 0.03%
+iter 350: loss 2.3375, time 43.57ms, mfu 0.03%
+iter 360: loss 2.4137, time 48.75ms, mfu 0.03%
+iter 370: loss 2.4959, time 54.96ms, mfu 0.03%
+iter 380: loss 2.3445, time 51.30ms, mfu 0.03%
+iter 390: loss 2.3626, time 60.68ms, mfu 0.03%
+iter 400: loss 2.3405, time 54.91ms, mfu 0.03%
+iter 410: loss 2.2802, time 56.65ms, mfu 0.03%
+iter 420: loss 2.3759, time 53.64ms, mfu 0.03%
+iter 430: loss 2.4103, time 49.67ms, mfu 0.03%
+iter 440: loss 2.3480, time 54.17ms, mfu 0.03%
+iter 450: loss 2.3362, time 78.69ms, mfu 0.02%
+iter 460: loss 2.3215, time 52.60ms, mfu 0.02%
+iter 470: loss 2.2820, time 57.75ms, mfu 0.02%
+iter 480: loss 2.2210, time 50.97ms, mfu 0.02%
+iter 490: loss 2.3192, time 52.14ms, mfu 0.02%
+step 500: train loss 2.2732, val loss 2.3141
+saving checkpoint to F:\model slm 100 k parameter\rpa model\training\out-shakespeare-char
+iter 500: loss 2.3827, time 884.31ms, mfu 0.02%
+iter 510: loss 2.2102, time 57.81ms, mfu 0.02%
+iter 520: loss 2.3269, time 51.80ms, mfu 0.02%
+iter 530: loss 2.2947, time 240.62ms, mfu 0.02%
+iter 540: loss 2.2645, time 47.52ms, mfu 0.02%
+iter 550: loss 2.2085, time 49.74ms, mfu 0.02%
+iter 560: loss 2.2281, time 61.14ms, mfu 0.02%
+iter 570: loss 2.1146, time 42.72ms, mfu 0.02%
+iter 580: loss 2.2228, time 58.94ms, mfu 0.02%
+iter 590: loss 2.2038, time 56.55ms, mfu 0.02%
+iter 600: loss 2.1762, time 69.88ms, mfu 0.02%
+iter 610: loss 2.2001, time 69.60ms, mfu 0.02%
+iter 620: loss 2.1835, time 66.45ms, mfu 0.02%
+iter 630: loss 2.1622, time 46.50ms, mfu 0.02%
+iter 640: loss 2.1233, time 49.11ms, mfu 0.02%
+iter 650: loss 2.1471, time 43.86ms, mfu 0.02%
+iter 660: loss 2.2185, time 30.27ms, mfu 0.02%
+iter 670: loss 2.1319, time 48.92ms, mfu 0.03%
+iter 680: loss 2.1610, time 48.94ms, mfu 0.03%
+iter 690: loss 2.0918, time 47.00ms, mfu 0.03%
+iter 700: loss 2.0947, time 46.30ms, mfu 0.03%
+iter 710: loss 2.1849, time 45.01ms, mfu 0.03%
+iter 720: loss 2.1115, time 48.82ms, mfu 0.03%
+iter 730: loss 2.1955, time 32.00ms, mfu 0.03%
+iter 740: loss 2.1313, time 40.51ms, mfu 0.03%
+step 750: train loss 2.1338, val loss 2.1905
+saving checkpoint to F:\model slm 100 k parameter\rpa model\training\out-shakespeare-char
+iter 750: loss 2.0768, time 570.87ms, mfu 0.03%
+iter 760: loss 2.1775, time 50.67ms, mfu 0.03%
+iter 770: loss 2.1071, time 44.31ms, mfu 0.03%
+iter 780: loss 2.0800, time 45.93ms, mfu 0.03%
+iter 790: loss 2.0264, time 55.43ms, mfu 0.03%
+iter 800: loss 2.2092, time 48.38ms, mfu 0.03%
+iter 810: loss 2.0301, time 41.02ms, mfu 0.03%
+iter 820: loss 2.0808, time 37.94ms, mfu 0.03%
+iter 830: loss 2.0330, time 50.13ms, mfu 0.03%
+iter 840: loss 2.0744, time 46.20ms, mfu 0.03%
+iter 850: loss 2.0917, time 51.07ms, mfu 0.03%
+iter 860: loss 2.1284, time 43.30ms, mfu 0.03%
+iter 870: loss 2.0902, time 54.49ms, mfu 0.03%
+iter 880: loss 2.0552, time 53.30ms, mfu 0.03%
+iter 890: loss 1.9706, time 47.08ms, mfu 0.03%
+iter 900: loss 2.0011, time 55.09ms, mfu 0.03%
+iter 910: loss 1.9365, time 48.44ms, mfu 0.03%
+iter 920: loss 2.0709, time 57.45ms, mfu 0.03%
+iter 930: loss 2.0989, time 51.39ms, mfu 0.03%
+iter 940: loss 1.9304, time 96.05ms, mfu 0.02%
+iter 950: loss 2.0163, time 52.84ms, mfu 0.02%
+iter 960: loss 2.0722, time 45.24ms, mfu 0.02%
+iter 970: loss 1.9988, time 48.35ms, mfu 0.02%
+iter 980: loss 2.0707, time 41.85ms, mfu 0.03%
+iter 990: loss 2.0501, time 50.04ms, mfu 0.03%
+step 1000: train loss 1.9714, val loss 2.0528
+saving checkpoint to F:\model slm 100 k parameter\rpa model\training\out-shakespeare-char
+iter 1000: loss 2.0455, time 692.89ms, mfu 0.02%
+iter 1010: loss 2.0443, time 61.33ms, mfu 0.02%
+iter 1020: loss 1.9418, time 55.12ms, mfu 0.02%
+iter 1030: loss 2.0274, time 79.38ms, mfu 0.02%
+iter 1040: loss 1.9650, time 53.32ms, mfu 0.02%
+iter 1050: loss 1.9098, time 56.57ms, mfu 0.02%
+iter 1060: loss 1.9377, time 48.86ms, mfu 0.02%
+iter 1070: loss 1.9572, time 43.64ms, mfu 0.02%
+iter 1080: loss 2.1023, time 49.02ms, mfu 0.02%
+iter 1090: loss 1.9512, time 49.85ms, mfu 0.02%
+iter 1100: loss 1.7907, time 48.54ms, mfu 0.02%
+iter 1110: loss 1.9410, time 45.70ms, mfu 0.02%
+iter 1120: loss 1.9305, time 42.37ms, mfu 0.02%
+iter 1130: loss 1.8721, time 46.01ms, mfu 0.03%
+iter 1140: loss 1.9690, time 47.84ms, mfu 0.03%
+iter 1150: loss 1.9558, time 48.77ms, mfu 0.03%
+iter 1160: loss 2.0075, time 47.80ms, mfu 0.03%
+iter 1170: loss 1.9272, time 46.31ms, mfu 0.03%
+iter 1180: loss 2.0595, time 49.01ms, mfu 0.03%
+iter 1190: loss 1.9560, time 47.73ms, mfu 0.03%
+iter 1200: loss 1.9533, time 50.49ms, mfu 0.03%
+iter 1210: loss 1.9181, time 51.77ms, mfu 0.03%
+iter 1220: loss 1.8898, time 50.20ms, mfu 0.03%
+iter 1230: loss 1.9035, time 51.53ms, mfu 0.03%
+iter 1240: loss 1.8668, time 44.83ms, mfu 0.03%
+step 1250: train loss 1.8756, val loss 2.0089
+saving checkpoint to F:\model slm 100 k parameter\rpa model\training\out-shakespeare-char
+iter 1250: loss 1.8472, time 661.70ms, mfu 0.02%
+iter 1260: loss 1.8822, time 47.47ms, mfu 0.02%
+iter 1270: loss 1.9168, time 53.57ms, mfu 0.02%
+iter 1280: loss 1.7214, time 47.27ms, mfu 0.02%
+iter 1290: loss 1.9213, time 44.81ms, mfu 0.02%
+iter 1300: loss 1.9599, time 46.03ms, mfu 0.02%
+iter 1310: loss 1.8802, time 44.97ms, mfu 0.03%
+iter 1320: loss 1.9631, time 45.94ms, mfu 0.03%
+iter 1330: loss 1.9832, time 47.22ms, mfu 0.03%
+iter 1340: loss 1.9444, time 43.38ms, mfu 0.03%
+iter 1350: loss 1.8367, time 44.95ms, mfu 0.03%
+iter 1360: loss 1.8941, time 46.35ms, mfu 0.03%
+iter 1370: loss 1.8958, time 44.52ms, mfu 0.03%
+iter 1380: loss 1.7734, time 52.99ms, mfu 0.03%
+iter 1390: loss 1.9301, time 47.79ms, mfu 0.03%
+iter 1400: loss 1.8251, time 48.00ms, mfu 0.03%
+iter 1410: loss 1.8992, time 44.83ms, mfu 0.03%
+iter 1420: loss 1.8308, time 49.32ms, mfu 0.03%
+iter 1430: loss 1.8750, time 49.97ms, mfu 0.03%
+iter 1440: loss 1.7765, time 48.13ms, mfu 0.03%
+iter 1450: loss 1.8467, time 50.29ms, mfu 0.03%
+iter 1460: loss 1.8346, time 48.55ms, mfu 0.03%
+iter 1470: loss 1.8773, time 46.57ms, mfu 0.03%
+iter 1480: loss 1.8389, time 45.49ms, mfu 0.03%
+iter 1490: loss 1.8105, time 52.49ms, mfu 0.03%
+step 1500: train loss 1.8557, val loss 1.9225
+saving checkpoint to F:\model slm 100 k parameter\rpa model\training\out-shakespeare-char
+iter 1500: loss 1.8624, time 659.86ms, mfu 0.02%
+iter 1510: loss 1.7505, time 52.11ms, mfu 0.02%
+iter 1520: loss 1.8912, time 51.84ms, mfu 0.02%
+iter 1530: loss 1.8465, time 47.43ms, mfu 0.02%
+iter 1540: loss 1.7848, time 50.12ms, mfu 0.02%
+iter 1550: loss 1.8736, time 49.32ms, mfu 0.02%
+iter 1560: loss 1.8491, time 44.35ms, mfu 0.02%
+iter 1570: loss 1.8325, time 47.97ms, mfu 0.03%
+iter 1580: loss 1.7281, time 47.65ms, mfu 0.03%
+iter 1590: loss 1.7680, time 42.53ms, mfu 0.03%
+iter 1600: loss 1.7808, time 47.65ms, mfu 0.03%
+iter 1610: loss 1.8423, time 38.21ms, mfu 0.03%
+iter 1620: loss 1.8048, time 48.65ms, mfu 0.03%
+iter 1630: loss 1.7679, time 46.14ms, mfu 0.03%
+iter 1640: loss 1.8338, time 48.34ms, mfu 0.03%
+iter 1650: loss 1.8783, time 50.15ms, mfu 0.03%
+iter 1660: loss 1.7460, time 48.12ms, mfu 0.03%
+iter 1670: loss 1.8474, time 49.48ms, mfu 0.03%
+iter 1680: loss 1.8388, time 46.95ms, mfu 0.03%
+iter 1690: loss 1.8558, time 46.41ms, mfu 0.03%
+iter 1700: loss 1.7163, time 45.69ms, mfu 0.03%
+iter 1710: loss 1.8155, time 45.57ms, mfu 0.03%
+iter 1720: loss 1.8219, time 44.55ms, mfu 0.03%
+iter 1730: loss 1.8010, time 45.39ms, mfu 0.03%
+iter 1740: loss 1.7515, time 46.21ms, mfu 0.03%
+step 1750: train loss 1.7790, val loss 1.8921
+saving checkpoint to F:\model slm 100 k parameter\rpa model\training\out-shakespeare-char
+iter 1750: loss 1.8041, time 640.02ms, mfu 0.02%
+iter 1760: loss 1.6994, time 46.95ms, mfu 0.02%
+iter 1770: loss 1.6505, time 47.04ms, mfu 0.03%
+iter 1780: loss 1.7315, time 49.87ms, mfu 0.03%
+iter 1790: loss 1.7741, time 47.76ms, mfu 0.03%
+iter 1800: loss 1.8415, time 46.42ms, mfu 0.03%
+iter 1810: loss 1.8603, time 49.21ms, mfu 0.03%
+iter 1820: loss 1.6907, time 47.97ms, mfu 0.03%
+iter 1830: loss 1.7614, time 52.54ms, mfu 0.03%
+iter 1840: loss 1.8017, time 52.01ms, mfu 0.03%
+iter 1850: loss 1.7283, time 50.39ms, mfu 0.03%
+iter 1860: loss 1.6949, time 48.13ms, mfu 0.03%
+iter 1870: loss 1.6711, time 53.18ms, mfu 0.03%
+iter 1880: loss 1.7548, time 112.62ms, mfu 0.02%
+iter 1890: loss 1.6987, time 49.84ms, mfu 0.02%
+iter 1900: loss 1.6849, time 46.64ms, mfu 0.02%
+iter 1910: loss 1.6221, time 48.80ms, mfu 0.02%
+iter 1920: loss 1.7789, time 47.70ms, mfu 0.02%
+iter 1930: loss 1.8036, time 46.44ms, mfu 0.03%
+iter 1940: loss 1.7062, time 46.44ms, mfu 0.03%
+iter 1950: loss 1.7474, time 46.84ms, mfu 0.03%
+iter 1960: loss 1.7511, time 43.50ms, mfu 0.03%
+iter 1970: loss 1.8327, time 48.12ms, mfu 0.03%
+iter 1980: loss 1.7613, time 41.38ms, mfu 0.03%
+iter 1990: loss 1.7025, time 49.82ms, mfu 0.03%
+step 2000: train loss 1.7648, val loss 1.8857
+saving checkpoint to F:\model slm 100 k parameter\rpa model\training\out-shakespeare-char
+iter 2000: loss 1.6958, time 673.97ms, mfu 0.02%

@@ -1,0 +1,1000 @@
+[\u0000] 0
+[\u0001] 1
+[\u0002] 2
+[\u0003] 3
+[\u0004] 4
+[\u0005] 5
+[\u0006] 6
+[\u0007] 7
+[\u0008] 8
+[\u0009] 9
+[\u000a] 10
+[\u000b] 11
+[\u000c] 12
+[\u000d] 13
+[\u000e] 14
+[\u000f] 15
+[\u0010] 16
+[\u0011] 17
+[\u0012] 18
+[\u0013] 19
+[\u0014] 20
+[\u0015] 21
+[\u0016] 22
+[\u0017] 23
+[\u0018] 24
+[\u0019] 25
+[\u001a] 26
+[\u001b] 27
+[\u001c] 28
+[\u001d] 29
+[\u001e] 30
+[\u001f] 31
+[ ] 32
+[!] 33
+["] 34
+[#] 35
+[$] 36
+[%] 37
+[&] 38
+['] 39
+[(] 40
+[)] 41
+[*] 42
+[+] 43
+[,] 44
+[-] 45
+[.] 46
+[/] 47
+[0] 48
+[1] 49
+[2] 50
+[3] 51
+[4] 52
+[5] 53
+[6] 54
+[7] 55
+[8] 56
+[9] 57
+[:] 58
+[;] 59
+[<] 60
+[=] 61
+[>] 62
+[?] 63
+[@] 64
+[A] 65
+[B] 66
+[C] 67
+[D] 68
+[E] 69
+[F] 70
+[G] 71
+[H] 72
+[I] 73
+[J] 74
+[K] 75
+[L] 76
+[M] 77
+[N] 78
+[O] 79
+[P] 80
+[Q] 81
+[R] 82
+[S] 83
+[T] 84
+[U] 85
+[V] 86
+[W] 87
+[X] 88
+[Y] 89
+[Z] 90
+[[] 91
+[\] 92
+[]] 93
+[^] 94
+[_] 95
+[`] 96
+[a] 97
+[b] 98
+[c] 99
+[d] 100
+[e] 101
+[f] 102
+[g] 103
+[h] 104
+[i] 105
+[j] 106
+[k] 107
+[l] 108
+[m] 109
+[n] 110
+[o] 111
+[p] 112
+[q] 113
+[r] 114
+[s] 115
+[t] 116
+[u] 117
+[v] 118
+[w] 119
+[x] 120
+[y] 121
+[z] 122
+[{] 123
+[|] 124
+[}] 125
+[~] 126
+[\u007f] 127
+[�] 128
+[�] 129
+[�] 130
+[�] 131
+[�] 132
+[�] 133
+[�] 134
+[�] 135
+[�] 136
+[�] 137
+[�] 138
+[�] 139
+[�] 140
+[�] 141
+[�] 142
+[�] 143
+[�] 144
+[�] 145
+[�] 146
+[�] 147
+[�] 148
+[�] 149
+[�] 150
+[�] 151
+[�] 152
+[�] 153
+[�] 154
+[�] 155
+[�] 156
+[�] 157
+[�] 158
+[�] 159
+[�] 160
+[�] 161
+[�] 162
+[�] 163
+[�] 164
+[�] 165
+[�] 166
+[�] 167
+[�] 168
+[�] 169
+[�] 170
+[�] 171
+[�] 172
+[�] 173
+[�] 174
+[�] 175
+[�] 176
+[�] 177
+[�] 178
+[�] 179
+[�] 180
+[�] 181
+[�] 182
+[�] 183
+[�] 184
+[�] 185
+[�] 186
+[�] 187
+[�] 188
+[�] 189
+[�] 190
+[�] 191
+[�] 192
+[�] 193
+[�] 194
+[�] 195
+[�] 196
+[�] 197
+[�] 198
+[�] 199
+[�] 200
+[�] 201
+[�] 202
+[�] 203
+[�] 204
+[�] 205
+[�] 206
+[�] 207
+[�] 208
+[�] 209
+[�] 210
+[�] 211
+[�] 212
+[�] 213
+[�] 214
+[�] 215
+[�] 216
+[�] 217
+[�] 218
+[�] 219
+[�] 220
+[�] 221
+[�] 222
+[�] 223
+[�] 224
+[�] 225
+[�] 226
+[�] 227
+[�] 228
+[�] 229
+[�] 230
+[�] 231
+[�] 232
+[�] 233
+[�] 234
+[�] 235
+[�] 236
+[�] 237
+[�] 238
+[�] 239
+[�] 240
+[�] 241
+[�] 242
+[�] 243
+[�] 244
+[�] 245
+[�] 246
+[�] 247
+[�] 248
+[�] 249
+[�] 250
+[�] 251
+[�] 252
+[�] 253
+[�] 254
+[�] 255
+[n][t] -> [nt] 256
+[ ][ ] -> [  ] 257
+[e][r] -> [er] 258
+[s][t] -> [st] 259
+[e][nt] -> [ent] 260
+[u][s] -> [us] 261
+[a][t] -> [at] 262
+[ ][c] -> [ c] 263
+[o][r] -> [or] 264
+[ ][\u000a] -> [ \u000a] 265
+[ ][t] -> [ t] 266
+[a][nt] -> [ant] 267
+[ ][i] -> [ i] 268
+[ ][us] -> [ us] 269
+[ us][er] -> [ user] 270
+[ ][a] -> [ a] 271
+[c][k] -> [ck] 272
+[ ][f] -> [ f] 273
+[h][e] -> [he] 274
+[ ][S] -> [ S] 275
+[ ][w] -> [ w] 276
+[r][e] -> [re] 277
+[ ][s] -> [ s] 278
+[s][s] -> [ss] 279
+[r][o] -> [ro] 280
+[i][t] -> [it] 281
+[h][i] -> [hi] 282
+[o][n] -> [on] 283
+[u][r] -> [ur] 284
+[ S][H] -> [ SH] 285
+[ SH][P] -> [ SHP] 286
+[a][g] -> [ag] 287
+[r][a] -> [ra] 288
+[ i][s] -> [ is] 289
+[u][t] -> [ut] 290
+[ a][ss] -> [ ass] 291
+[ ass][i] -> [ assi] 292
+[ assi][st] -> [ assist] 293
+[ assist][ant] -> [ assistant] 294
+[ f][or] -> [ for] 295
+[m][e] -> [me] 296
+[hi][p] -> [hip] 297
+[p][a] -> [pa] 298
+[_][ag] -> [_ag] 299
+[_ag][ent] -> [_agent] 300
+[e][t] -> [et] 301
+[e][d] -> [ed] 302
+[m][ent] -> [ment] 303
+[ ][T] -> [ T] 304
+[l][l] -> [ll] 305
+[e][l] -> [el] 306
+[ t][o] -> [ to] 307
+[ w][ant] -> [ want] 308
+[ want][s] -> [ wants] 309
+[ ][d] -> [ d] 310
+[ro][ut] -> [rout] 311
+[i][n] -> [in] 312
+[ i][n] -> [ in] 313
+[ ][g] -> [ g] 314
+[hip][ment] -> [hipment] 315
+[ T][he] -> [ The] 316
+[c][e] -> [ce] 317
+[a][r] -> [ar] 318
+[0][0] -> [00] 319
+[ ][rout] -> [ rout] 320
+[ ][C] -> [ C] 321
+[ ][D] -> [ D] 322
+[o][ck] -> [ock] 323
+[ ][o] -> [ o] 324
+[h][o] -> [ho] 325
+[ ][on] -> [ on] 326
+[ c][ur] -> [ cur] 327
+[ cur][r] -> [ curr] 328
+[ curr][ent] -> [ current] 329
+[g][h] -> [gh] 330
+[he][ck] -> [heck] 331
+[ t][ra] -> [ tra] 332
+[or][y] -> [ory] 333
+[ ][re] -> [ re] 334
+[ rout][e] -> [ route] 335
+[l][i] -> [li] 336
+[e][n] -> [en] 337
+[in][g] -> [ing] 338
+[ur][n] -> [urn] 339
+[ ][e] -> [ e] 340
+[ ][at] -> [ at] 341
+[l][y] -> [ly] 342
+[i][gh] -> [igh] 343
+[igh][t] -> [ight] 344
+[a][pa] -> [apa] 345
+[apa][c] -> [apac] 346
+[apac][it] -> [apacit] 347
+[apacit][y] -> [apacity] 348
+[ g][et] -> [ get] 349
+[ c][o] -> [ co] 350
+[ ][L] -> [ L] 351
+[ c][heck] -> [ check] 352
+[ ][|] -> [ |] 353
+[ ][me] -> [ me] 354
+[i][c] -> [ic] 355
+[ ][st] -> [ st] 356
+[a][re] -> [are] 357
+[i][m] -> [im] 358
+[st][im] -> [stim] 359
+[stim][at] -> [stimat] 360
+[re][ight] -> [reight] 361
+[ co][st] -> [ cost] 362
+[at][us] -> [atus] 363
+[li][er] -> [lier] 364
+[ ][(] -> [ (] 365
+[ in][v] -> [ inv] 366
+[t][urn] -> [turn] 367
+[i][on] -> [ion] 368
+[N][Y] -> [NY] 369
+[v][er] -> [ver] 370
+[l][e] -> [le] 371
+[ d][el] -> [ del] 372
+[ current][ly] -> [ currently] 373
+[ o][f] -> [ of] 374
+[ t][he] -> [ the] 375
+[_][st] -> [_st] 376
+[ s][hipment] -> [ shipment] 377
+[are][ho] -> [areho] 378
+[areho][us] -> [arehous] 379
+[arehous][e] -> [arehouse] 380
+[a][s] -> [as] 381
+[ ][b] -> [ b] 382
+[ c][apacity] -> [ capacity] 383
+[a][n] -> [an] 384
+[u][p] -> [up] 385
+[h][at] -> [hat] 386
+[u][ll] -> [ull] 387
+[i][me] -> [ime] 388
+[a][y] -> [ay] 389
+[ inv][ent] -> [ invent] 390
+[ invent][ory] -> [ inventory] 391
+[ re][turn] -> [ return] 392
+[up][p] -> [upp] 393
+[upp][lier] -> [upplier] 394
+[ ][p] -> [ p] 395
+[v][e] -> [ve] 396
+[ L][A] -> [ LA] 397
+[ ][pa] -> [ pa] 398
+[n][s] -> [ns] 399
+[ns][it] -> [nsit] 400
+[ ][$] -> [ $] 401
+[ f][reight] -> [ freight] 402
+[ ][A] -> [ A] 403
+[e][at] -> [eat] 404
+[ ][M] -> [ M] 405
+[o][t] -> [ot] 406
+[ a][n] -> [ an] 407
+[1][00] -> [100] 408
+[ ][NY] -> [ NY] 409
+[T][L] -> [TL] 410
+[ tra][ck] -> [ track] 411
+[or][t] -> [ort] 412
+[-][D] -> [-D] 413
+[i][a] -> [ia] 414
+[a][ll] -> [all] 415
+[t][s] -> [ts] 416
+[ w][arehouse] -> [ warehouse] 417
+[_st][atus] -> [_status] 418
+[ s][hip] -> [ ship] 419
+[h][er] -> [her] 420
+[ f][ull] -> [ full] 421
+[ce][ss] -> [cess] 422
+[ e][stimat] -> [ estimat] 423
+[ ][H] -> [ H] 424
+[_][s] -> [_s] 425
+[-][t] -> [-t] 426
+[-t][ime] -> [-time] 427
+[ro][m] -> [rom] 428
+[ f][rom] -> [ from] 429
+[ra][nsit] -> [ransit] 430
+[ c][on] -> [ con] 431
+[f][t] -> [ft] 432
+[)][.] -> [).] 433
+[ ][h] -> [ h] 434
+[u][n] -> [un] 435
+[ ][I] -> [ I] 436
+[c][t] -> [ct] 437
+[ del][ay] -> [ delay] 438
+[ ][un] -> [ un] 439
+[ un][it] -> [ unit] 440
+[ unit][s] -> [ units] 441
+[ me][m] -> [ mem] 442
+[ mem][ory] -> [ memory] 443
+[at][e] -> [ate] 444
+[ del][i] -> [ deli] 445
+[ deli][ver] -> [ deliver] 446
+[ ][n] -> [ n] 447
+[e][stimat] -> [estimat] 448
+[estimat][e] -> [estimate] 449
+[ ][l] -> [ l] 450
+[d][o] -> [do] 451
+[ tra][f] -> [ traf] 452
+[ traf][f] -> [ traff] 453
+[ traff][ic] -> [ traffic] 454
+[2][0] -> [20] 455
+[ ][m] -> [ m] 456
+[er][at] -> [erat] 457
+[ s][upplier] -> [ supplier] 458
+[ic][s] -> [ics] 459
+[t][r] -> [tr] 460
+[ ][Y] -> [ Y] 461
+[ut][h] -> [uth] 462
+[en][erat] -> [enerat] 463
+[enerat][ed] -> [enerated] 464
+[u][c] -> [uc] 465
+[x][t] -> [xt] 466
+[ st][ock] -> [ stock] 467
+[ ][le] -> [ le] 468
+[ ][he] -> [ he] 469
+[ st][atus] -> [ status] 470
+[at][ion] -> [ation] 471
+[w][hat] -> [what] 472
+[y][o] -> [yo] 473
+[ ][P] -> [ P] 474
+[ P][ort] -> [ Port] 475
+[a][f] -> [af] 476
+[ ][yo] -> [ yo] 477
+[ S][eat] -> [ Seat] 478
+[ Seat][t] -> [ Seatt] 479
+[ Seatt][le] -> [ Seattle] 480
+[ D][e] -> [ De] 481
+[ De][p] -> [ Dep] 482
+[ Dep][ot] -> [ Depot] 483
+[5][0] -> [50] 484
+[m][s] -> [ms] 485
+[ D][en] -> [ Den] 486
+[ Den][ver] -> [ Denver] 487
+[ Y][ar] -> [ Yar] 488
+[ Yar][d] -> [ Yard] 489
+[ M][ia] -> [ Mia] 490
+[ Mia][m] -> [ Miam] 491
+[ Miam][i] -> [ Miami] 492
+[ D][ock] -> [ Dock] 493
+[p][e] -> [pe] 494
+[ c][u] -> [ cu] 495
+[ cu][st] -> [ cust] 496
+[ cust][o] -> [ custo] 497
+[ A][t] -> [ At] 498
+[ At][l] -> [ Atl] 499
+[ Atl][ant] -> [ Atlant] 500
+[ Atlant][a] -> [ Atlanta] 501
+[ C][ro] -> [ Cro] 502
+[ Cro][ss] -> [ Cross] 503
+[ Cross][d] -> [ Crossd] 504
+[ Crossd][ock] -> [ Crossdock] 505
+[ro][cess] -> [rocess] 506
+[c][an] -> [can] 507
+[ o][ut] -> [ out] 508
+[o][w] -> [ow] 509
+[ D][all] -> [ Dall] 510
+[ Dall][as] -> [ Dallas] 511
+[ T][ransit] -> [ Transit] 512
+[ C][ent] -> [ Cent] 513
+[ Cent][er] -> [ Center] 514
+[-][S] -> [-S] 515
+[-S][F] -> [-SF] 516
+[ S][E] -> [ SE] 517
+[ SE][A] -> [ SEA] 518
+[-D][E] -> [-DE] 519
+[-DE][N] -> [-DEN] 520
+[ t][hat] -> [ that] 521
+[ s][pa] -> [ spa] 522
+[ spa][ce] -> [ space] 523
+[ H][u] -> [ Hu] 524
+[ Hu][b] -> [ Hub] 525
+[ ][=] -> [ =] 526
+[ track][ing] -> [ tracking] 527
+[_s][hipment] -> [_shipment] 528
+[ S][hipment] -> [ Shipment] 529
+[ho][w] -> [how] 530
+[xt][ra] -> [xtra] 531
+[xtra][ct] -> [xtract] 532
+[ A][TL] -> [ ATL] 533
+[-][NY] -> [-NY] 534
+[hi][c] -> [hic] 535
+[5][00] -> [500] 536
+[ p][er] -> [ per] 537
+[ per][f] -> [ perf] 538
+[ perf][or] -> [ perfor] 539
+[ perfor][m] -> [ perform] 540
+[ perform][an] -> [ performan] 541
+[ performan][ce] -> [ performance] 542
+[ custo][ms] -> [ customs] 543
+[ w][eat] -> [ weat] 544
+[ weat][her] -> [ weather] 545
+[ w][as] -> [ was] 546
+[_][f] -> [_f] 547
+[_f][reight] -> [_freight] 548
+[_][estimate] -> [_estimate] 549
+[ estimat][ed] -> [ estimated] 550
+[_st][ock] -> [_stock] 551
+[a][v] -> [av] 552
+[av][y] -> [avy] 553
+[a][l] -> [al] 554
+[ M][I] -> [ MI] 555
+[ MI][A] -> [ MIA] 556
+[-][A] -> [-A] 557
+[-A][TL] -> [-ATL] 558
+[_][a] -> [_a] 559
+[ C][hic] -> [ Chic] 560
+[ Chic][ag] -> [ Chicag] 561
+[ Chicag][o] -> [ Chicago] 562
+[ ][W] -> [ W] 563
+[ W][arehouse] -> [ Warehouse] 564
+[-][B] -> [-B] 565
+[-B][O] -> [-BO] 566
+[-BO][S] -> [-BOS] 567
+[a][ve] -> [ave] 568
+[ deliver][y] -> [ delivery] 569
+[ an][y] -> [ any] 570
+[ra][ck] -> [rack] 571
+[ l][a] -> [ la] 572
+[ w][e] -> [ we] 573
+[ p][rocess] -> [ process] 574
+[ C][H] -> [ CH] 575
+[ CH][I] -> [ CHI] 576
+[-D][A] -> [-DA] 577
+[-DA][L] -> [-DAL] 578
+[it][i] -> [iti] 579
+[iti][ate] -> [itiate] 580
+[8][0] -> [80] 581
+[_][c] -> [_c] 582
+[_c][apacity] -> [_capacity] 583
+[ h][ave] -> [ have] 584
+[ion][s] -> [ions] 585
+[o][d] -> [od] 586
+[ ][G] -> [ G] 587
+[ delay][s] -> [ delays] 588
+[ pa][ll] -> [ pall] 589
+[ pall][et] -> [ pallet] 590
+[ pallet][s] -> [ pallets] 591
+[ m][y] -> [ my] 592
+[ le][v] -> [ lev] 593
+[ lev][el] -> [ level] 594
+[ level][s] -> [ levels] 595
+[9][2] -> [92] 596
+[ con][d] -> [ cond] 597
+[ cond][it] -> [ condit] 598
+[ condit][ions] -> [ conditions] 599
+[ rout][ing] -> [ routing] 600
+[_][rout] -> [_rout] 601
+[_rout][e] -> [_route] 602
+[her][e] -> [here] 603
+[ s][can] -> [ scan] 604
+[ he][l] -> [ hel] 605
+[i][ce] -> [ice] 606
+[a][ck] -> [ack] 607
+[ e][xtract] -> [ extract] 608
+[c][u] -> [cu] 609
+[cu][ment] -> [cument] 610
+[ e][ar] -> [ ear] 611
+[ ear][lier] -> [ earlier] 612
+[ re][c] -> [ rec] 613
+[ rec][all] -> [ recall] 614
+[ estimat][ion] -> [ estimation] 615
+[ check][ed] -> [ checked] 616
+[ pa][ck] -> [ pack] 617
+[ pack][ag] -> [ packag] 618
+[ packag][ing] -> [ packaging] 619
+[ t][a] -> [ ta] 620
+[ ta][pe] -> [ tape] 621
+[ con][ve] -> [ conve] 622
+[ conve][y] -> [ convey] 623
+[ convey][or] -> [ conveyor] 624
+[ b][el] -> [ bel] 625
+[ bel][ts] -> [ belts] 626
+[ t][ime] -> [ time] 627
+[e][s] -> [es] 628
+[ s][h] -> [ sh] 629
+[ sh][r] -> [ shr] 630
+[ shr][in] -> [ shrin] 631
+[ shrin][k] -> [ shrink] 632
+[ w][ra] -> [ wra] 633
+[ wra][p] -> [ wrap] 634
+[ b][ar] -> [ bar] 635
+[ bar][c] -> [ barc] 636
+[ barc][od] -> [ barcod] 637
+[ barcod][e] -> [ barcode] 638
+[ scan][n] -> [ scann] 639
+[ scann][er] -> [ scanner] 640
+[ scanner][s] -> [ scanners] 641
+[ d][at] -> [ dat] 642
+[ dat][a] -> [ data] 643
+[ re][p] -> [ rep] 644
+[ rep][ort] -> [ report] 645
+[ ][R] -> [ R] 646
+[ s][af] -> [ saf] 647
+[ saf][et] -> [ safet] 648
+[ safet][y] -> [ safety] 649
+[ g][e] -> [ ge] 650
+[ ge][ar] -> [ gear] 651
+[ an][a] -> [ ana] 652
+[ ana][ly] -> [ analy] 653
+[ analy][t] -> [ analyt] 654
+[ analyt][ics] -> [ analytics] 655
+[_s][upplier] -> [_supplier] 656
+[_][me] -> [_me] 657
+[_me][tr] -> [_metr] 658
+[_metr][ics] -> [_metrics] 659
+[ me][tr] -> [ metr] 660
+[ metr][ic] -> [ metric] 661
+[ return][s] -> [ returns] 662
+[ in][itiate] -> [ initiate] 663
+[_][re] -> [_re] 664
+[_re][turn] -> [_return] 665
+[_a][uth] -> [_auth] 666
+[_][g] -> [_g] 667
+[_g][enerated] -> [_generated] 668
+[ R][et] -> [ Ret] 669
+[ Ret][urn] -> [ Return] 670
+[ a][uth] -> [ auth] 671
+[ auth][or] -> [ author] 672
+[ author][i] -> [ authori] 673
+[ authori][z] -> [ authoriz] 674
+[ authoriz][ation] -> [ authorization] 675
+[ h][as] -> [ has] 676
+[ b][e] -> [ be] 677
+[ be][en] -> [ been] 678
+[ s][uc] -> [ suc] 679
+[ suc][cess] -> [ success] 680
+[ success][f] -> [ successf] 681
+[ successf][ull] -> [ successfull] 682
+[ successfull][y] -> [ successfully] 683
+[ g][enerated] -> [ generated] 684
+[i][d] -> [id] 685
+[4][50] -> [450] 686
+[ G][l] -> [ Gl] 687
+[ Gl][o] -> [ Glo] 688
+[ Glo][b] -> [ Glob] 689
+[ Glob][al] -> [ Global] 690
+[ Global][P] -> [ GlobalP] 691
+[ GlobalP][ack] -> [ GlobalPack] 692
+[ st][e] -> [ ste] 693
+[ ste][el] -> [ steel] 694
+[ ][rack] -> [ rack] 695
+[ rack][s] -> [ racks] 696
+[ for][k] -> [ fork] 697
+[ fork][li] -> [ forkli] 698
+[ forkli][ft] -> [ forklift] 699
+[ pa][r] -> [ par] 700
+[ par][ts] -> [ parts] 701
+[ delay][ed] -> [ delayed] 702
+[ d][u] -> [ du] 703
+[ du][e] -> [ due] 704
+[ hel][d] -> [ held] 705
+[ yo][u] -> [ you] 706
+[ inv][o] -> [ invo] 707
+[ invo][ice] -> [ invoice] 708
+[ to][d] -> [ tod] 709
+[ tod][ay] -> [ today] 710
+[ d][e] -> [ de] 711
+[9][8] -> [98] 712
+[ tra][nsit] -> [ transit] 713
+[2][5] -> [25] 714
+[ ][?] -> [ ?] 715
+[p][l] -> [pl] 716
+[pl][ent] -> [plent] 717
+[plent][y] -> [plenty] 718
+[i][ll] -> [ill] 719
+[ L][a] -> [ La] 720
+[ La][st] -> [ Last] 721
+[8][7] -> [87] 722
+[ ][ho] -> [ ho] 723
+[ ho][me] -> [ home] 724
+[8][5] -> [85] 725
+[ yo][ur] -> [ your] 726
+[ ][Q] -> [ Q] 727
+[ Q][u] -> [ Qu] 728
+[ Qu][i] -> [ Qui] 729
+[ Qui][ck] -> [ Quick] 730
+[ Quick][S] -> [ QuickS] 731
+[ QuickS][hip] -> [ QuickShip] 732
+[ L][L] -> [ LL] 733
+[ LL][C] -> [ LLC] 734
+[ ][r] -> [ r] 735
+[ S][af] -> [ Saf] 736
+[ Saf][e] -> [ Safe] 737
+[ Safe][T] -> [ SafeT] 738
+[ SafeT][ransit] -> [ SafeTransit] 739
+[ C][o] -> [ Co] 740
+[c][heck] -> [check] 741
+[ deliver][ed] -> [ delivered] 742
+[ l][ow] -> [ low] 743
+[ (][<] -> [ (<] 744
+[u][m] -> [um] 745
+[ n][a] -> [ na] 746
+[ na][me] -> [ name] 747
+[ me][d] -> [ med] 748
+[ med][i] -> [ medi] 749
+[ medi][um] -> [ medium] 750
+[ o][c] -> [ oc] 751
+[ oc][r] -> [ ocr] 752
+[_][do] -> [_do] 753
+[_do][cument] -> [_document] 754
+[ extract][ed] -> [ extracted] 755
+[ H][e] -> [ He] 756
+[ He][avy] -> [ Heavy] 757
+[ Heavy][L] -> [ HeavyL] 758
+[ HeavyL][i] -> [ HeavyLi] 759
+[ HeavyLi][ft] -> [ HeavyLift] 760
+[ I][n] -> [ In] 761
+[ In][c] -> [ Inc] 762
+[m][er] -> [mer] 763
+[ he][avy] -> [ heavy] 764
+[ ][hi] -> [ hi] 765
+[ hi][gh] -> [ high] 766
+[ c][le] -> [ cle] 767
+[ cle][ar] -> [ clear] 768
+[ s][k] -> [ sk] 769
+[ sk][i] -> [ ski] 770
+[ ski][es] -> [ skies] 771
+[ an][d] -> [ and] 772
+[ n][o] -> [ no] 773
+[n][e] -> [ne] 774
+[ m][uc] -> [ muc] 775
+[ muc][h] -> [ much] 776
+[ le][ft] -> [ left] 777
+[ne][ed] -> [need] 778
+[need][s] -> [needs] 779
+[ i][m] -> [ im] 780
+[ im][p] -> [ imp] 781
+[ imp][ro] -> [ impro] 782
+[ impro][ve] -> [ improve] 783
+[ improve][ment] -> [ improvement] 784
+[ ][v] -> [ v] 785
+[ v][ia] -> [ via] 786
+[87][5] -> [875] 787
+[ \u000a][\u000a] -> [ \u000a\u000a] 788
+[w][here] -> [where] 789
+[2][00] -> [200] 790
+[ t][here] -> [ there] 791
+[ a][l] -> [ al] 792
+[ al][er] -> [ aler] 793
+[ aler][ts] -> [ alerts] 794
+[q][u] -> [qu] 795
+[qu][ot] -> [quot] 796
+[ p][re] -> [ pre] 797
+[ pre][f] -> [ pref] 798
+[ pref][er] -> [ prefer] 799
+[ n][ow] -> [ now] 800
+[ ][N] -> [ N] 801
+[ b][ill] -> [ bill] 802
+[ la][d] -> [ lad] 803
+[ lad][ing] -> [ lading] 804
+[ a][c] -> [ ac] 805
+[ ac][c] -> [ acc] 806
+[ acc][id] -> [ accid] 807
+[ accid][ent] -> [ accident] 808
+[ report][ed] -> [ reported] 809
+[ e][x] -> [ ex] 810
+[ ex][pe] -> [ expe] 811
+[ expe][ct] -> [ expect] 812
+[ s][et] -> [ set] 813
+[ de][c] -> [ dec] 814
+[ dec][l] -> [ decl] 815
+[ decl][ar] -> [ declar] 816
+[ declar][ation] -> [ declaration] 817
+[ s][e] -> [ se] 818
+[ se][ver] -> [ sever] 819
+[ sever][e] -> [ severe] 820
+[ w][ar] -> [ war] 821
+[ war][n] -> [ warn] 822
+[ warn][ing] -> [ warning] 823
+[ s][en] -> [ sen] 824
+[ sen][d] -> [ send] 825
+[ i][t] -> [ it] 826
+[ shipment][s] -> [ shipments] 827
+[ ship][p] -> [ shipp] 828
+[ shipp][ing] -> [ shipping] 829
+[ la][b] -> [ lab] 830
+[ lab][el] -> [ label] 831
+[ co][m] -> [ com] 832
+[ com][mer] -> [ commer] 833
+[ commer][c] -> [ commerc] 834
+[ commerc][ia] -> [ commercia] 835
+[ commercia][l] -> [ commercial] 836
+[ r][ate] -> [ rate] 837
+[ ][quot] -> [ quot] 838
+[s][upplier] -> [supplier] 839
+[3][20] -> [320] 840
+[4][8] -> [48] 841
+[1][8] -> [18] 842
+[ t][e] -> [ te] 843
+[ te][xt] -> [ text] 844
+[ d][o] -> [ do] 845
+[ do][cument] -> [ document] 846
+[1][6] -> [16] 847
+[ us][e] -> [ use] 848
+[_a][m] -> [_am] 849
+[_am][o] -> [_amo] 850
+[_amo][u] -> [_amou] 851
+[_amou][nt] -> [_amount] 852
+[1][20] -> [120] 853
+[ quot][es] -> [ quotes] 854
+[an][y] -> [any] 855
+[s][can] -> [scan] 856
+[t][rack] -> [track] 857
+[re][m] -> [rem] 858
+[rem][in] -> [remin] 859
+[remin][d] -> [remind] 860
+[ w][hat] -> [ what] 861
+[ ][up] -> [ up] 862
+[ up][d] -> [ upd] 863
+[ to][t] -> [ tot] 864
+[ tot][al] -> [ total] 865
+[_][w] -> [_w] 866
+[_w][e] -> [_we] 867
+[_we][ight] -> [_weight] 868
+[k][g] -> [kg] 869
+[6][9] -> [69] 870
+[ de][st] -> [ dest] 871
+[ dest][in] -> [ destin] 872
+[ destin][ation] -> [ destination] 873
+[6][5] -> [65] 874
+[7][3] -> [73] 875
+[in][itiate] -> [initiate] 876
+[ d][id] -> [ did] 877
+[ s][ay] -> [ say] 878
+[ send][er] -> [ sender] 879
+[e][xtract] -> [extract] 880
+[ upd][ate] -> [ update] 881
+[4][0] -> [40] 882
+[ c][an] -> [ can] 883
+[3][9] -> [39] 884
+[ a][b] -> [ ab] 885
+[ ab][o] -> [ abo] 886
+[ abo][ut] -> [ about] 887
+[p][rocess] -> [process] 888
+[ r][ight] -> [ right] 889
+[ prefer][en] -> [ preferen] 890
+[ preferen][ce] -> [ preference] 891
+[ G][ot] -> [ Got] 892
+[ w][ill] -> [ will] 893
+[7][1] -> [71] 894
+[ar][t] -> [art] 895
+[ prefer][re] -> [ preferre] 896
+[ preferre][d] -> [ preferred] 897
+[6][1] -> [61] 898
+[ Y][o] -> [ Yo] 899
+[ Yo][ur] -> [ Your] 900
+[6][2] -> [62] 901
+[2][7] -> [27] 902
+[ N][ot] -> [ Not] 903
+[ Not][ed] -> [ Noted] 904
+[5][8] -> [58] 905
+[ t][hi] -> [ thi] 906
+[ thi][s] -> [ this] 907
+[ N][ice] -> [ Nice] 908
+[ me][et] -> [ meet] 909
+[ H][ow] -> [ How] 910
+[ hel][p] -> [ help] 911
+[ w][it] -> [ wit] 912
+[ wit][h] -> [ with] 913
+[7][9] -> [79] 914
+[ i][nt] -> [ int] 915
+[ int][ro] -> [ intro] 916
+[ intro][d] -> [ introd] 917
+[ introd][uc] -> [ introduc] 918
+[ introduc][ed] -> [ introduced] 919
+[ the][ms] -> [ thems] 920
+[ thems][el] -> [ themsel] 921
+[ themsel][ve] -> [ themselve] 922
+[ themselve][s] -> [ themselves] 923
+[ la][st] -> [ last] 924
+[g][a] -> [ga] 925
+[9][0] -> [90] 926
+[4][4] -> [44] 927
+[3][5] -> [35] 928
+[8][1] -> [81] 929
+[9][5] -> [95] 930
+[2][2] -> [22] 931
+[t][he] -> [the] 932
+[ custo][mer] -> [ customer] 933
+[ b][ack] -> [ back] 934
+[ st][art] -> [ start] 935
+[6][3] -> [63] 936
+[ a][ga] -> [ aga] 937
+[ aga][in] -> [ again] 938
+[ d][a] -> [ da] 939
+[ da][m] -> [ dam] 940
+[ dam][ag] -> [ damag] 941
+[ damag][ed] -> [ damaged] 942
+[ g][o] -> [ go] 943
+[ go][od] -> [ good] 944
+[ good][s] -> [ goods] 945
+[4][3] -> [43] 946
+[ on][e] -> [ one] 947
+[5][5] -> [55] 948
+[3][3] -> [33] 949
+[2][9] -> [29] 950
+[ a][re] -> [ are] 951
+[4][5] -> [45] 952
+[7][8] -> [78] 953
+[1][5] -> [15] 954
+[1][0] -> [10] 955
+[ track][ed] -> [ tracked] 956
+[1][9] -> [19] 957
+[1][3] -> [13] 958
+['][s] -> ['s] 959
+[4][9] -> [49] 960
+[6][4] -> [64] 961
+[48][8] -> [488] 962
+[or][re] -> [orre] 963
+[orre][ct] -> [orrect] 964
+[orrect][ion] -> [orrection] 965
+[7][4] -> [74] 966
+[6][8] -> [68] 967
+[3][0] -> [30] 968
+[2][8] -> [28] 969
+[4][65] -> [465] 970
+[1][7] -> [17] 971
+[3][92] -> [392] 972
+[4][2] -> [42] 973
+[6][0] -> [60] 974
+[6][69] -> [669] 975
+[quot][e] -> [quote] 976
+[9][80] -> [980] 977
+[n][ot] -> [not] 978
+[not][e] -> [note] 979
+[ i][ts] -> [ its] 980
+[48][2] -> [482] 981
+[w][hic] -> [whic] 982
+[whic][h] -> [which] 983
+[ on][ly] -> [ only] 984
+[ c][orrection] -> [ correction] 985
+[ ][-] -> [ -] 986
+[ -][>] -> [ ->] 987
+[18][9] -> [189] 988
+[87][3] -> [873] 989
+[f][rom] -> [from] 990
+[18][6] -> [186] 991
+[80][6] -> [806] 992
+[st][art] -> [start] 993
+[ quot][e] -> [ quote] 994
+[4][73] -> [473] 995
+[al][w] -> [alw] 996
+[alw][ay] -> [alway] 997
+[alway][s] -> [always] 998
+[25][4] -> [254] 999

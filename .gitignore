@@ -1,0 +1,11 @@
+﻿.venv/
+venv/
+__pycache__/
+*.pyc
+nanochat_cache/
+*.parquet
+llm.c-master/
+minbpe-master/
+nanochat-master/
+nanoGPT-master/
+.claude/

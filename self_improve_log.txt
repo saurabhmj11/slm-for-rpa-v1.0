@@ -1,0 +1,83 @@
+==============================================================
+  Praman Brain Mini — Self-Improvement Mode
+  Target val loss : 0.12
+  Max cycles      : 5
+  Device          : cpu
+  Real tokens     : 125
+==============================================================
+
+[Phase 1] Generating training data...
+
+[Phase 2] Vocab right-sizing — 500-iter probe each:
+  vocab=128  val=0.3092  emb=5,120  reasoning=81,480  score=2.96  (74s)
+  vocab=192  val=0.3098  emb=7,680  reasoning=81,480  score=2.82  (76s)
+  vocab=256  val=0.3098  emb=10,240  reasoning=81,480  score=2.69  (86s)
+  vocab=320  val=0.3102  emb=12,800  reasoning=81,480  score=2.55  (80s)
+  vocab=460  val=0.3069  emb=18,400  reasoning=81,480  score=2.28  (81s)
+  -> Winner: vocab_size=128  score=2.96
+
+[Phase 3] Full training  vocab=128  (max 5 cycles)
+-- Cycle 1  vocab=128  lr=0.00300  params=86,600 --
+  iter    0 | train 4.8613 | val 4.8600 | lr 0.00300 | 3s
+  [BEST] new best 4.8600 -> saved best_model.pt
+  iter  300 | train 0.3114 | val 0.3120 | lr 0.00293 | 75s
+  [BEST] new best 0.3120 -> saved best_model.pt
+  iter  600 | train 0.3082 | val 0.3097 | lr 0.00271 | 135s
+  [BEST] new best 0.3097 -> saved best_model.pt
+  iter  900 | train 0.2670 | val 0.2682 | lr 0.00238 | 203s
+  [BEST] new best 0.2682 -> saved best_model.pt
+  iter 1200 | train 0.2412 | val 0.2430 | lr 0.00196 | 256s
+  [BEST] new best 0.2430 -> saved best_model.pt
+  iter 1500 | train 0.2331 | val 0.2331 | lr 0.00150 | 314s
+  [BEST] new best 0.2331 -> saved best_model.pt
+  iter 1800 | train 0.2328 | val 0.2334 | lr 0.00104 | 371s
+  iter 2100 | train 0.2320 | val 0.2323 | lr 0.00062 | 437s
+  [BEST] new best 0.2323 -> saved best_model.pt
+  iter 2400 | train 0.2315 | val 0.2321 | lr 0.00029 | 499s
+  [BEST] new best 0.2321 -> saved best_model.pt
+  iter 2700 | train 0.2319 | val 0.2315 | lr 0.00007 | 552s
+  [BEST] new best 0.2315 -> saved best_model.pt
+  [!] plateau: no improvement > 0.002 in 4 evals -> stopping cycle early
+  [RESTART] lr -> 0.00150  regenerating data...
+-- Cycle 2  vocab=128  lr=0.00150  params=86,600 --
+  iter    0 | train 4.8867 | val 4.8875 | lr 0.00150 | 3s
+  iter  300 | train 0.3247 | val 0.3265 | lr 0.00146 | 44s
+  iter  600 | train 0.3120 | val 0.3123 | lr 0.00136 | 113s
+  iter  900 | train 0.3093 | val 0.3114 | lr 0.00119 | 182s
+  iter 1200 | train 0.3079 | val 0.3089 | lr 0.00098 | 241s
+  iter 1500 | train 0.3070 | val 0.3074 | lr 0.00075 | 297s
+  iter 1800 | train 0.3057 | val 0.3075 | lr 0.00052 | 356s
+  iter 2100 | train 0.3063 | val 0.3061 | lr 0.00031 | 413s
+  iter 2400 | train 0.2962 | val 0.2972 | lr 0.00014 | 470s
+  iter 2700 | train 0.2764 | val 0.2761 | lr 0.00004 | 527s
+  iter 2999 | train 0.2753 | val 0.2757 | lr 0.00000 | 584s
+  [RESTART] lr -> 0.00075  regenerating data...
+-- Cycle 3  vocab=128  lr=0.00075  params=86,600 --
+  iter    0 | train 4.8432 | val 4.8434 | lr 0.00075 | 5s
+  iter  300 | train 0.3758 | val 0.3756 | lr 0.00073 | 63s
+  iter  600 | train 0.3230 | val 0.3221 | lr 0.00068 | 124s
+  iter  900 | train 0.3001 | val 0.3003 | lr 0.00060 | 191s
+  iter 1200 | train 0.2728 | val 0.2728 | lr 0.00049 | 248s
+  iter 1500 | train 0.2686 | val 0.2685 | lr 0.00037 | 279s
+  iter 1800 | train 0.2603 | val 0.2597 | lr 0.00026 | 307s
+  iter 2100 | train 0.2557 | val 0.2552 | lr 0.00015 | 336s
+  iter 2400 | train 0.2534 | val 0.2528 | lr 0.00007 | 383s
+  iter 2700 | train 0.2523 | val 0.2519 | lr 0.00002 | 445s
+  iter 2999 | train 0.2522 | val 0.2521 | lr 0.00000 | 509s
+  [RESTART] lr -> 0.00038  regenerating data...
+-- Cycle 4  vocab=128  lr=0.00038  params=86,600 --
+  iter    0 | train 4.8527 | val 4.8531 | lr 0.00038 | 4s
+  iter  300 | train 0.7866 | val 0.7855 | lr 0.00037 | 46s
+  iter  600 | train 0.3812 | val 0.3802 | lr 0.00034 | 93s
+  iter  900 | train 0.3406 | val 0.3400 | lr 0.00030 | 137s
+  iter 1200 | train 0.3292 | val 0.3276 | lr 0.00025 | 166s
+  iter 1500 | train 0.3203 | val 0.3200 | lr 0.00019 | 211s
+  iter 1800 | train 0.3170 | val 0.3169 | lr 0.00013 | 277s
+  iter 2100 | train 0.3160 | val 0.3149 | lr 0.00008 | 339s
+  iter 2400 | train 0.3140 | val 0.3149 | lr 0.00004 | 401s
+  iter 2700 | train 0.3124 | val 0.3130 | lr 0.00001 | 460s
+  iter 2999 | train 0.3127 | val 0.3124 | lr 0.00000 | 523s
+  [!] plateau: no improvement > 0.002 in 4 evals -> stopping cycle early
+  [RESTART] lr -> 0.00019  regenerating data...
+-- Cycle 5  vocab=128  lr=0.00019  params=86,600 --
+  iter    0 | train 4.8692 | val 4.8695 | lr 0.00019 | 3s
