@@ -189,7 +189,8 @@ results = []
 for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval.jsonl")):
     out = subprocess.run(["python", "-m", "scripts.chat_cli", "-i", "sft", "-p", row["prompt"], "-t", "0.2"],
                          capture_output=True, text=True, cwd="/content/nanochat").stdout
-    text = out.split("Assistant:", 1)[-1].strip()
+    text = out.split("Assistant:", 1)[-1].split("<|assistant_end|>")[0].strip()   # drop the end-of-answer marker
+    print("---", row["family"], "| first 250 chars:", text[:250])
     r = {"family": row["family"], "json": False, "schema": False, "actions_known": False}
     try:
         flow = json.loads(text); r["json"] = True
