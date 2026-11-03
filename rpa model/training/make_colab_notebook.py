@@ -9,6 +9,7 @@ files = {
     "build_catalog.py": (H.parent / "data/catalog/build_catalog.py").read_text(encoding="utf-8"),
     "build_sft_data.py": (H / "build_sft_data.py").read_text(encoding="utf-8"),
     "ooa_task.py": (H / "ooa_task.py").read_text(encoding="utf-8"),
+    "gen_flows.py": (H / "gen_flows.py").read_text(encoding="utf-8"),
     "flow_check.py": (H.parent / "eval/flow_check.py").read_text(encoding="utf-8"),
 }
 
@@ -53,6 +54,8 @@ SFT_SEQ = 2048             # flows longer than this get cut; the T4 cannot affor
 SFT_DEVICE_BATCH = 4
 SFT_EPOCHS = 2 if PROFILE == "smoke" else 6      # passes over the OOA data (the seed set is small)
 FLOW_REPEAT = 15           # each flow example is repeated this many times per pass so flows are about a third of the data
+SYNTH_TRAIN = 1500 if PROFILE == "smoke" else 8000   # generated flows (no LLM), see gen_flows.py
+SYNTH_EVAL = 20            # unseen generated flows scored by exact action sequence
 SFT_ITERS = 400            # upper limit; training also stops when the data runs out
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
 MAX_FLOW_CHARS = 9000      # skip training flows longer than this (about SFT_SEQ tokens)
@@ -135,6 +138,16 @@ for name, text in FILES.items():
 if not os.path.exists("/content/platform"):
     !git clone -q --depth 1 {PLATFORM_REPO} /content/platform
 !python /content/ooa/build_sft_data.py /content/platform {DRIVE_DIR}/sft {MAX_FLOW_CHARS}
+!python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform {DRIVE_DIR}/sft/synth_train.jsonl {SYNTH_TRAIN} 1
+!python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform /content/synth_eval_raw.jsonl 400 2
+train_set = {json.loads(l)["messages"][1]["content"] for l in open(f"{DRIVE_DIR}/sft/synth_train.jsonl")}
+ev = []
+for l in open("/content/synth_eval_raw.jsonl"):
+    m = json.loads(l)["messages"]
+    if m[1]["content"] not in train_set and len(ev) < SYNTH_EVAL:
+        ev.append({"prompt": m[0]["content"], "gold_actions": [st["action"] for st in json.loads(m[1]["content"])["steps"]]})
+open(f"{DRIVE_DIR}/sft/eval_synth.jsonl", "w").write("\\n".join(json.dumps(x) for x in ev))
+print("synthetic eval prompts (not in train):", len(ev))
 !cp /content/ooa/ooa_task.py /content/nanochat/tasks/ooa.py
 !head -c 700 {DRIVE_DIR}/sft/train.jsonl
 ''' % json.dumps(files))
@@ -149,7 +162,7 @@ if "OOADialogues" not in s:
     a = s.index("train_tasks = [")
     b = s.index("\\n", s.index("# total: 24K"))
     new = f"""train_tasks = ([OOADialogues("{DRIVE_DIR}/sft/train_flows.jsonl") for _ in range({FLOW_REPEAT})]
-               + [OOADialogues("{DRIVE_DIR}/sft/train_catalog.jsonl")]) * {SFT_EPOCHS}
+               + [OOADialogues("{DRIVE_DIR}/sft/train_catalog.jsonl"), OOADialogues("{DRIVE_DIR}/sft/synth_train.jsonl")]) * {SFT_EPOCHS}
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)
@@ -202,6 +215,23 @@ for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval.jsonl")):
     results.append(r); print(r)
 n = len(results)
 print(f"\\nheld-out flows: {n} | valid JSON {sum(r['json'] for r in results)} | schema OK {sum(r['schema'] for r in results)} | all actions exist {sum(r['actions_known'] for r in results)}")
+print("\\n=== Synthetic eval: unseen generated flows, exact action sequence ===")
+sr = []
+for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval_synth.jsonl")):
+    out = subprocess.run(["python", "-m", "scripts.chat_cli", "-i", "sft", "-p", row["prompt"], "-t", "0.2"],
+                         capture_output=True, text=True, cwd="/content/nanochat").stdout
+    text = out.split("Assistant:", 1)[-1].split("<|assistant_end|>")[0].strip()
+    r = {"json": False, "schema": False, "actions_known": False, "actions_match": False}
+    try:
+        flow = json.loads(text); r["json"] = True
+        jsonschema.validate(flow, schema); r["schema"] = True
+        acts = [x.get("action") for x in steps(flow.get("steps", []))]
+        r["actions_known"] = all(a in catalog for a in acts)
+        r["actions_match"] = acts == row["gold_actions"]
+    except Exception:
+        pass
+    sr.append(r)
+print(f"synthetic eval: {len(sr)} | valid JSON {sum(r['json'] for r in sr)} | schema OK {sum(r['schema'] for r in sr)} | actions exist {sum(r['actions_known'] for r in sr)} | exact action sequence {sum(r['actions_match'] for r in sr)}")
 print("\\nTry it yourself:")
 !cd /content/nanochat && python -m scripts.chat_cli -i sft -p "Which OOA action would I use to read a CSV file into a table?" -t 0.2
 ''')
