@@ -26,9 +26,7 @@ fine-tuned Qwen on open-ended requests and long contexts. Track A (Qwen QLoRA, s
 6. **Eval:** schema validity, action match, memory probes, against the frozen set, compared with Track A.
 
 ## Open blockers
-- nanochat source is not in this repo; cloning it into the cloud session was denied, so its current script and
-  task APIs have not been checked here. Pin a commit when it is added.
-- Platform reference is not installed here for the same reason, so `ooa validate` has not been run.
+- nanochat's task/SFT data format still to be read (cloned in the cloud session, not yet pinned to a commit).
 - Data policy: may docs and flows go to a cloud LLM to generate dialogues?
 
 ## Update: environment checks (cloud session)
