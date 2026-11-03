@@ -154,7 +154,9 @@ print("synthetic eval prompts (not in train):", len(ev))
 
 code('''
 #@title 7. Patch nanochat SFT to use our data, then train
-import re
+import re, shutil
+# always start from the pinned nanochat scripts, so an earlier patch can never hide the current data mix
+!cd /content/nanochat && git checkout -q -- scripts/chat_sft.py scripts/chat_cli.py
 p = "/content/nanochat/scripts/chat_sft.py"
 s = open(p).read()
 if "OOADialogues" not in s:
