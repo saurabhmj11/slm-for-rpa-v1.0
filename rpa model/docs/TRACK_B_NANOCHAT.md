@@ -30,3 +30,13 @@ fine-tuned Qwen on open-ended requests and long contexts. Track A (Qwen QLoRA, s
   task APIs have not been checked here. Pin a commit when it is added.
 - Platform reference is not installed here for the same reason, so `ooa validate` has not been run.
 - Data policy: may docs and flows go to a cloud LLM to generate dialogues?
+
+## Update: environment checks (cloud session)
+- nanochat cloned and platform reference installed. `ooa manifest` works.
+- `ooa validate` (Python reference) only knows a few toolkits, so it fails 42 of 47 valid use-case flows
+  ("Package ooa.browser is not installed"). It cannot be the main scorer.
+- Scorer to use instead: `eval/flow_check.py` = JSON schema (`flow.v1.json`) + every action and input name exists
+  in `catalog.jsonl`. All 48 gold flows pass it with 0 unknown actions or inputs. Add variable-declaration and
+  reference checks next; keep `ooa validate` as an extra check for the toolkits it supports.
+- Two gold flows disagree with the reference on excel inputs (`header` on `excel/open`, `save` on `excel/close`):
+  the docs and the Python reference are not fully in sync. Treat the toolkit docs (catalog) as the contract.
