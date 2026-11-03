@@ -38,3 +38,14 @@ fine-tuned Qwen on open-ended requests and long contexts. Track A (Qwen QLoRA, s
   reference checks next; keep `ooa validate` as an extra check for the toolkits it supports.
 - Two gold flows disagree with the reference on excel inputs (`header` on `excel/open`, `save` on `excel/close`):
   the docs and the Python reference are not fully in sync. Treat the toolkit docs (catalog) as the contract.
+
+## nanochat SFT format (read from commit 92d63d4)
+- A `Task` yields `{"messages": [...]}`: optional system message, then alternating user/assistant string turns.
+  `render_conversation` masks loss to assistant tokens. Special tokens: user/assistant start/end, python and
+  output start/end (used for tool calls, as GSM8K does).
+- `scripts/chat_sft.py` hardcodes its mixture: SmolTalk (460K) + MMLU x3 + GSM8K x4. For OOA, add
+  `training/ooa_task.py` (`OOADialogues`, reads JSONL) to that list, and reduce or drop the general tasks.
+- Default `--max-seq-len` is inherited from pretraining (2048 in the speedrun config). Median flow is about 2,000
+  tokens at vocab 4096, so pretrain with a longer window, or SFT will truncate large flows.
+- nanochat's own tokenizer is also BPE (rustbpe/tiktoken), with 9 special tokens; the Stage 2 vocab-4096 experiment
+  can be redone with `scripts/tok_train.py`.
