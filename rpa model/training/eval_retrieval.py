@@ -24,7 +24,7 @@ def acts(flow):
                 walk(n.get(k) if isinstance(n.get(k), list) else [])
             for c in n.get("catch") or []:
                 walk(c.get("children"))
-    walk(flow.get("steps")); return [a for a in out if a in idx.by_id]
+    walk(flow.get("steps")); return [a for a in out if a in idx.by_id and not a.startswith("core/")]   # control-flow built-ins are not retrieved
 
 rows = []
 for f in sorted(glob.glob(repo + "/examples/**/*.flow.json", recursive=True)):
