@@ -73,3 +73,13 @@ Status: reward, generator, ingest and the notebook patches are tested here again
 sampling scripts have NOT been run on a GPU. Risks: the reward only knows what the checker knows (it cannot tell if a
 flow does what a user meant), RL on a weak model gets little signal (hence partial credit and a short-first curriculum),
 and the self-improvement loop only grows as far as the generator's request styles reach.
+
+## First t4 results (2026-11-07) and what they showed
+- Pretraining finished (4577 steps). SFT was only 100 steps (1.8 min): the data ran out, about 3M tokens seen. Fix: SFT now
+  uses 30,000 generated flows and up to 3,000 steps for non-smoke profiles.
+- The old validation set overlapped training, so its bpb (0.07) was meaningless. The validation set now holds only
+  unseen catalog rows and unseen generated flows.
+- Self-improvement rounds: fresh-request pass@8 went 5% -> 10% on 20 requests per round. That is within noise; the loop
+  added about 22 rows to 13,400. A 20-request round took about 3 minutes (so about 15 min for 100 requests).
+- The round log now also reports the average of each reward part, to show why answers fail (invalid JSON, wrong actions,
+  wrong order, missing inputs).

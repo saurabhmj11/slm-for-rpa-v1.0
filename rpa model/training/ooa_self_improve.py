@@ -65,6 +65,8 @@ model.eval()
 
 new_good, new_hard, solved_fresh, solved_all, still_hard = [], [], 0, 0, []
 rewards = []
+parts = {k: 0.0 for k in ("starts_obj", "json", "schema", "actions_exist", "args_ok", "vars_ok", "match")}
+n_samples = 0
 t0 = time.time()
 for ti, t in enumerate(tasks):
     conv = {"messages": [{"role": "user", "content": t["prompt"]}, {"role": "assistant", "content": t["gold"]}]}
@@ -76,6 +78,10 @@ for ti, t in enumerate(tasks):
     for s in seqs:
         text = R.clean(tokenizer.decode(s[len(tokens):]))
         scored.append((R.score(text, gold), text))
+    for sc, _ in scored:
+        n_samples += 1
+        for k in parts:
+            parts[k] += sc[k]
     best = max(scored, key=lambda x: x[0]["total"])
     rewards.append(sum(x[0]["total"] for x in scored) / len(scored))
     is_fresh = ti < len(fresh)
@@ -108,6 +114,7 @@ with open(hard_path, "w", encoding="utf-8") as f:   # failures still unsolved ar
 stats = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "seed": args.seed, "source": args.source,
          "fresh_requests": len(fresh), "fresh_pass_at_k": round(solved_fresh / max(1, len(fresh)), 3),
          "samples": args.samples, "mean_reward": round(sum(rewards) / max(1, len(rewards)), 3),
+         "parts": {k: round(v / max(1, n_samples), 3) for k, v in parts.items()},
          "added_self_improved": a, "added_hard_fixed": b, "hard_queue": len(still_hard)}
 with open(os.path.join(args.out, "selfimprove_log.jsonl"), "a") as f:
     f.write(json.dumps(stats) + "\n")

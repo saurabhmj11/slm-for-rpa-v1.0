@@ -84,4 +84,5 @@ print("\\nPass rate on FRESH requests, per round (this is the progress measure):
 for l in open(f"{DRIVE_DIR}/sft/selfimprove_log.jsonl"):
     x = json.loads(l)
     print(x["time"], "| pass@k", x["fresh_pass_at_k"], "| mean reward", x["mean_reward"], "| new wins", x["added_self_improved"], "| new fixes", x["added_hard_fixed"], "| still hard", x["hard_queue"])
+    print("   where answers lose points (1.0 = always fine):", x.get("parts"))
 ''')

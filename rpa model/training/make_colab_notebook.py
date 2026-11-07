@@ -58,7 +58,7 @@ SFT_SEQ = 2048             # flows longer than this get cut; the T4 cannot affor
 SFT_DEVICE_BATCH = 4
 SFT_EPOCHS = 2 if PROFILE == "smoke" else 6      # passes over the OOA data (the seed set is small)
 FLOW_REPEAT = 15           # each flow example is repeated this many times per pass so flows are about a third of the data
-SYNTH_TRAIN = 1500 if PROFILE == "smoke" else 8000   # generated flows (no LLM), see gen_flows.py
+SYNTH_TRAIN = 1500 if PROFILE == "smoke" else 30000   # generated flows (no LLM), see gen_flows.py
 SYNTH_EVAL = 20            # unseen generated flows scored by exact action sequence
 # Reinforcement layer (after SFT)
 RL_PROMPTS = 60 if PROFILE == "smoke" else 400     # requests for RL; each gets RL_SAMPLES answers scored by the verifier
@@ -69,7 +69,7 @@ SELF_IMPROVE_ROUNDS = 2
 SI_PROMPTS = 20 if PROFILE == "smoke" else 100     # fresh requests per self-improvement round
 SI_SAMPLES = 8
 EVAL_SOURCE = "sft"        # which model the test cell loads: "sft" or "rl"
-SFT_ITERS = 400            # upper limit; training also stops when the data runs out
+SFT_ITERS = 400 if PROFILE == "smoke" else 3000            # upper limit; training also stops when the data runs out
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
 MAX_FLOW_CHARS = 9000      # skip training flows longer than this (about SFT_SEQ tokens)
 print(PROFILE, P, "iterations:", NUM_ITERS)
@@ -160,6 +160,15 @@ for l in open("/content/synth_eval_raw.jsonl"):
     if m[1]["content"] not in train_set and len(ev) < SYNTH_EVAL:
         ev.append({"prompt": m[0]["content"], "gold_actions": [st["action"] for st in json.loads(m[1]["content"])["steps"]]})
 open(f"{DRIVE_DIR}/sft/eval_synth.jsonl", "w").write("\\n".join(json.dumps(x) for x in ev))
+# validation set the model never trains on (the old one overlapped training, so its loss looked great for nothing)
+val_rows = [json.loads(l) for l in open(f"{DRIVE_DIR}/sft/val.jsonl")]
+val_rows = [r for r in val_rows if r["messages"][1]["content"].startswith("Use ") or r["messages"][1]["content"].startswith("`")]
+raw = [json.loads(l) for l in open("/content/synth_eval_raw.jsonl")]
+extra = [r for r in raw[SYNTH_EVAL:] if r["messages"][1]["content"] not in train_set][:150]
+with open(f"{DRIVE_DIR}/sft/val.jsonl", "w") as f:
+    for r in val_rows + extra:
+        f.write(json.dumps(r) + "\\n")
+print("validation rows (unseen):", len(val_rows) + len(extra))
 print("synthetic eval prompts (not in train):", len(ev))
 !cp /content/ooa/ooa_task.py /content/nanochat/tasks/ooa.py
 !head -c 700 {DRIVE_DIR}/sft/train.jsonl
