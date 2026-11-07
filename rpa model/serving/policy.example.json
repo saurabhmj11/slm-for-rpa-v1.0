@@ -1,0 +1,10 @@
+{
+  "allow_escalation": false,
+  "mask_pii": true,
+  "store_logs": false,
+  "allow_training_on_data": false,
+  "local_retries": 2,
+  "max_clauses_local": 6,
+  "cloud_model": "claude-sonnet-5-5",
+  "log_dir": "ooa_logs"
+}

@@ -116,3 +116,51 @@ def _total(p, gold):
     valid = all(p[k] == 1.0 for k in ("json", "schema", "actions_exist", "args_ok", "vars_ok"))
     solved = valid and (p["match"] == 1.0 if gold is not None else True)
     return {"total": round(total, 4), "solved": solved, "valid": valid, **p}
+
+
+def problems(text, limit=8):
+    """Plain-language list of what is wrong with an answer (empty list = valid). Used to tell a model how to fix a retry."""
+    if _CAT is None:
+        configure()
+    text = clean(text)
+    try:
+        flow = json.loads(text)
+        assert isinstance(flow, dict)
+    except Exception:
+        return ["The answer is not a single valid JSON object."]
+    out = []
+    for e in list(_SV.iter_errors(flow))[:3]:
+        out.append("Schema: " + e.message[:140] + (" at " + "/".join(map(str, e.path)) if e.path else ""))
+    steps = list(walk(flow.get("steps")))
+    if not steps:
+        out.append("The flow has no steps.")
+    declared = {v.get("name") for v in flow.get("variables", []) if isinstance(v, dict)}
+    ids = [s.get("id") for s in steps]
+    if len(ids) != len(set(ids)):
+        out.append("Step ids are not unique.")
+    for s in steps:
+        a = s.get("action")
+        e = _CAT.get(a)
+        if e is None:
+            out.append(f"Unknown action {a!r}.")
+            continue
+        args, o = s.get("args") or {}, s.get("out") or {}
+        if not a.startswith("core/"):
+            ins = {i["name"] for i in e["inputs"]}
+            outs = {x["name"] for x in e["outputs"]}
+            req = {i["name"] for i in e["inputs"] if i["required"]}
+            for k in args:
+                if k not in ins:
+                    out.append(f"{a} has no input {k!r}. Inputs: {', '.join(sorted(ins)) or '-'}.")
+            for k in o:
+                if k not in outs:
+                    out.append(f"{a} has no output {k!r}. Outputs: {', '.join(sorted(outs)) or '-'}.")
+            for k in sorted(req - set(args)):
+                out.append(f"{a} is missing required input {k!r}.")
+        for v in args.values():
+            if isinstance(v, str) and v.startswith("$") and v[1:] not in declared:
+                out.append(f"Variable {v!r} is used but not declared in variables.")
+        for v in o.values():
+            if v not in declared:
+                out.append(f"Output variable {v!r} is not declared in variables.")
+    return list(dict.fromkeys(out))[:limit]

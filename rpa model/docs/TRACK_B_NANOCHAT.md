@@ -101,3 +101,12 @@ scorer is about 45x faster too (this also speeds up RL and self-improvement samp
 /kaggle/working; internet check; restores `nanochat_base` from /kaggle/input; last cell packages the model as a zip).
 Syntax-checked and the packaging cell tested on fake files; NOT yet run on Kaggle. Kaggle notes: GPU T4 x2 or P100
 (this notebook uses one GPU), about 30 GPU hours per week, session up to 12 h, Internet must be On (phone verification).
+
+## Retrieval result and the end-to-end system (2026-11-07)
+`training/retrieval.py` (BM25 over the catalog) + `training/eval_retrieval.py`. On human-written flow descriptions, top-10
+finds only ~10% of the actions real flows use (0/31 flows fully covered); offering all actions of the top-3 toolkits covers
+25% (114 candidates). Real flows average 18.5 steps, 11 distinct actions, 3.7 toolkits; the generated flows (1-4 steps, one
+toolkit) are far easier, so synthetic scores do NOT predict real performance. Consequence: our small model is for simple
+requests; complex ones go to Claude, with the whole best-matching toolkits in the prompt.
+Built and tested: `serving/` (OpenAI-compatible server, router, repair, verifier, PII masking, client policy switches,
+feedback endpoint; 8 end-to-end tests with fake models), `training/repair.py`, `ooa_reward.problems()`.
