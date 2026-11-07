@@ -201,6 +201,27 @@ def make_validator(repo, catalog):
     return validate
 
 
+def generate(catalog, repo, n, seed, exclude=()):
+    """Return n unique valid (request, flow_dict, minified_flow) triples; skips minified flows in `exclude`."""
+    rng = random.Random(seed)
+    actions = [e for e in catalog if fillable(e)]
+    validate = make_validator(repo, catalog)
+    seen, out, tries = set(exclude), [], 0
+    while len(out) < n and tries < n * 30:
+        tries += 1
+        flow, req = build(actions, rng)
+        try:
+            validate(flow)
+        except Exception:
+            continue
+        mini = json.dumps(flow, separators=(",", ":"), ensure_ascii=False)
+        if mini in seen:
+            continue
+        seen.add(mini)
+        out.append((rng.choice(WORDINGS).format(c=req), flow, mini))
+    return out
+
+
 def main():
     cat_path, repo, out = sys.argv[1], sys.argv[2], sys.argv[3]
     n = int(sys.argv[4]) if len(sys.argv) > 4 else 3000

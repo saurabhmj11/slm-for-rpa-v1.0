@@ -56,3 +56,20 @@ free T4 (resumes from Drive after disconnects), seed SFT data from the platform 
 patched `chat_sft.py`, held-out test with schema + catalog scoring. Profiles: `smoke` (pipeline check), `t4`, `a100`.
 Written and syntax-checked without a GPU: not yet run on Colab. Seed data: about 60 flow dialogues (x3 wordings) plus
 about 2,100 catalog dialogues; 5 held-out eval prompts, so results are only a smoke signal.
+
+## Reinforcement layer (self-learning and self-improving)
+All loops are scored by a **verifier**, not a human or an LLM judge: `training/ooa_reward.py`
+(schema 0.15, actions exist 0.15, required inputs and names 0.10, declared variables and unique ids 0.10, valid JSON 0.20,
+object start 0.05, action sequence vs the gold flow 0.25 with partial credit). Empty flows score <= 0.25, so they cannot
+win. `training/test_reward.py` checks this (run: `python test_reward.py PLATFORM_REPO`).
+- **RL (notebook cell 9):** nanochat's own `chat_rl.py`, patched to use `ooa_rl_task.py`. 8 answers per request;
+  answers above the group average are reinforced (REINFORCE, no KL; as nanochat implements it).
+- **Self-improvement rounds (cell 10, `ooa_self_improve.py`):** fresh requests each round, K attempts each; verified wins
+  go to `self_improved.jsonl`, failures go to `hard_fixed.jsonl` (with the verified gold flow) and are retried. Then SFT
+  retrains from the pretrained base on everything. Progress = pass@k on fresh requests, logged in `selfimprove_log.jsonl`.
+- **Real usage (`ingest_feedback.py`):** accepted or human-edited flows from Studio become training data only if they
+  also pass the verifier; rejected-without-edit prompts are listed as hard cases.
+Status: reward, generator, ingest and the notebook patches are tested here against the real nanochat files; the RL and
+sampling scripts have NOT been run on a GPU. Risks: the reward only knows what the checker knows (it cannot tell if a
+flow does what a user meant), RL on a weak model gets little signal (hence partial credit and a short-first curriculum),
+and the self-improvement loop only grows as far as the generator's request styles reach.

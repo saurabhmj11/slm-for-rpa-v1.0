@@ -10,6 +10,10 @@ files = {
     "build_sft_data.py": (H / "build_sft_data.py").read_text(encoding="utf-8"),
     "ooa_task.py": (H / "ooa_task.py").read_text(encoding="utf-8"),
     "gen_flows.py": (H / "gen_flows.py").read_text(encoding="utf-8"),
+    "ooa_reward.py": (H / "ooa_reward.py").read_text(encoding="utf-8"),
+    "ooa_rl_task.py": (H / "ooa_rl_task.py").read_text(encoding="utf-8"),
+    "ooa_self_improve.py": (H / "ooa_self_improve.py").read_text(encoding="utf-8"),
+    "ingest_feedback.py": (H / "ingest_feedback.py").read_text(encoding="utf-8"),
     "flow_check.py": (H.parent / "eval/flow_check.py").read_text(encoding="utf-8"),
 }
 
@@ -56,6 +60,15 @@ SFT_EPOCHS = 2 if PROFILE == "smoke" else 6      # passes over the OOA data (the
 FLOW_REPEAT = 15           # each flow example is repeated this many times per pass so flows are about a third of the data
 SYNTH_TRAIN = 1500 if PROFILE == "smoke" else 8000   # generated flows (no LLM), see gen_flows.py
 SYNTH_EVAL = 20            # unseen generated flows scored by exact action sequence
+# Reinforcement layer (after SFT)
+RL_PROMPTS = 60 if PROFILE == "smoke" else 400     # requests for RL; each gets RL_SAMPLES answers scored by the verifier
+RL_SAMPLES = 8
+RL_EXAMPLES_PER_STEP = 8
+RL_EVERY = 20 if PROFILE == "smoke" else 25        # evaluate and save every N RL steps
+SELF_IMPROVE_ROUNDS = 2
+SI_PROMPTS = 20 if PROFILE == "smoke" else 100     # fresh requests per self-improvement round
+SI_SAMPLES = 8
+EVAL_SOURCE = "sft"        # which model the test cell loads: "sft" or "rl"
 SFT_ITERS = 400            # upper limit; training also stops when the data runs out
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
 MAX_FLOW_CHARS = 9000      # skip training flows longer than this (about SFT_SEQ tokens)
@@ -165,6 +178,11 @@ if "OOADialogues" not in s:
     b = s.index("\\n", s.index("# total: 24K"))
     new = f"""train_tasks = ([OOADialogues("{DRIVE_DIR}/sft/train_flows.jsonl") for _ in range({FLOW_REPEAT})]
                + [OOADialogues("{DRIVE_DIR}/sft/train_catalog.jsonl"), OOADialogues("{DRIVE_DIR}/sft/synth_train.jsonl")]) * {SFT_EPOCHS}
+import os as _os
+_extra = [OOADialogues("{DRIVE_DIR}/sft/" + _f) for _f in ("self_improved.jsonl", "hard_fixed.jsonl", "feedback_train.jsonl")
+          if _os.path.exists("{DRIVE_DIR}/sft/" + _f)]
+train_tasks += _extra * {SFT_EPOCHS}
+print0(f"extra self-learning files in the mix: {{len(_extra)}}")
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)
@@ -184,6 +202,8 @@ shutil.rmtree(os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatsft_checkpoints
 code('''
 #@title 8. Test on held-out workflow families (never trained on)
 import subprocess, json, sys
+EVAL_SOURCE = globals().get("EVAL_SOURCE", "sft")
+print("evaluating model source:", EVAL_SOURCE)
 # chat_cli stops after 256 new tokens; flows are longer, so raise the limit
 cli = "/content/nanochat/scripts/chat_cli.py"
 t = open(cli).read()
@@ -205,7 +225,7 @@ def steps(nodes):
 
 results = []
 for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval.jsonl")):
-    out = subprocess.run(["python", "-m", "scripts.chat_cli", "-i", "sft", "-p", row["prompt"], "-t", "0.2"],
+    out = subprocess.run(["python", "-m", "scripts.chat_cli", "-i", EVAL_SOURCE, "-p", row["prompt"], "-t", "0.2"],
                          capture_output=True, text=True, cwd="/content/nanochat").stdout
     text = out.split("Assistant:", 1)[-1].split("<|assistant_end|>")[0].strip()   # drop the end-of-answer marker
     print("---", row["family"], "| first 250 chars:", text[:250])
@@ -223,7 +243,7 @@ print(f"\\nheld-out flows: {n} | valid JSON {sum(r['json'] for r in results)} | 
 print("\\n=== Synthetic eval: unseen generated flows, exact action sequence ===")
 sr = []
 for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval_synth.jsonl")):
-    out = subprocess.run(["python", "-m", "scripts.chat_cli", "-i", "sft", "-p", row["prompt"], "-t", "0.2"],
+    out = subprocess.run(["python", "-m", "scripts.chat_cli", "-i", EVAL_SOURCE, "-p", row["prompt"], "-t", "0.2"],
                          capture_output=True, text=True, cwd="/content/nanochat").stdout
     text = out.split("Assistant:", 1)[-1].split("<|assistant_end|>")[0].strip()
     r = {"json": False, "schema": False, "actions_known": False, "actions_match": False}
@@ -241,11 +261,15 @@ print("\\nTry it yourself:")
 !cd /content/nanochat && python -m scripts.chat_cli -i sft -p "Which OOA action would I use to read a CSV file into a table?" -t 0.2
 ''')
 
+import colab_rl_cells
+colab_rl_cells.build(md, code)
+
 md("""
 ## After this run
 - Checkpoints: `DRIVE_DIR/nanochat_base/base_checkpoints` (pretrained) and `chatsft_checkpoints` (OOA-trained).
 - Weak results on the held-out test are expected with the seed data. The next lever is more and better dialogues
   (edits, error fixing, missing-input questions), validated with the scorer in `eval/flow_check.py`.
+- Reinforcement layer: cells 9-10 (RL with the verifier as reward; self-improvement rounds). Feed real usage back with `ingest_feedback.py`.
 - For a stronger base, use `PROFILE = "t4"` and let it run (resume after disconnects), or an A100 on Colab Pro.
 """)
 
