@@ -12,10 +12,11 @@ import difflib, json, os
 
 _CAT = None
 _SCHEMA = None
+_SV = None   # schema validator, built once (jsonschema.validate() rebuilds it on every call: about 70 ms each)
 
 
 def configure(catalog_path=None, schema_path=None):
-    global _CAT, _SCHEMA
+    global _CAT, _SCHEMA, _SV
     catalog_path = catalog_path or os.environ["OOA_CATALOG"]
     schema_path = schema_path or os.environ["OOA_SCHEMA"]
     _CAT = {}
@@ -23,6 +24,8 @@ def configure(catalog_path=None, schema_path=None):
         e = json.loads(l)
         _CAT[e["id"]] = e
     _SCHEMA = json.load(open(schema_path, encoding="utf-8"))
+    import jsonschema
+    _SV = jsonschema.validators.validator_for(_SCHEMA)(_SCHEMA)
 
 
 def walk(nodes):
@@ -73,7 +76,7 @@ def score(text, gold=None):
     if not steps:
         return _total(p, gold)
     try:
-        jsonschema.validate(flow, _SCHEMA)
+        _SV.validate(flow)
         p["schema"] = 1.0
     except Exception:
         pass

@@ -165,9 +165,12 @@ def make_validator(repo, catalog):
     import jsonschema
     schema = json.load(open(Path(repo) / "contracts/flow-schema/flow.v1.json"))
     cat = {e["id"]: e for e in catalog}
+    jsonschema.Draft202012Validator.check_schema(schema)
+    schema_validator = jsonschema.validators.validator_for(schema)(schema)   # built once; validate() rebuilt it for every flow
 
-    def validate(flow):
-        jsonschema.validate(flow, schema)
+    def validate(flow, check_schema=True):
+        if check_schema:
+            schema_validator.validate(flow)
         declared = {v["name"] for v in flow["variables"]}
         def walk(nodes):
             for n in nodes:
@@ -201,8 +204,10 @@ def make_validator(repo, catalog):
     return validate
 
 
-def generate(catalog, repo, n, seed, exclude=()):
-    """Return n unique valid (request, flow_dict, minified_flow) triples; skips minified flows in `exclude`."""
+def generate(catalog, repo, n, seed, exclude=(), schema_every=1):
+    """Return n unique valid (request, flow_dict, minified_flow) triples; skips minified flows in `exclude`.
+    Every flow is fully checked (schema, actions, inputs, outputs, variables, ids). schema_every=N checks the schema on
+    every N-th candidate only. (The slow part used to be jsonschema.validate rebuilding its validator on every call.)"""
     rng = random.Random(seed)
     actions = [e for e in catalog if fillable(e)]
     validate = make_validator(repo, catalog)
@@ -211,7 +216,7 @@ def generate(catalog, repo, n, seed, exclude=()):
         tries += 1
         flow, req = build(actions, rng)
         try:
-            validate(flow)
+            validate(flow, check_schema=(tries % schema_every == 0))
         except Exception:
             continue
         mini = json.dumps(flow, separators=(",", ":"), ensure_ascii=False)

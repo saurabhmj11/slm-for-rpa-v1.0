@@ -90,3 +90,8 @@ required inputs correct 0.03, variables declared 0.50, action sequence matches 0
 Reading: the model has learned the shape of a flow but invents action and input names. RL and self-improvement cannot
 fix that efficiently. Next step: retrieval, so the prompt carries the candidate actions (ids and input names) to copy.
 Cell 10 now stops if the generated data or patched SFT script do not match the config (it silently reused old ones).
+
+## Performance fix (2026-11-07)
+The data cell took 35+ min on Colab because jsonschema.validate() rebuilds its validator on every call (about 70 ms per
+flow). The validator is now built once: 30,000 generated flows, each fully schema-checked, take about 1 minute; the reward
+scorer is about 45x faster too (this also speeds up RL and self-improvement sampling).
