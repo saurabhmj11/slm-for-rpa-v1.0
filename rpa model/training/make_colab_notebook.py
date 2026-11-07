@@ -38,7 +38,7 @@ This notebook was written without a GPU to test on, so if a cell errors, send me
 
 code('''
 #@title 1. Config
-PROFILE = "smoke"          # "smoke" = quick pipeline check, "t4" = real free-Colab run, "a100" = Colab Pro (A100/L4)
+PROFILE = "t4"             # "t4" = real free-Colab run, "smoke" = quick pipeline check (tiny model), "a100" = Colab Pro (A100/L4)
 DRIVE_DIR = "/content/drive/MyDrive/ooa-nanochat"   # checkpoints, data and tokenizer live here
 NANOCHAT_COMMIT = "92d63d4e8bb4df75c3b71618f31ddde2378b2bcd"   # version this notebook was written against
 PLATFORM_REPO = "https://github.com/OneOfficeautomation-Private-Limited/OneOfficeAutomation-Platform"
