@@ -95,3 +95,9 @@ Cell 10 now stops if the generated data or patched SFT script do not match the c
 The data cell took 35+ min on Colab because jsonschema.validate() rebuilds its validator on every call (about 70 ms per
 flow). The validator is now built once: 30,000 generated flows, each fully schema-checked, take about 1 minute; the reward
 scorer is about 45x faster too (this also speeds up RL and self-improvement sampling).
+
+## Kaggle version
+`training/make_kaggle_notebook.py` turns the Colab notebook into `ooa_nanochat_kaggle.ipynb` (no Drive; files in
+/kaggle/working; internet check; restores `nanochat_base` from /kaggle/input; last cell packages the model as a zip).
+Syntax-checked and the packaging cell tested on fake files; NOT yet run on Kaggle. Kaggle notes: GPU T4 x2 or P100
+(this notebook uses one GPU), about 30 GPU hours per week, session up to 12 h, Internet must be On (phone verification).
