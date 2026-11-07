@@ -83,3 +83,10 @@ and the self-improvement loop only grows as far as the generator's request style
   added about 22 rows to 13,400. A 20-request round took about 3 minutes (so about 15 min for 100 requests).
 - The round log now also reports the average of each reward part, to show why answers fail (invalid JSON, wrong actions,
   wrong order, missing inputs).
+
+## Round table with per-part scores (2026-11-07)
+Average reward part over all samples (1.0 = always fine): valid JSON 0.73-0.75, schema 0.53-0.56, actions exist 0.22,
+required inputs correct 0.03, variables declared 0.50, action sequence matches 0.25-0.29. Fresh-request pass@8: 5-10%.
+Reading: the model has learned the shape of a flow but invents action and input names. RL and self-improvement cannot
+fix that efficiently. Next step: retrieval, so the prompt carries the candidate actions (ids and input names) to copy.
+Cell 10 now stops if the generated data or patched SFT script do not match the config (it silently reused old ones).

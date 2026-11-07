@@ -72,6 +72,14 @@ import json, os, shutil
 os.environ["OOA_CATALOG"] = f"{DRIVE_DIR}/sft/catalog.jsonl"
 os.environ["OOA_SCHEMA"] = "/content/platform/contracts/flow-schema/flow.v1.json"
 !cp /content/ooa/ooa_self_improve.py /content/nanochat/scripts/ooa_self_improve.py
+# guards: cell 10 reuses the data and the patched chat_sft.py from cells 6-7. Stop if they do not match the config.
+import re as _re
+_n = sum(1 for _ in open(f"{DRIVE_DIR}/sft/synth_train.jsonl"))
+_patched = open("/content/nanochat/scripts/chat_sft.py").read()
+_ep = _re.search(r"\\) \\* (\\d+)\\n", _patched)
+print(f"synth_train.jsonl rows: {_n} (config SYNTH_TRAIN={SYNTH_TRAIN}) | patched SFT epochs: {_ep.group(1) if _ep else '?'} (config {SFT_EPOCHS})")
+if _n < 0.9 * SYNTH_TRAIN or (_ep and int(_ep.group(1)) != SFT_EPOCHS):
+    raise RuntimeError("Data or SFT patch is out of date for the current config. Run cell 1, cell 6 (data), cell 7 (SFT), then run this cell again.")
 sft_cmd = (f"python -m scripts.chat_sft --max-seq-len={SFT_SEQ} --device-batch-size={SFT_DEVICE_BATCH} "
            f"--total-batch-size={SFT_SEQ*SFT_DEVICE_BATCH*4} --num-iterations={SFT_ITERS} "
            f"--eval-every=100 --eval-tokens={SFT_SEQ*SFT_DEVICE_BATCH*8} --chatcore-every=-1 --run=dummy")

@@ -73,6 +73,7 @@ SFT_ITERS = 400 if PROFILE == "smoke" else 3000            # upper limit; traini
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
 MAX_FLOW_CHARS = 9000      # skip training flows longer than this (about SFT_SEQ tokens)
 print(PROFILE, P, "iterations:", NUM_ITERS)
+print("SFT settings -> SYNTH_TRAIN:", SYNTH_TRAIN, "| SFT_EPOCHS:", SFT_EPOCHS, "| SFT_ITERS cap:", SFT_ITERS)
 ''')
 
 code('''
