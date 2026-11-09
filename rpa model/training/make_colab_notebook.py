@@ -69,6 +69,7 @@ SFT_EPOCHS = 2 if PROFILE == "smoke" else 6      # passes over the OOA data (the
 FLOW_REPEAT = 15           # each flow example is repeated this many times per pass so flows are about a third of the data
 SYNTH_TRAIN = 1500 if PROFILE == "smoke" else 30000   # generated flows (no LLM), see gen_flows.py
 SYNTH_EVAL = 20            # unseen generated flows scored by exact action sequence
+SYNTH_PATTERN = 2000 if PROFILE == "smoke" else 12000   # long, multi-toolkit flows following real-flow patterns (gen_flows.real_patterns)
 # Reinforcement layer (after SFT)
 RL_PROMPTS = 60 if PROFILE == "smoke" else 400     # requests for RL; each gets RL_SAMPLES answers scored by the verifier
 RL_SAMPLES = 8
@@ -78,7 +79,7 @@ SELF_IMPROVE_ROUNDS = 2
 SI_PROMPTS = 20 if PROFILE == "smoke" else 100     # fresh requests per self-improvement round
 SI_SAMPLES = 8
 EVAL_SOURCE = "sft"        # which model the test cell loads: "sft" or "rl"
-SFT_ITERS = 400 if PROFILE == "smoke" else 3000            # upper limit; training also stops when the data runs out
+SFT_ITERS = 400 if PROFILE == "smoke" else 8000            # counted in MICRO-batches (4 per optimizer step): 8000 = 2000 steps, about 35 min on a T4
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
 MAX_FLOW_CHARS = 9000      # skip training flows longer than this (about SFT_SEQ tokens)
 print(PROFILE, P, "iterations:", NUM_ITERS)
@@ -181,6 +182,17 @@ with open(f"{DRIVE_DIR}/sft/val.jsonl", "w") as f:
         f.write(json.dumps(r) + "\\n")
 print("validation rows (unseen):", len(val_rows) + len(extra))
 print("synthetic eval prompts (not in train):", len(ev))
+!python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform {DRIVE_DIR}/sft/synth_pattern.jsonl {SYNTH_PATTERN} 1 patterns
+!python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform /content/pattern_eval_raw.jsonl 200 2 patterns
+_ptrain = {json.loads(l)["messages"][1]["content"] for l in open(f"{DRIVE_DIR}/sft/synth_pattern.jsonl")}
+_pev = []
+for l in open("/content/pattern_eval_raw.jsonl"):
+    m = json.loads(l)["messages"]
+    if m[1]["content"] not in _ptrain and len(_pev) < SYNTH_EVAL:
+        _f = json.loads(m[1]["content"])
+        _pev.append({"prompt": m[0]["content"], "gold_flow": m[1]["content"]})
+open(f"{DRIVE_DIR}/sft/eval_pattern.jsonl", "w").write("\\n".join(json.dumps(x) for x in _pev))
+print("real-pattern eval prompts (not in train):", len(_pev))
 !cp /content/ooa/ooa_task.py /content/nanochat/tasks/ooa.py
 !head -c 700 {DRIVE_DIR}/sft/train.jsonl
 ''' % json.dumps(files))
@@ -197,7 +209,8 @@ if "OOADialogues" not in s:
     a = s.index("train_tasks = [")
     b = s.index("\\n", s.index("# total: 24K"))
     new = f"""train_tasks = ([OOADialogues("{DRIVE_DIR}/sft/train_flows.jsonl") for _ in range({FLOW_REPEAT})]
-               + [OOADialogues("{DRIVE_DIR}/sft/train_catalog.jsonl"), OOADialogues("{DRIVE_DIR}/sft/synth_train.jsonl")]) * {SFT_EPOCHS}
+               + [OOADialogues("{DRIVE_DIR}/sft/train_catalog.jsonl"), OOADialogues("{DRIVE_DIR}/sft/synth_train.jsonl"),
+                  OOADialogues("{DRIVE_DIR}/sft/synth_pattern.jsonl")]) * {SFT_EPOCHS}
 import os as _os
 _extra = [OOADialogues("{DRIVE_DIR}/sft/" + _f) for _f in ("self_improved.jsonl", "hard_fixed.jsonl", "feedback_train.jsonl")
           if _os.path.exists("{DRIVE_DIR}/sft/" + _f)]
@@ -209,6 +222,17 @@ train_dataset = TaskMixture(train_tasks)
 print0(f"OOA training mixture: {{len(train_dataset):,}} rows")
 val_dataset = TaskMixture([OOADialogues("{DRIVE_DIR}/sft/val.jsonl")])"""
     s = s[:a] + new + s[b:]
+    # never train on a cut-off flow: nanochat truncates conversations to 2048 tokens; skip ones longer than a row instead
+    old_r = "            ids, mask = tokenizer.render_conversation(conversation)\\n            conv_buffer.append((ids, mask))"
+    new_r = ("            ids, mask = tokenizer.render_conversation(conversation, max_tokens=10**9)\\n"
+             "            if len(ids) <= row_capacity:\\n"
+             "                conv_buffer.append((ids, mask))\\n"
+             "            else:\\n"
+             "                skipped_long[0] += 1")
+    assert old_r in s, "chat_sft.py loader changed upstream"
+    s = s.replace(old_r, new_r)
+    s = s.replace("last_step = False # we will toggle this", "skipped_long = [0]\\nlast_step = False # we will toggle this")
+    s = s.replace('print0(f"Total training time:', 'print0(f"Conversations skipped as longer than the window (not cut): {skipped_long[0]}")\\nprint0(f"Total training time:')
     open(p, "w").write(s)
     print("patched chat_sft.py")
 # remove old SFT checkpoints: nanochat loads the highest step number, so a stale step-100 would hide a newer, shorter run
@@ -277,6 +301,18 @@ for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval_synth.jsonl")):
         pass
     sr.append(r)
 print(f"synthetic eval: {len(sr)} | valid JSON {sum(r['json'] for r in sr)} | schema OK {sum(r['schema'] for r in sr)} | actions exist {sum(r['actions_known'] for r in sr)} | exact action sequence {sum(r['actions_match'] for r in sr)}")
+print("\\n=== Real-pattern eval: unseen long, multi-toolkit flows (closest thing to real flows) ===")
+sys.path.insert(0, "/content/ooa")
+import ooa_reward as RW
+os.environ["OOA_CATALOG"] = f"{DRIVE_DIR}/sft/catalog.jsonl"; os.environ["OOA_SCHEMA"] = "/content/platform/contracts/flow-schema/flow.v1.json"
+RW.configure()
+pr = []
+for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval_pattern.jsonl")):
+    out = subprocess.run(["python", "-m", "scripts.chat_cli", "-i", EVAL_SOURCE, "-p", row["prompt"], "-t", "0.2"],
+                         capture_output=True, text=True, cwd="/content/nanochat").stdout
+    sc = RW.score(out.split("Assistant:", 1)[-1], RW.gold_actions(row["gold_flow"]))
+    pr.append(sc)
+print(f"real-pattern eval: {len(pr)} | valid (passes every rule) {sum(x['valid'] for x in pr)} | exact action sequence {sum(x['solved'] for x in pr)} | mean score {sum(x['total'] for x in pr)/max(1,len(pr)):.3f}")
 print("\\nTry it yourself:")
 !cd /content/nanochat && python -m scripts.chat_cli -i sft -p "Which OOA action would I use to read a CSV file into a table?" -t 0.2
 ''')

@@ -42,6 +42,9 @@ def clean_desc(d):
 def build(cat_actions, rng, cfg=None):
     cfg = cfg or {}
     n_steps = rng.choices([1, 2, 3, 4], weights=cfg.get("step_weights", [25, 35, 25, 15]))[0]
+    pat = cfg.get("patterns")          # learned from real flows: which action follows which (see real_patterns)
+    if pat:
+        n_steps = rng.choice(pat["lengths"])
     variables, steps, used_names = [], [], set()
     avail = []  # (var_name, vtype) outputs not yet consumed
     descs, in_names = [], []
@@ -57,6 +60,12 @@ def build(cat_actions, rng, cfg=None):
     prev = None
     descs_steps = []
     for si in range(n_steps):
+        e = None
+        if pat:
+            pool = pat["starters"] if prev is None else pat["next"].get(prev["id"], [])
+            pool = [pat["by_id"][a] for a in pool if a in pat["by_id"]]
+            if pool:
+                e = rng.choice(pool)        # repeats in the list = how often real flows make that move
         cands = cat_actions
         if prev is not None and avail:
             want = {t for _, t in avail}
@@ -66,9 +75,10 @@ def build(cat_actions, rng, cfg=None):
             cands = [c for c in cat_actions if c["toolkit_id"] == prev["toolkit_id"]
                      and (not avail or any(vtype(i["type"]) in {t for _, t in avail}
                                            for i in c["inputs"] if i["required"]))]
-            if not cands:
+            if not cands and e is None:
                 break
-        e = rng.choice(cands)
+        if e is None:
+            e = rng.choice(cands)
         args = {}
         for i in [i for i in e["inputs"] if i["required"]]:
             t = vtype(i["type"])
@@ -162,6 +172,38 @@ def build(cat_actions, rng, cfg=None):
     return flow, chain + extra
 
 
+def real_patterns(repo, catalog, max_len=10):
+    """Action-to-action moves seen in the REAL example flows (excluding held-out test families), as a generator config.
+    Real flows are long and cross toolkits (browser -> excel -> email); this lets generated flows do the same."""
+    import glob, hashlib, os
+    by_id = {e["id"]: e for e in catalog if fillable(e)}
+    nxt, starters, lengths = {}, [], []
+    for path in sorted(glob.glob(str(Path(repo) / "examples" / "**" / "*.flow.json"), recursive=True)):
+        fam = re.sub(r"-capture$", "", os.path.basename(path)[:-len(".flow.json")])
+        if int(hashlib.sha1(fam.encode()).hexdigest(), 16) % 4 == 0:      # same rule as build_sft_data: held out
+            continue
+        flow = json.load(open(path, encoding="utf-8"))
+        seq = []
+        def walk(ns):
+            for n in ns or []:
+                if isinstance(n, dict):
+                    if not str(n.get("action", "")).startswith("core/"):
+                        seq.append(n.get("action"))
+                    for k in ("children", "else", "finally"):
+                        if isinstance(n.get(k), list):
+                            walk(n[k])
+                    for c in n.get("catch") or []:
+                        walk(c.get("children"))
+        walk(flow.get("steps"))
+        if len(seq) < 2:
+            continue
+        starters.append(seq[0])
+        lengths.append(max(3, min(max_len, len(seq))))
+        for a, b in zip(seq, seq[1:]):
+            nxt.setdefault(a, []).append(b)
+    return {"next": nxt, "starters": starters, "lengths": lengths, "by_id": by_id}
+
+
 def make_validator(repo, catalog):
     import jsonschema
     schema = json.load(open(Path(repo) / "contracts/flow-schema/flow.v1.json"))
@@ -205,7 +247,7 @@ def make_validator(repo, catalog):
     return validate
 
 
-def generate(catalog, repo, n, seed, exclude=(), schema_every=1, cfg=None):
+def generate(catalog, repo, n, seed, exclude=(), schema_every=1, cfg=None, max_chars=None):
     """Return n unique valid (request, flow_dict, minified_flow) triples; skips minified flows in `exclude`.
     Every flow is fully checked (schema, actions, inputs, outputs, variables, ids). schema_every=N checks the schema on
     every N-th candidate only. (The slow part used to be jsonschema.validate rebuilding its validator on every call.)"""
@@ -223,12 +265,25 @@ def generate(catalog, repo, n, seed, exclude=(), schema_every=1, cfg=None):
         mini = json.dumps(flow, separators=(",", ":"), ensure_ascii=False)
         if mini in seen:
             continue
+        q = rng.choice(WORDINGS).format(c=req)
+        if max_chars and len(q) + len(mini) > max_chars:   # rows longer than the training window never fit nanochat's packing
+            continue
         seen.add(mini)
-        out.append((rng.choice(WORDINGS).format(c=req), flow, mini))
+        out.append((q, flow, mini))
     return out
 
 
 def main():
+    if len(sys.argv) > 6 and sys.argv[6] == "patterns":     # real-flow patterns: long, multi-toolkit flows
+        cat_path, repo, out, n, seed = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
+        catalog = [json.loads(l) for l in open(cat_path, encoding="utf-8")]
+        rows = generate(catalog, repo, n, seed, cfg={"patterns": real_patterns(repo, catalog)}, max_chars=5500)
+        with open(out, "w", encoding="utf-8") as f:
+            for q, _, mini in rows:
+                f.write(json.dumps({"messages": [{"role": "user", "content": q}, {"role": "assistant", "content": mini}]}, ensure_ascii=False) + "\n")
+        lens = sorted(len(m) for *_, m in rows)
+        print(f"{len(rows)} real-pattern flows | chars median {lens[len(lens)//2]} max {lens[-1]}")
+        return
     cat_path, repo, out = sys.argv[1], sys.argv[2], sys.argv[3]
     n = int(sys.argv[4]) if len(sys.argv) > 4 else 3000
     rng = random.Random(int(sys.argv[5]) if len(sys.argv) > 5 else 1)
