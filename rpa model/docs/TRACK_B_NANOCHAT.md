@@ -110,3 +110,11 @@ toolkit) are far easier, so synthetic scores do NOT predict real performance. Co
 requests; complex ones go to Claude, with the whole best-matching toolkits in the prompt.
 Built and tested: `serving/` (OpenAI-compatible server, router, repair, verifier, PII masking, client policy switches,
 feedback endpoint; 8 end-to-end tests with fake models), `training/repair.py`, `ooa_reward.problems()`.
+
+## Autoresearch (2026-11-09)
+`training/autoresearch/`: adapted from karpathy/autoresearch (MIT): single editable file (`recipe.py`), fixed 12M-token budget
+(`constants.py`), frozen scoreboard (`frozen/`, sha256-checked: 40 generated + 4 real flows, with its own catalog snapshot),
+read-only runner (`run_experiment.py`: builds data, drops rows overlapping the frozen set, trains, scores), scripted
+hill-climbing (`loop.py`, results.tsv, resumable) and agent instructions (`program.md`). Tested here: loop logic with a fake runner,
+runner dry-run, guards (budget and unknown-key edits refused), embedded scoreboard integrity. NOT run on a GPU yet.
+Notebook cell 12 runs it. Metric: score = mean verifier reward on frozen generated requests; real_score = on 4 real flows.

@@ -14,6 +14,11 @@ files = {
     "ooa_rl_task.py": (H / "ooa_rl_task.py").read_text(encoding="utf-8"),
     "ooa_self_improve.py": (H / "ooa_self_improve.py").read_text(encoding="utf-8"),
     "ingest_feedback.py": (H / "ingest_feedback.py").read_text(encoding="utf-8"),
+    "autoresearch/constants.py": (H / "autoresearch/constants.py").read_text(encoding="utf-8"),
+    "autoresearch/recipe.py": (H / "autoresearch/recipe.py").read_text(encoding="utf-8"),
+    "autoresearch/loop.py": (H / "autoresearch/loop.py").read_text(encoding="utf-8"),
+    "autoresearch/run_experiment.py": (H / "autoresearch/run_experiment.py").read_text(encoding="utf-8"),
+    "autoresearch/ooa_eval_frozen.py": (H / "autoresearch/ooa_eval_frozen.py").read_text(encoding="utf-8"),
     "flow_check.py": (H.parent / "eval/flow_check.py").read_text(encoding="utf-8"),
 }
 
@@ -148,6 +153,7 @@ import json
 os.makedirs("/content/ooa", exist_ok=True)
 FILES = %s
 for name, text in FILES.items():
+    os.makedirs(os.path.dirname(f"/content/ooa/{name}"), exist_ok=True)
     open(f"/content/ooa/{name}", "w", encoding="utf-8").write(text)
 if not os.path.exists("/content/platform"):
     !git clone -q --depth 1 {PLATFORM_REPO} /content/platform
@@ -273,6 +279,12 @@ print("\\nTry it yourself:")
 
 import colab_rl_cells
 colab_rl_cells.build(md, code)
+
+import base64, zlib
+_frozen = {n: (H / "autoresearch/frozen" / n).read_text(encoding="utf-8") for n in ("frozen_eval.jsonl", "frozen_catalog.jsonl", "frozen_eval.sha256")}
+FROZEN_BLOB = base64.b64encode(zlib.compress(json.dumps(_frozen).encode(), 9)).decode()
+import colab_ar_cells
+colab_ar_cells.build(md, code, FROZEN_BLOB)
 
 md("""
 ## After this run

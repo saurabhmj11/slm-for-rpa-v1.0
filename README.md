@@ -1,66 +1,32 @@
-# 100K-Param Agent-Brain Prototype
+# OOA Assistant (slm-for-rpa)
 
-A from-scratch, ~100K-parameter GPT-style transformer trained to do three
-things at once: **route** a query to the right agent, emit a well-formed
-**tool call**, and produce a final **reasoned answer** from the tool's
-observation — the core loop your agent force needs, at toy scale.
+An in-house assistant that writes OneOfficeAutomation Flow JSON from plain-language requests, built around a small model we
+train ourselves, a verifier that checks every answer against the platform's rules, a router that can escalate hard requests to
+Claude (only if the client's policy allows), and loops that let the system improve itself.
 
-This is a **proof-of-pipeline model**, not a capability model. The point
-is to validate the full stack — custom tokenizer → synthetic agent data →
-architecture → training → inference — cheaply on CPU, before spending
-real compute scaling the same recipe to a model that can actually reason
-over open-ended tasks.
+**Start here:** [`rpa model/docs/EXPLAINER.md`](rpa%20model/docs/EXPLAINER.md) (what it is, how it learns, what is proven).
+Plan and notes: [`rpa model/docs/TRACK_B_NANOCHAT.md`](rpa%20model/docs/TRACK_B_NANOCHAT.md).
 
-## Results
-
-Trained for 3000 iterations (~6.5 min on CPU): train/val loss dropped
-from 6.15 → 0.14. Sample outputs (see `infer.py`):
-
-```
-PROMPT:  what is the weather in nagpur ?
-OUTPUT:  <thought> user wants weather info <route> weather_agent
-         <tool_call> {"tool":"get_weather","args":{"city":"nagpur"}}
-         <observation> 27 celsius cloudy
-         <action> the weather in nagpur is 27 degrees celsius and cloudy
-
-PROMPT:  what is 9 plus 6 ?
-OUTPUT:  <route> math_agent
-         <tool_call> {"tool":"calculator","args":{"expr":"9+6"}}
-         <observation> 13
-         <action> the sum is 13          <- correct
-```
-
-Routing accuracy, tool-call formatting, and simple arithmetic are all
-correctly learned at 99,880 parameters. This confirms the DSL design and
-training loop are sound.
-
-## Files
-
-| File | Purpose |
+## Layout (`rpa model/`)
+| Folder | What |
 |---|---|
-| `tokenizer.py` | Fixed ~460-token word-level vocab for the agent DSL (routes, JSON syntax, digits, toy-domain words) |
-| `data_gen.py` | Synthetic trajectory generator for 3 toy skills: weather lookup, math, fact search |
-| `model.py` | GPT-style decoder-only transformer (`vocab=460, n_embd=40, n_layer=4, n_head=2` → 99,920 params) |
-| `train.py` | Training loop with checkpoint/resume (`--iters N --total_iters M`) |
-| `infer.py` | Loads `best_model.pt` and runs sample prompts |
-| `best_model.pt` | Trained checkpoint (best val loss: 0.141) |
+| `data/catalog/` | builds `catalog.jsonl` from the platform's toolkit docs |
+| `training/` | flow generator, SFT data, verifier/reward, RL task, self-improvement, retrieval, repair, Colab and Kaggle notebooks |
+| `training/autoresearch/` | frozen scoreboard, fixed-budget experiment runner, scripted search loop, agent instructions (`program.md`) |
+| `serving/` | OpenAI-compatible server, router, client policy, feedback endpoint |
+| `eval/` | flow checker (schema + catalog) |
 
-## Known limitation
+## Run the tests (no GPU, needs `jsonschema`; platform repo cloned somewhere)
+```bash
+python "rpa model/training/test_reward.py" PLATFORM_REPO
+python "rpa model/serving/test_server.py" PLATFORM_REPO
+python "rpa model/training/autoresearch/test_loop.py"
+```
+Train: open `rpa model/training/ooa_nanochat_colab.ipynb` (Colab) or `ooa_nanochat_kaggle.ipynb` (Kaggle) and follow the cells.
 
-Numbers must be digit-spaced in prompts (`1 4` not `14`) — the tokenizer
-has no token for multi-digit numbers by design, to keep the vocab (and
-therefore the model) tiny. `data_gen.py` already does this correctly for
-training data; it only matters if you hand-type a prompt for `infer.py`.
+## Status
+Early. Pipeline and safeguards are tested; the trained model is small and weak, and real flows (about 18 steps) are much harder than
+the generated training flows. See the explainer for honest numbers. Not production software.
 
-## Scaling this up
-
-This same recipe (custom control tokens + routing/tool-call/reasoning
-mix in the training data) is exactly what the full-scale plan needs —
-just with:
-- a much larger, more diverse synthetic + real dataset per skill
-- a real subword tokenizer once vocab needs exceed toy scale
-- a bigger model (350M–1B+) and GPU time for pretraining
-- real tool integrations instead of templated toy tools
-
-Re-run `train.py --iters N --total_iters M` to keep training this
-checkpoint further, or bump `GPTConfig` in `model.py` to size up.
+Built on ideas and code from [karpathy/nanochat](https://github.com/karpathy/nanochat) (MIT); the recipe loop follows
+[karpathy/autoresearch](https://github.com/karpathy/autoresearch) (MIT).

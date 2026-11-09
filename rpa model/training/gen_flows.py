@@ -39,8 +39,9 @@ def clean_desc(d):
     return d.strip().rstrip(".").strip()
 
 
-def build(cat_actions, rng):
-    n_steps = rng.choices([1, 2, 3, 4], weights=[25, 35, 25, 15])[0]
+def build(cat_actions, rng, cfg=None):
+    cfg = cfg or {}
+    n_steps = rng.choices([1, 2, 3, 4], weights=cfg.get("step_weights", [25, 35, 25, 15]))[0]
     variables, steps, used_names = [], [], set()
     avail = []  # (var_name, vtype) outputs not yet consumed
     descs, in_names = [], []
@@ -97,7 +98,7 @@ def build(cat_actions, rng):
         descs.append(clean_desc(e["description"]))
         prev = e
     # optionally wrap the chain in a control-flow container (loop / if / try)
-    wrap_kind = rng.choices(["none", "loop", "if", "try"], weights=[55, 17, 14, 14])[0]
+    wrap_kind = rng.choices(["none", "loop", "if", "try"], weights=cfg.get("wrap_weights", [55, 17, 14, 14]))[0]
     prefix, suffix = "", ""
     body = steps
     if wrap_kind == "loop":
@@ -204,7 +205,7 @@ def make_validator(repo, catalog):
     return validate
 
 
-def generate(catalog, repo, n, seed, exclude=(), schema_every=1):
+def generate(catalog, repo, n, seed, exclude=(), schema_every=1, cfg=None):
     """Return n unique valid (request, flow_dict, minified_flow) triples; skips minified flows in `exclude`.
     Every flow is fully checked (schema, actions, inputs, outputs, variables, ids). schema_every=N checks the schema on
     every N-th candidate only. (The slow part used to be jsonschema.validate rebuilding its validator on every call.)"""
@@ -214,7 +215,7 @@ def generate(catalog, repo, n, seed, exclude=(), schema_every=1):
     seen, out, tries = set(exclude), [], 0
     while len(out) < n and tries < n * 30:
         tries += 1
-        flow, req = build(actions, rng)
+        flow, req = build(actions, rng, cfg)
         try:
             validate(flow, check_schema=(tries % schema_every == 0))
         except Exception:
