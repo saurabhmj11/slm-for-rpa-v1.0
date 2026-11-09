@@ -6,8 +6,8 @@ from recipe import RECIPE
 calls = []
 def fake(recipe):
     calls.append(loop.rhash(recipe))
-    if recipe["seq_len"] == 1024:
-        raise RuntimeError("out of memory")                 # a crashing config
+    if recipe["smoltalk_rows"] == 1500:
+        raise RuntimeError("out of memory")                 # a crashing config (any failed run)
     s = 0.40
     s += 0.05 * (recipe["init_lr_frac"] == 0.5)            # hidden truth: lower LR helps
     s += 0.03 * (recipe["synth_train"] == 16000)           # more data helps

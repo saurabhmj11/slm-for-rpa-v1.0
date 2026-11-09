@@ -66,6 +66,29 @@ def extract_json(text):
     return text[i:j + 1] if i != -1 and j > i else text
 
 
+def parse_messages(messages):
+    """OpenAI-style messages -> (request, system, assistant_mode, existing_variables, full_user_text).
+    The platform's Studio assistant sends: system = long instructions + its action catalog, user = 'Existing variables: [...]\nRequest: ...'
+    and reads back {"variables": [...], "steps": [...], "notes": "..."}. Anything else is treated as a plain request."""
+    system = "\n".join(m["content"] for m in messages if m.get("role") == "system" and isinstance(m.get("content"), str))
+    users = [m for m in messages if m.get("role") == "user"]
+    text = users[-1].get("content", "") if users else ""
+    if isinstance(text, list):
+        text = " ".join(x.get("text", "") for x in text if isinstance(x, dict))
+    assistant = text.startswith("Existing variables:") and "\nRequest:" in text
+    existing = []
+    if assistant:
+        try:
+            existing = json.loads(text[len("Existing variables:"):text.index("\nRequest:")])
+            existing = existing if isinstance(existing, list) else []
+        except Exception:
+            existing = []
+        request = text.split("\nRequest:", 1)[1].strip()
+    else:
+        request = text
+    return request, system, assistant, existing, text
+
+
 class Router:
     def __init__(self, catalog, platform, policy, local=None, cloud=None):
         os.environ["OOA_CATALOG"] = catalog
@@ -82,15 +105,32 @@ class Router:
         self.lock = threading.Lock()
 
     # -- one attempt: parse -> repair -> verify ---------------------------------------------------
-    def check(self, raw):
+    def check(self, raw, existing=None, assistant=False):
         text = extract_json(raw)
         try:
-            flow = json.loads(text)
+            obj = json.loads(text)
         except Exception:
             return None, R.problems(text)
+        if not isinstance(obj, dict):
+            return None, ["The answer is not a JSON object."]
+        # Studio's assistant format has no kind/id/name: wrap it so the same verifier applies
+        flow = obj if "kind" in obj else {"kind": "TaskBot", "id": "assistant_check", "name": "assistant check",
+                                          "variables": list(obj.get("variables", [])), "steps": obj.get("steps", [])}
+        names = {v.get("name") for v in flow.get("variables", []) if isinstance(v, dict)}
+        extra = [v for v in (existing or []) if isinstance(v, dict) and v.get("name") not in names]
+        if extra:
+            flow = {**flow, "variables": list(flow.get("variables", [])) + extra}   # variables already in the user's open agent
         flow, notes = RP.repair(flow, self.cat)
         mini = json.dumps(flow, separators=(",", ":"), ensure_ascii=False)
-        return (mini, notes) if not R.problems(mini) else (None, R.problems(mini))
+        problems = R.problems(mini)
+        if problems:
+            return None, problems
+        if assistant:
+            have = {v.get("name") for v in (existing or []) if isinstance(v, dict)}
+            out = {"variables": [v for v in flow.get("variables", []) if v.get("name") not in have], "steps": flow["steps"],
+                   "notes": "Written by the OOA assistant and checked against the platform's rules."}
+            return json.dumps(out, separators=(",", ":"), ensure_ascii=False), notes
+        return mini, notes
 
     def cloud_prompt(self, request, errors):
         cands = self.index.search(request, 40)
@@ -115,7 +155,7 @@ class Router:
         user = request if not errors else request + "\n\nYour previous answer had these problems, fix them:\n- " + "\n- ".join(errors)
         return system, user
 
-    def run(self, request):
+    def run(self, request, system=None, assistant=False, existing=None, full_user=None):
         t0, tried, errors = time.time(), [], []
         p = self.policy
         simple = clauses(request) <= p.max_clauses_local and len(request) <= 500
@@ -126,7 +166,7 @@ class Router:
                 except Exception as ex:
                     errors = [f"local model error: {ex}"]
                     break
-                flow, info = self.check(raw)
+                flow, info = self.check(raw, existing, assistant)
                 tried.append({"source": "local", "ok": flow is not None})
                 if flow:
                     return self.done(request, flow, "local", tried, info, t0)
@@ -137,14 +177,18 @@ class Router:
             req = mask(request) if p.mask_pii else request
             err = [mask(e) if p.mask_pii else e for e in errors if not e.startswith("request looks")]
             for attempt in range(2):
-                system, user = self.cloud_prompt(req, err)
+                if assistant and system:      # the platform's own prompt carries its live action catalog: use it
+                    sys_p = system
+                    user = (mask(full_user) if p.mask_pii else full_user) + ("\n\nYour previous answer had these problems, fix them:\n- " + "\n- ".join(err) if err else "")
+                else:
+                    sys_p, user = self.cloud_prompt(req, err)
                 try:
-                    raw = self.cloud.generate(system, user)
+                    raw = self.cloud.generate(sys_p, user)
                 except Exception as ex:
                     err = [f"cloud call failed: {ex}"]
                     tried.append({"source": "cloud", "ok": False, "error": str(ex)[:120]})
                     break
-                flow, info = self.check(raw)
+                flow, info = self.check(raw, existing, assistant)
                 tried.append({"source": "cloud", "ok": flow is not None})
                 if flow:
                     return self.done(request, flow, "cloud", tried, info, t0)
@@ -219,15 +263,22 @@ def make_handler(router):
             except Exception:
                 return self._send(400, {"error": "invalid JSON body"})
             if self.path == "/v1/chat/completions":
-                msgs = [m for m in body.get("messages", []) if m.get("role") == "user"]
-                if not msgs:
+                if not [m for m in body.get("messages", []) if m.get("role") == "user"]:
                     return self._send(400, {"error": "send at least one user message"})
-                res = router.run(msgs[-1]["content"])
-                content = res["flow"] if res["verified"] else json.dumps({"error": res["reason"], "problems": res.get("problems", [])})
+                request, system, assistant, existing, full_user = parse_messages(body["messages"])
+                res = router.run(request, system, assistant, existing, full_user)
+                if res["verified"]:
+                    content = res["flow"]
+                elif assistant:   # Studio reads steps/notes: an empty answer with the honest reason is shown to the user
+                    content = json.dumps({"variables": [], "steps": [], "notes": "No flow was returned: " + res["reason"] + ". " + " ".join(res.get("problems", [])[:2])})
+                else:
+                    content = json.dumps({"error": res["reason"], "problems": res.get("problems", [])})
+                pt = sum(len(str(m.get("content", ""))) for m in body["messages"]) // 4
                 return self._send(200, {"id": "ooa-" + str(int(time.time() * 1000)), "object": "chat.completion",
-                                        "created": int(time.time()), "model": "ooa-assistant",
+                                        "created": int(time.time()), "model": body.get("model") or "ooa-assistant",
                                         "choices": [{"index": 0, "finish_reason": "stop" if res["verified"] else "length",
                                                      "message": {"role": "assistant", "content": content}}],
+                                        "usage": {"prompt_tokens": pt, "completion_tokens": len(content) // 4, "total_tokens": pt + len(content) // 4},
                                         "ooa": {k: v for k, v in res.items() if k != "flow"}})
             if self.path == "/v1/feedback":
                 return self._send(200, router.feedback(body))

@@ -28,7 +28,7 @@ def load_recipe(path):
     extra = set(r) - ALLOWED
     assert not extra, f"unknown recipe keys: {sorted(extra)}"
     assert r["token_budget"] == FIXED_TOKEN_BUDGET, "token_budget is fixed (constants.py); experiments must stay comparable"
-    assert r["seq_len"] in (512, 1024, 2048, 4096) and r["device_batch"] >= 1 and r["grad_accum"] >= 1
+    assert r["seq_len"] in (2048, 4096), "seq_len must be 2048 or 4096: real flows are longer than 1024 tokens and break nanochat's packing at 1024 (experiment #5: val_bpb 9.0)" and r["device_batch"] >= 1 and r["grad_accum"] >= 1
     assert len(r["step_weights"]) == 4 and len(r["wrap_weights"]) == 4 and sum(r["step_weights"]) > 0 and sum(r["wrap_weights"]) > 0
     assert 0 < r["init_lr_frac"] <= 3 and 0 <= r["warmdown_ratio"] <= 1
     return r
@@ -127,6 +127,9 @@ ev = subprocess.run(eval_cmd, cwd=nc, env=env, capture_output=True, text=True)
 if ev.returncode != 0:
     print((ev.stdout + ev.stderr)[-1500:]); sys.exit(1)
 res = json.load(open(work / "eval.json"))
+if bpb and float(bpb[-1]) > 5:
+    print("TRAINING FAILED: validation loss", bpb[-1], "(a trained model is below 1). Not counted as a result.")
+    sys.exit(1)
 res.update({"val_bpb": float(bpb[-1]) if bpb else None, "minutes": round((time.time() - t_start) / 60, 1),
             "train_tokens_M": round(real_tokens / 1e6, 1), "optimizer_steps": opt_steps, "leaked_rows_dropped": dropped})
 json.dump(res, open(work / "result.json", "w"))

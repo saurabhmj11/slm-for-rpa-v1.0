@@ -19,7 +19,6 @@ SEARCH_SPACE = {
     "include_catalog": [True, False],
     "step_weights":   [[25, 35, 25, 15], [10, 30, 30, 30], [40, 40, 15, 5], [0, 25, 35, 40]],
     "wrap_weights":   [[55, 17, 14, 14], [30, 25, 20, 25], [80, 7, 7, 6]],
-    "seq_len":        [1024, 2048],
 }
 # Informed order: tried first (each costs ~9 minutes). Reasons come from the first results: a LOWER learning rate hurt, so try
 # HIGHER; real flows may be memorised through flow_repeat=15; dropping general chat rows leaves more budget for flows.

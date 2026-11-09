@@ -103,4 +103,36 @@ assert "jane@corp.com" not in logged and "[EMAIL]" in logged and '"training_ok":
 r, srv, port = start(S.Policy(store_logs=False), Local([GOOD]), None)
 assert post(port, "/v1/feedback", {"prompt": "x", "accepted": True})["stored"] is False
 print("8 ok: logs and feedback follow the client policy, masked and flagged")
+# 9. the platform's Studio assistant: system = its catalog prompt, user = "Existing variables: [...]\nRequest: ...", answer = {variables, steps, notes}
+STUDIO_SYSTEM = "You design steps for ONEOFFICEAUTOMATION agents. Answer with one JSON object only. " + "ooa.csv/read | Read to table | inputs: path* | outputs: table\n" * 60
+def studio(port, text, existing="[]", model="ooa-assistant"):
+    return post(port, "/v1/chat/completions", {"model": model, "temperature": 0, "max_tokens": 4000,
+                "messages": [{"role": "system", "content": STUDIO_SYSTEM}, {"role": "user", "content": "Existing variables: " + existing + "\nRequest: " + text}]})
+seen = []
+class Spy(Local):
+    def generate(self, request, attempt=0):
+        seen.append(request); return super().generate(request, attempt)
+r, srv, port = start(S.Policy(), Spy([GOOD]), None)
+res = studio(port, "read a csv file into a table")
+ans = json.loads(res["choices"][0]["message"]["content"])
+assert seen == ["read a csv file into a table"], "the local model must see only the request, not Studio's wrapper: " + str(seen)
+assert set(ans) == {"variables", "steps", "notes"} and ans["steps"] and "kind" not in ans, ans.keys()
+assert res["usage"]["prompt_tokens"] > 0 and res["ooa"]["verified"]
+print("9 ok: Studio request -> local model sees only the request; answer has variables/steps/notes; usage reported")
+
+# 10. Studio + escalation: the cloud model gets the platform's own system prompt and answers in Studio's shape; existing variables are respected
+CLOUD_STUDIO = json.dumps({"variables": [{"name": "report_path", "type": "String", "direction": "input"}, {"name": "tbl", "type": "Table"}],
+    "steps": [{"id": "a1", "action": "ooa.csv/read", "args": {"path": "$report_path"}, "out": {"table": "tbl"}}], "notes": "reads the file"})
+cl = Cloud([CLOUD_STUDIO]); r, srv, port = start(S.Policy(allow_escalation=True), Local(["nope"]), cl)
+res = studio(port, "read my csv", existing=json.dumps([{"name": "folder", "type": "String", "direction": "input"}]))
+ans = json.loads(res["choices"][0]["message"]["content"])
+assert res["ooa"]["source"] == "cloud" and ans["steps"][0]["action"] == "ooa.csv/read" and all(v["name"] != "folder" for v in ans["variables"])
+assert cl.seen[0][0] == STUDIO_SYSTEM and "Existing variables:" in cl.seen[0][1]
+print("10 ok: Studio + cloud: platform's own system prompt used, answer in Studio's shape, existing variables not duplicated")
+
+# 11. Studio + nothing verifies: empty steps with the honest reason in notes (Studio shows notes)
+r, srv, port = start(S.Policy(allow_escalation=False), Local(["garbage"]), None)
+ans = json.loads(studio(port, "do a thing")["choices"][0]["message"]["content"])
+assert ans["steps"] == [] and "disabled by this client's policy" in ans["notes"]
+print("11 ok: Studio + failure -> empty steps and a clear reason in notes")
 print("ALL SERVER TESTS PASSED")
