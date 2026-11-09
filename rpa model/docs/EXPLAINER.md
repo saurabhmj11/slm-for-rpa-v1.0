@@ -53,16 +53,19 @@ router and server (8 end-to-end tests with fake models: routing, repair, PII mas
 autoresearch search logic (keeps real gains, discards noise and crashes, resumes), and the runner's guards. All 48 real example flows
 pass the schema and catalog checks.
 
-**Measured on a real run (free Colab T4):** a small 8-layer model pretrained for 300M tokens, then fine-tuned. On 20 fresh generated
-requests per round it solved **5-10%** exactly, and answers used real action names only about **22%** of the time and correct input
-names about **3%** of the time. That is an early, small, weak result, **not** a working product.
+**Measured on a real run (free Colab T4, 2026-11-09):** a small 8-layer model, pretrained for 300M tokens, then fine-tuned for 750 steps on
+about 200,000 rows (mostly generated flows). On 20 unseen **generated** requests: **20/20 valid JSON, 20/20 pass the schema, 20/20 use only
+real action names, 10/20 pick exactly the right action sequence** (an earlier, smaller fine-tune scored 4/20, 3/20, 1/20 and 0/20 on the same
+checks). On the 5 held-out **real** flows: **0/5 usable** (it recites flows it memorised). Caveats: only 20 requests (wide error margin,
+roughly 30-70% for the 10/20), and the generated requests are the easy, in-distribution case. So: reliable on simple generated-style requests,
+not yet on real ones.
 
 **Important finding (2026-11-07):** real flows average **18 steps and about 11 different actions across about 4 toolkits**; our generated
 training flows have 1-4 steps. A search for the right actions from a one-sentence description finds only about **10%** of what real flows use.
 So scores on generated flows do **not** predict performance on real flows. This is why the design keeps our small model for **simple**
 requests and escalates complex ones to Claude (when allowed), always behind the verifier.
 
-**Not done / not tested:** the bigger fine-tuning run is pending a result; reinforcement learning has not been run; the autoresearch
+**Not done / not tested:** reinforcement learning has not been run; the autoresearch
 loop has not been run on a GPU (each experiment is estimated at about 10 minutes on a T4, not measured); the Claude call is untried
 against the live API; the local-model backend needs a GPU; browser version, per-client adapters, true constrained decoding are not built.
 

@@ -19,6 +19,10 @@ files = {
     "autoresearch/loop.py": (H / "autoresearch/loop.py").read_text(encoding="utf-8"),
     "autoresearch/run_experiment.py": (H / "autoresearch/run_experiment.py").read_text(encoding="utf-8"),
     "autoresearch/ooa_eval_frozen.py": (H / "autoresearch/ooa_eval_frozen.py").read_text(encoding="utf-8"),
+    "retrieval.py": (H / "retrieval.py").read_text(encoding="utf-8"),
+    "repair.py": (H / "repair.py").read_text(encoding="utf-8"),
+    "serving/ooa_server.py": (H.parent / "serving/ooa_server.py").read_text(encoding="utf-8"),
+    "serving/backends.py": (H.parent / "serving/backends.py").read_text(encoding="utf-8"),
     "flow_check.py": (H.parent / "eval/flow_check.py").read_text(encoding="utf-8"),
 }
 
@@ -283,6 +287,8 @@ colab_rl_cells.build(md, code)
 import base64, zlib
 _frozen = {n: (H / "autoresearch/frozen" / n).read_text(encoding="utf-8") for n in ("frozen_eval.jsonl", "frozen_catalog.jsonl", "frozen_eval.sha256")}
 FROZEN_BLOB = base64.b64encode(zlib.compress(json.dumps(_frozen).encode(), 9)).decode()
+import colab_assistant_cell
+colab_assistant_cell.build(md, code)
 import colab_ar_cells
 colab_ar_cells.build(md, code, FROZEN_BLOB)
 

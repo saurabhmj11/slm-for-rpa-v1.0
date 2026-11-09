@@ -118,3 +118,10 @@ read-only runner (`run_experiment.py`: builds data, drops rows overlapping the f
 hill-climbing (`loop.py`, results.tsv, resumable) and agent instructions (`program.md`). Tested here: loop logic with a fake runner,
 runner dry-run, guards (budget and unknown-key edits refused), embedded scoreboard integrity. NOT run on a GPU yet.
 Notebook cell 12 runs it. Metric: score = mean verifier reward on frozen generated requests; real_score = on 4 real flows.
+
+## Result after the bigger SFT (2026-11-09, t4, step 750)
+Unseen generated requests (20): valid JSON 20/20, schema 20/20, actions exist 20/20, exact action sequence 10/20 (before: 4, 3, 1, 0).
+Held-out real flows (5): 0 usable (memorised-flow recitation; one prompt produced chat text). Catalog lookup answered correctly.
+Added notebook cell 13 (whole assistant, local only: model -> repair -> verify), logic tested with a stub model; the real local backend
+has not run yet. Note: real gold flows are repeated 15x in training (flow_repeat), which likely encourages memorisation; the autoresearch
+loop can test lower values.
