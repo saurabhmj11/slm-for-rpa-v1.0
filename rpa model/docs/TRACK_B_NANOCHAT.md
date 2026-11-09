@@ -75,7 +75,7 @@ flow does what a user meant), RL on a weak model gets little signal (hence parti
 and the self-improvement loop only grows as far as the generator's request styles reach.
 
 ## First t4 results (2026-11-07) and what they showed
-- Pretraining finished (4577 steps). SFT was only 100 steps (1.8 min): the data ran out, about 3M tokens seen. Fix: SFT now
+- Pretraining finished (4577 steps). SFT was only 100 steps (1.8 min), about 3M tokens: the cap was SFT_ITERS=400, which nanochat counts in micro-batches (4 per optimizer step), so 400 -> 100 steps (an earlier note here wrongly blamed the data running out). Fix: SFT now
   uses 30,000 generated flows and up to 3,000 steps for non-smoke profiles.
 - The old validation set overlapped training, so its bpb (0.07) was meaningless. The validation set now holds only
   unseen catalog rows and unseen generated flows.
@@ -112,7 +112,7 @@ Built and tested: `serving/` (OpenAI-compatible server, router, repair, verifier
 feedback endpoint; 8 end-to-end tests with fake models), `training/repair.py`, `ooa_reward.problems()`.
 
 ## Autoresearch (2026-11-09)
-`training/autoresearch/`: adapted from karpathy/autoresearch (MIT): single editable file (`recipe.py`), fixed 12M-token budget
+`training/autoresearch/`: adapted from karpathy/autoresearch (MIT): single editable file (`recipe.py`), fixed budget (nominally 12M tokens, really 3.0M tokens = 92 optimizer steps, see correction below)
 (`constants.py`), frozen scoreboard (`frozen/`, sha256-checked: 40 generated + 4 real flows, with its own catalog snapshot),
 read-only runner (`run_experiment.py`: builds data, drops rows overlapping the frozen set, trains, scores), scripted
 hill-climbing (`loop.py`, results.tsv, resumable) and agent instructions (`program.md`). Tested here: loop logic with a fake runner,
@@ -125,3 +125,13 @@ Held-out real flows (5): 0 usable (memorised-flow recitation; one prompt produce
 Added notebook cell 13 (whole assistant, local only: model -> repair -> verify), logic tested with a stub model; the real local backend
 has not run yet. Note: real gold flows are repeated 15x in training (flow_repeat), which likely encourages memorisation; the autoresearch
 loop can test lower values.
+
+
+## Correction: the autoresearch budget is 3M tokens, not 12M (2026-11-10)
+`chat_sft.py` stops after `--num-iterations` MICRO-batches (`it` counts one device batch each), and an optimizer step is grad_accum=4
+micro-batches. We passed 366 meaning optimizer steps, so every experiment trained 366/4 = 92 steps = 3.0M tokens (a user-uploaded
+`meta_000092.json` showed "step": 92). The runner's old `train_tokens_M: 12.0` was computed, not measured. Comparisons between experiments
+stay valid (all got the same 3.0M), but conclusions apply to a SHORT training regime. Also, experiment #1 (8,000 -> 30,000 generated flows)
+did not show "variety beats repetition": 3M tokens is only a slice of the shuffled mixture either way, so it changed the PROPORTIONS in
+that slice (generated flows about 60% -> about 81% of rows; catalog Q&A about 19% -> 7%), which also explains val_bpb rising (catalog loss).
+The same micro-batch rule applies to the main SFT cell: SFT_ITERS=3000 gives 750 steps (about 24M tokens); raise SFT_ITERS to train longer.

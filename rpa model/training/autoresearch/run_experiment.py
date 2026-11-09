@@ -77,8 +77,11 @@ one_pass = est_tokens(flows) * R["flow_repeat"] + (est_tokens(cats) if R["includ
 epochs = max(1, min(30, math.ceil(R["token_budget"] / max(1, one_pass))))
 tokens_per_step = R["seq_len"] * R["device_batch"] * R["grad_accum"]
 iters = R["token_budget"] // tokens_per_step
+opt_steps = -(-iters // R["grad_accum"])                     # nanochat counts --num-iterations in MICRO-batches (grad_accum per optimizer step)
+real_tokens = iters * R["seq_len"] * R["device_batch"]      # what is really trained on (about budget / grad_accum)
 print(f"data: flows {len(flows)}x{R['flow_repeat']} catalog {len(cats) if R['include_catalog'] else 0} synth {len(syn)} "
-      f"smoltalk {R['smoltalk_rows']} | leaked rows dropped: {dropped} | ~{one_pass/1e6:.1f}M tokens/pass -> {epochs} pass(es) | {iters} steps")
+      f"smoltalk {R['smoltalk_rows']} | leaked rows dropped: {dropped} | ~{one_pass/1e6:.1f}M tokens in the mixture "
+      f"| trains {iters} micro-batches = {opt_steps} optimizer steps = {real_tokens/1e6:.1f}M tokens (a slice of the mixture)")
 
 sft_cmd = [sys.executable, "-m", "scripts.chat_sft", f"--max-seq-len={R['seq_len']}", f"--device-batch-size={R['device_batch']}",
            f"--total-batch-size={tokens_per_step}", f"--num-iterations={iters}", f"--init-lr-frac={R['init_lr_frac']}",
@@ -125,7 +128,7 @@ if ev.returncode != 0:
     print((ev.stdout + ev.stderr)[-1500:]); sys.exit(1)
 res = json.load(open(work / "eval.json"))
 res.update({"val_bpb": float(bpb[-1]) if bpb else None, "minutes": round((time.time() - t_start) / 60, 1),
-            "train_tokens_M": round(iters * tokens_per_step / 1e6, 1), "leaked_rows_dropped": dropped})
+            "train_tokens_M": round(real_tokens / 1e6, 1), "optimizer_steps": opt_steps, "leaked_rows_dropped": dropped})
 json.dump(res, open(work / "result.json", "w"))
 print("---")
 for k in ("score", "real_score", "solved_rate", "valid_rate", "val_bpb", "minutes", "train_tokens_M"):

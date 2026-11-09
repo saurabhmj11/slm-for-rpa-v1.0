@@ -35,7 +35,7 @@ All three are judged by the same verifier, so "better" always means *passes the 
    stored with the correct flow and retried. Training restarts from the base model each time, never only on its own output.
 2. **Policy loop (reinforcement):** the model writes 8 answers per request; answers the verifier scores above average are reinforced.
 3. **Recipe loop (autoresearch, new):** inspired by Andrej Karpathy's `autoresearch` (MIT). Each experiment changes **one** thing in
-   the training recipe (data mix or learning settings), trains for the **same fixed 12M tokens**, and is scored on a **frozen** test
+   the training recipe (data mix or learning settings), trains for the **same fixed amount (about 3M tokens, 92 optimizer steps)**, and is scored on a **frozen** test
    (40 generated + 4 real flows, hash-checked). It is kept only if it beats the best by more than a noise margin. It runs with a
    scripted search (`loop.py`) or with an AI agent following `autoresearch/program.md`.
 

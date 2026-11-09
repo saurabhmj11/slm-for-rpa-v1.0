@@ -6,7 +6,7 @@ def build(md, code, frozen_blob):
 ## Autoresearch: the training recipe improves itself
 
 Idea from [karpathy/autoresearch](https://github.com/karpathy/autoresearch) (MIT): fixed budget, one honest metric, change one
-thing, keep it only if it helps. Here each experiment re-trains the SFT stage for exactly **12M tokens** with one change to
+thing, keep it only if it helps. Here each experiment re-trains the SFT stage for a fixed **3M tokens (92 optimizer steps)** with one change to
 the recipe (data mix or learning settings), then scores it on a **frozen** test of 40 generated + 4 real flows using our
 verifier. Better than the best by more than 0.003 -> kept; otherwise discarded. Resumable: results are saved to Drive/working dir.
 
@@ -14,7 +14,7 @@ Each experiment takes about 10 minutes on a T4 (my estimate: 6-8 minutes trainin
 Run it after SFT works (cells 6-8). With an AI agent instead of this scripted search, see `autoresearch/program.md`.
 """)
     code('''
-#@title 12. Autoresearch: scripted search over the SFT recipe (fixed 12M-token budget, frozen scoreboard)
+#@title 12. Autoresearch: scripted search over the SFT recipe (fixed 3M-token budget, frozen scoreboard)
 AR_EXPERIMENTS = 6          # experiments this session (including the baseline); about 10 min each
 import base64, json, os, subprocess, sys, zlib
 AR = "/content/ooa/autoresearch"
