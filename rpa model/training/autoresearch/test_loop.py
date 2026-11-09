@@ -29,6 +29,7 @@ kept = [float(r["score"]) for r in rows if r["status"] in ("baseline", "keep")]
 assert kept == sorted(kept), "the best score never goes down"
 assert len(set(calls)) == len(calls), "no experiment is ever repeated"
 assert len(saved) == status.count("baseline") + status.count("keep") and saved == sorted(saved), "on_keep fires for the baseline and every keep"
+assert rows[1]["description"] == "init_lr_frac: 0.8 -> 1.2", "informed experiments run first: " + rows[1]["description"]
 print(f"search ok: {len(rows)} experiments, best score {score:.3f}, kept {status.count('keep')}, crashes {status.count('crash')}")
 
 # resume (separate run, stopped part-way): finished experiments are not repeated, new ones continue where it left off

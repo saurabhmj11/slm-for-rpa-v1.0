@@ -45,6 +45,18 @@ def save_best(recipe, score):                       # the model just trained is 
     shutil.rmtree(f"{work}/best_model", ignore_errors=True)
     shutil.copytree(live, f"{work}/best_model")
     json.dump({"score": score, "recipe": recipe}, open(f"{work}/best_model/best_recipe.json", "w"))
+_rows = loop.read_results(f"{work}/results.tsv")
+if _rows and not os.path.exists(f"{work}/best_model"):
+    # an earlier session found a best recipe but its model was not saved: train it once more (also measures run-to-run noise)
+    _top = [r for r in _rows if r["status"] in ("baseline", "keep")][-1]
+    print(f"Rebuilding the best model: re-training the best recipe once (logged score {_top['score']})")
+    _res = runner(json.loads(_top["recipe_json"]))
+    loop.append_result(f"{work}/results.tsv", {"n": len(_rows), "score": f"{_res['score']:.4f}", "real_score": _res.get("real_score", ""),
+        "solved_rate": _res.get("solved_rate", ""), "val_bpb": _res.get("val_bpb", ""), "minutes": _res.get("minutes", ""),
+        "status": "recheck", "description": f"re-train of best (logged {_top['score']}): run-to-run noise = {_res['score'] - float(_top['score']):+.4f}",
+        "recipe_json": _top["recipe_json"]})
+    save_best(json.loads(_top["recipe_json"]), _res["score"])
+    print(f"re-trained score {_res['score']:.4f} vs logged {_top['score']}  (difference = run-to-run noise)")
 best, best_score = loop.run_loop(runner, RECIPE, f"{work}/results.tsv", max_experiments=AR_EXPERIMENTS, on_keep=save_best)
 if os.path.exists(f"{work}/best_model"):             # leave the BEST model (not the last experiment's) as the live SFT model
     shutil.rmtree(live, ignore_errors=True)

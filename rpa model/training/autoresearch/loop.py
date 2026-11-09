@@ -21,6 +21,11 @@ SEARCH_SPACE = {
     "wrap_weights":   [[55, 17, 14, 14], [30, 25, 20, 25], [80, 7, 7, 6]],
     "seq_len":        [1024, 2048],
 }
+# Informed order: tried first (each costs ~9 minutes). Reasons come from the first results: a LOWER learning rate hurt, so try
+# HIGHER; real flows may be memorised through flow_repeat=15; dropping general chat rows leaves more budget for flows.
+# Deliberately NOT here: include_catalog=False (would likely raise the score by deleting catalog Q&A, which the frozen test does not measure).
+PRIORITY = [("init_lr_frac", 1.2), ("init_lr_frac", 1.6), ("flow_repeat", 5), ("smoltalk_rows", 0),
+            ("warmdown_ratio", 0.8), ("warmup_ratio", 0.05), ("flow_repeat", 30)]
 COLS = ["n", "score", "real_score", "solved_rate", "val_bpb", "minutes", "status", "description", "recipe_json"]
 
 
@@ -55,6 +60,8 @@ def mutations(best, tried, rng):
             if rhash(cand) not in tried:
                 out.append((knob, v, cand))
     rng.shuffle(out)
+    rank = {kv: i for i, kv in enumerate(PRIORITY)}
+    out.sort(key=lambda t: rank.get((t[0], t[1] if not isinstance(t[1], list) else tuple(t[1])), len(PRIORITY)))   # stable: priority first, rest stay shuffled
     return out
 
 
