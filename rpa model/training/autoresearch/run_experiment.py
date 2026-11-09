@@ -107,7 +107,12 @@ new = (f"train_tasks = [{', '.join(parts)}] * {epochs}\n"
        + f'train_dataset = TaskMixture(train_tasks)\nval_dataset = TaskMixture([OOADialogues("{sft}/val.jsonl")])')
 p.write_text(s[:i] + new + s[j:])
 env = {**os.environ, "NANOCHAT_BASE_DIR": a.base_dir}
-subprocess.run(["rm", "-rf", f"{a.base_dir}/chatsft_checkpoints"], check=True)
+import shutil
+_ck, _bk = Path(a.base_dir) / "chatsft_checkpoints", Path(a.base_dir) / "chatsft_checkpoints_before_autoresearch"
+if _ck.exists() and not _bk.exists():
+    shutil.move(str(_ck), str(_bk))          # keep your earlier SFT model: it is moved aside once, never deleted
+else:
+    shutil.rmtree(_ck, ignore_errors=True)   # later experiments overwrite only experiment output
 t0 = time.time()
 log = subprocess.run(sft_cmd, cwd=nc, env=env, capture_output=True, text=True)
 (work / "sft.log").write_text(log.stdout + log.stderr)

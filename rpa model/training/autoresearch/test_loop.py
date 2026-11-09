@@ -16,7 +16,9 @@ def fake(recipe):
     return {"score": s, "real_score": 0.02, "solved_rate": s / 4, "val_bpb": 0.1, "minutes": 9.0}
 
 d = tempfile.mkdtemp(); path = d + "/results.tsv"
-best, score = loop.run_loop(fake, RECIPE, path, max_experiments=60, seed=3, on_event=lambda m: None)
+saved = []
+best, score = loop.run_loop(fake, RECIPE, path, max_experiments=60, seed=3, on_event=lambda m: None,
+                          on_keep=lambda r, sc: saved.append(sc))
 rows = loop.read_results(path)
 status = [r["status"] for r in rows]
 assert rows[0]["status"] == "baseline" and status.count("baseline") == 1
@@ -26,6 +28,7 @@ assert "crash" in status and "keep" in status and "discard" in status
 kept = [float(r["score"]) for r in rows if r["status"] in ("baseline", "keep")]
 assert kept == sorted(kept), "the best score never goes down"
 assert len(set(calls)) == len(calls), "no experiment is ever repeated"
+assert len(saved) == status.count("baseline") + status.count("keep") and saved == sorted(saved), "on_keep fires for the baseline and every keep"
 print(f"search ok: {len(rows)} experiments, best score {score:.3f}, kept {status.count('keep')}, crashes {status.count('crash')}")
 
 # resume (separate run, stopped part-way): finished experiments are not repeated, new ones continue where it left off

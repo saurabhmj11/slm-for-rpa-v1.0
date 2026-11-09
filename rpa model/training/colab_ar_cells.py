@@ -39,7 +39,17 @@ def runner(recipe):
         raise RuntimeError((p.stdout + p.stderr)[-300:])
     return json.load(open(f"{work}/run/result.json"))
 
-best, best_score = loop.run_loop(runner, RECIPE, f"{work}/results.tsv", max_experiments=AR_EXPERIMENTS)
+import shutil
+live = os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatsft_checkpoints")
+def save_best(recipe, score):                       # the model just trained is the best so far: keep a copy on Drive
+    shutil.rmtree(f"{work}/best_model", ignore_errors=True)
+    shutil.copytree(live, f"{work}/best_model")
+    json.dump({"score": score, "recipe": recipe}, open(f"{work}/best_model/best_recipe.json", "w"))
+best, best_score = loop.run_loop(runner, RECIPE, f"{work}/results.tsv", max_experiments=AR_EXPERIMENTS, on_keep=save_best)
+if os.path.exists(f"{work}/best_model"):             # leave the BEST model (not the last experiment's) as the live SFT model
+    shutil.rmtree(live, ignore_errors=True)
+    shutil.copytree(f"{work}/best_model", live)
+    print("live SFT model = best experiment (score", best_score, "). Your earlier model is in chatsft_checkpoints_before_autoresearch.")
 print("\\nBest recipe so far:", json.dumps(best))
 print("\\nAll experiments:")
 for r in loop.read_results(f"{work}/results.tsv"):

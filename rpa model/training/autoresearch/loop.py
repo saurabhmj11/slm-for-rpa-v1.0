@@ -58,7 +58,7 @@ def mutations(best, tried, rng):
     return out
 
 
-def run_loop(runner, base_recipe, results_path, max_experiments=20, seed=0, on_event=print):
+def run_loop(runner, base_recipe, results_path, max_experiments=20, seed=0, on_event=print, on_keep=None):
     rng = random.Random(seed)
     rows = read_results(results_path)
     tried, best, best_score = set(), copy.deepcopy(base_recipe), None
@@ -76,6 +76,8 @@ def run_loop(runner, base_recipe, results_path, max_experiments=20, seed=0, on_e
                                      "recipe_json": json.dumps(best, sort_keys=True)})
         best_score, done = res["score"], done + 1
         tried.add(rhash(best))
+        if on_keep:
+            on_keep(best, best_score)
         on_event(f"baseline score {best_score:.4f}")
     while done < max_experiments:
         cands = mutations(best, tried, rng)
@@ -97,6 +99,8 @@ def run_loop(runner, base_recipe, results_path, max_experiments=20, seed=0, on_e
                                      "description": desc, "recipe_json": json.dumps(cand, sort_keys=True)})
         if status == "keep":
             best, best_score = cand, res["score"]
+            if on_keep:
+                on_keep(best, best_score)
         on_event(f"#{done} {desc} -> {res['score']:.4f} [{status}] (best {best_score:.4f})")
         done += 1
     return best, best_score
