@@ -168,6 +168,8 @@ class Router:
                     break
                 flow, info = self.check(raw, existing, assistant)
                 tried.append({"source": "local", "ok": flow is not None})
+                if flow is None:
+                    tried[-1]["preview"] = (raw or "")[:300]      # what the model wrote, so a failure can be read
                 if flow:
                     return self.done(request, flow, "local", tried, info, t0)
                 errors = info

@@ -599,7 +599,9 @@
             (a.stop ? "; stopped at " + (a.stop === "end" ? "the natural end" : String(a.stop).startsWith("loop") ?
               "a repetition loop (cut early)" : "the length limit") : "") +
             (typeof a.tokens === "number" ? ", " + a.tokens + " tokens" : "") +
-            (typeof a.seconds === "number" ? ", " + a.seconds.toFixed(1) + " s" : "")
+            (typeof a.seconds === "number" ? ", " + a.seconds.toFixed(1) + " s" : "") +
+            (!a.ok && typeof a.preview === "string" && a.preview.trim() ?
+              ". The model wrote: \u201c" + a.preview.trim() + (a.preview.length >= 300 ? "\u2026" : "") + "\u201d" : "")
         })))));
     }
     const card = el("div", { class: "card" }, out);
