@@ -40,7 +40,13 @@ def repair(flow, cat):
                     if m and m[0] not in d:
                         notes.append(f"{a}.{key} {k} -> {m[0]}")
                         d[m[0]] = d.pop(k)
+                    elif key == "args" and (d[k] is None or isinstance(d[k], (bool, int, float))):
+                        # a made-up setting with a fixed value (e.g. "header": true): no data flows through it, so
+                        # dropping it leaves the action's default; keys that carry data are left for the checker
+                        notes.append(f"{a}: dropped unknown setting {k!r}")
+                        d.pop(k)
     _fix_ids(flow, notes)
+    _fix_variable_names(flow, notes)
     _declare_used_inputs(flow, notes, walk)
     return flow, notes
 
@@ -66,6 +72,56 @@ def _fix_ids(flow, notes):
         if good != fid:
             notes.append(f"flow id {fid!r} -> {good!r}")
             flow["id"] = good
+
+
+_VAR_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def _fix_variable_names(flow, notes):
+    """Variable names must match ^[A-Za-z_][A-Za-z0-9_]{0,63}$. Fix stray spaces / bad characters (" new_name" ->
+    "new_name") and rename every use in the steps. A name that becomes a duplicate of another is dropped."""
+    variables = flow.get("variables")
+    if not isinstance(variables, list):
+        return
+    taken = {v.get("name") for v in variables if isinstance(v, dict) and isinstance(v.get("name"), str)
+             and _VAR_OK.match(v["name"])}
+    renames, keep = {}, []
+    for v in variables:
+        name = v.get("name") if isinstance(v, dict) else None
+        if not isinstance(name, str) or _VAR_OK.match(name):
+            keep.append(v)
+            continue
+        good = re.sub(r"[^A-Za-z0-9_]+", "_", name.strip()).strip("_")[:64]
+        if good and good[0].isdigit():
+            good = "v_" + good[:62]
+        if not good:
+            keep.append(v)                                  # nothing sensible to rename to: leave it for the checker
+            continue
+        renames[name] = good
+        if good in taken:
+            notes.append(f"variable {name!r} is the same as {good!r}: merged")
+            continue
+        v["name"] = good
+        taken.add(good)
+        keep.append(v)
+        notes.append(f"variable {name!r} -> {good!r}")
+    if not renames:
+        return
+    flow["variables"] = keep
+
+    def fix(x):
+        if isinstance(x, str):
+            if x in renames:
+                return renames[x]
+            for old, new in renames.items():
+                x = x.replace("${" + old + "}", "${" + new + "}").replace("$" + old, "$" + new)
+            return x
+        if isinstance(x, list):
+            return [fix(i) for i in x]
+        if isinstance(x, dict):
+            return {k: fix(val) for k, val in x.items()}
+        return x
+    flow["steps"] = fix(flow.get("steps"))
 
 
 def _declare_used_inputs(flow, notes, walk):
