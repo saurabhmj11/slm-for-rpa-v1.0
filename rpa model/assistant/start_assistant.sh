@@ -4,10 +4,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 PYTHON="${PYTHON:-python3}"
-MODEL_DIR="${MODEL_DIR:-$HOME/ooa/nanochat_base}"
-NANOCHAT_DIR="${NANOCHAT_DIR:-$HOME/ooa/nanochat}"
-PLATFORM_DIR="${PLATFORM_DIR:-$HOME/ooa/oneofficeautomation-platform}"
-CATALOG="${CATALOG:-$HOME/ooa/sft/catalog.jsonl}"
+MODEL_DIR="${MODEL_DIR:-$HERE/../nanochat_base}"
+NANOCHAT_DIR="${NANOCHAT_DIR:-$HERE/../nanochat}"
+PLATFORM_DIR="${PLATFORM_DIR:-$HERE/../platform}"
+CATALOG="${CATALOG:-$HERE/../sft/catalog.jsonl}"
+[ -f "$CATALOG" ] || CATALOG="$HERE/../data/catalog/catalog.jsonl"
 DATA_DIR="${DATA_DIR:-$HERE/assistant_data}"
 PORT="${PORT:-8765}"
 FAKE_MODEL="${FAKE_MODEL:-0}"     # 1 = try the app without the real model

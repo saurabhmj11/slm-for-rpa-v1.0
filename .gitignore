@@ -12,3 +12,7 @@ nanoGPT-master/
 rpa model/local_check_report.txt
 rpa model/assistant/tests/screens/
 rpa model/assistant/assistant_data/
+rpa model/platform/
+rpa model/nanochat/
+rpa model/nanochat_base/
+rpa model/sft/

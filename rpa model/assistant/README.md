@@ -29,9 +29,10 @@ You need about 2 GB of free disk space. Put everything in one folder, for exampl
    python -m pip install rustbpe tiktoken filelock jsonschema
    ```
    The first line installs the CPU-only build of PyTorch (smaller; no graphics card needed).
-3. **Get the nanochat code** at the exact version the model was trained with (needs Git: <https://git-scm.com/download/win>):
+3. **Get the nanochat code** at the exact version the model was trained with. The `ooa_assistant.zip` bundle already
+   has it in `rpa model\nanochat`. From a git checkout instead (needs Git: <https://git-scm.com/download/win>):
    ```
-   cd C:\ooa
+   cd "rpa model"
    git clone https://github.com/karpathy/nanochat.git
    cd nanochat
    git checkout 92d63d4e8bb4df75c3b71618f31ddde2378b2bcd
@@ -39,31 +40,32 @@ You need about 2 GB of free disk space. Put everything in one folder, for exampl
 4. **Download the trained model** from the Google Drive folder **`ooa-nanochat`**. You only need these (not the whole folder):
    - `nanochat_base/tokenizer/` (the whole folder)
    - `nanochat_base/chatsft_checkpoints/d8/model_002000.pt` and `meta_002000.json`
-   - `sft/catalog.jsonl`
+   - `sft/catalog.jsonl` (optional; `data\catalog\catalog.jsonl` is used when it is missing)
 
-   Keep the same folder layout on your PC:
+   Put them inside `rpa model`, next to the `assistant` folder:
    ```
-   C:\ooa\nanochat_base\tokenizer\...
-   C:\ooa\nanochat_base\chatsft_checkpoints\d8\model_002000.pt
-   C:\ooa\nanochat_base\chatsft_checkpoints\d8\meta_002000.json
-   C:\ooa\sft\catalog.jsonl
+   rpa model\nanochat_base\tokenizer\...
+   rpa model\nanochat_base\chatsft_checkpoints\d8\model_002000.pt
+   rpa model\nanochat_base\chatsft_checkpoints\d8\meta_002000.json
+   rpa model\sft\catalog.jsonl
    ```
-5. **The platform repo** (`oneofficeautomation-platform`, from the OneOfficeAutomation GitHub organisation; ask the
-   platform team for access) must be on your PC, e.g. `C:\ooa\oneofficeautomation-platform`.
-   The app uses its flow rules (`contracts\flow-schema\flow.v1.json`) to check every flow.
-   *Optional, for the Run tab:* `python -m pip install -e C:\ooa\oneofficeautomation-platform\reference`
+5. **The platform's flow rules.** The app checks every flow against `contracts\flow-schema\flow.v1.json` from the
+   platform repo (`oneofficeautomation-platform`). The zip bundle carries the few files needed in `rpa model\platform`
+   (`contracts\`, `docs\llms.txt` and the reference runner `reference\`). From a git checkout, point `PLATFORM_DIR` at
+   your copy of the platform repo instead.
+   *Optional, for the Run tab:* `python -m pip install -e "rpa model\platform\reference"`
    (without it everything works except Run, and the page says so).
-6. **Start it**: open `start_assistant.bat` (in this folder) with Notepad, check the paths at the top
-   (`MODEL_DIR`, `NANOCHAT_DIR`, `PLATFORM_DIR`, `CATALOG`), save, then double-click it. Your browser opens
-   <http://127.0.0.1:8765/>. Loading the model takes up to a minute; refresh the page when the window says
-   "OOA Assistant is running". Close the window to stop it.
+6. **Start it**: double-click `start_assistant.bat` (in this folder). With the layout above no editing is needed; if
+   you keep things elsewhere, open it with Notepad and change the paths at the top (`MODEL_DIR`, `NANOCHAT_DIR`,
+   `PLATFORM_DIR`, `CATALOG`). Your browser opens <http://127.0.0.1:8765/>. Loading the model takes up to a minute;
+   refresh the page when the window says "OOA Assistant is running". Close the window to stop it.
 
 To try the page without the model, set `FAKE_MODEL=1` in the .bat (canned answers only).
 On Linux/macOS use `start_assistant.sh` (edit the paths at the top or set them as environment variables).
 
 Command line, if you prefer:
 ```
-python app.py --model-dir C:\ooa\nanochat_base --nanochat C:\ooa\nanochat --platform C:\ooa\oneofficeautomation-platform [--catalog FILE] [--port 8765] [--data-dir DIR] [--fake-model]
+python app.py --model-dir ..\nanochat_base --nanochat ..\nanochat --platform ..\platform [--catalog FILE] [--port 8765] [--data-dir DIR] [--fake-model]
 ```
 
 ## What the model is good and weak at today
@@ -94,7 +96,7 @@ The model does **not** change while you use it. It improves at the **next traini
    - `rejected_prompts.jsonl`: requests you rejected without an edit, a list of hard cases worth writing good answers for.
 3. Upload `feedback_train.jsonl` to Google Drive, folder `ooa-nanochat/sft/`. The Colab training notebook's training cell
    mixes it in.
-4. After training, download the new `chatsft_checkpoints/d8` files into `C:\ooa\nanochat_base\` and restart the assistant.
+4. After training, download the new `chatsft_checkpoints/d8` files into `rpa model\nanochat_base\` and restart the assistant.
 
 ## Files
 

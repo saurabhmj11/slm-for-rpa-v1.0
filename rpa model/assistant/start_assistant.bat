@@ -4,10 +4,12 @@ rem Edit the paths below to match where you put things (see README.md, "Setup").
 rem No quotes inside the values; spaces in folder names are fine.
 
 set PYTHON=python
-set MODEL_DIR=C:\ooa\nanochat_base
-set NANOCHAT_DIR=C:\ooa\nanochat
-set PLATFORM_DIR=C:\ooa\oneofficeautomation-platform
-set CATALOG=C:\ooa\sft\catalog.jsonl
+rem Defaults: everything sits next to this "assistant" folder (inside "rpa model").
+set MODEL_DIR=%~dp0..\nanochat_base
+set NANOCHAT_DIR=%~dp0..\nanochat
+set PLATFORM_DIR=%~dp0..\platform
+set CATALOG=%~dp0..\sft\catalog.jsonl
+if not exist "%CATALOG%" set CATALOG=%~dp0..\data\catalog\catalog.jsonl
 set DATA_DIR=%~dp0assistant_data
 set PORT=8765
 
@@ -19,12 +21,17 @@ set EXTRA=
 if "%FAKE_MODEL%"=="1" set EXTRA=--fake-model
 
 if not exist "%PLATFORM_DIR%\contracts\flow-schema\flow.v1.json" (
-  echo Cannot find the platform repo at "%PLATFORM_DIR%". Edit PLATFORM_DIR at the top of this file.
+  echo Cannot find the platform files at "%PLATFORM_DIR%". Unzip the new ooa_assistant.zip again, or edit PLATFORM_DIR at the top of this file.
   pause
   exit /b 1
 )
 if not exist "%CATALOG%" (
   echo Cannot find the catalog at "%CATALOG%". Edit CATALOG at the top of this file.
+  pause
+  exit /b 1
+)
+if "%FAKE_MODEL%"=="0" if not exist "%NANOCHAT_DIR%\nanochat\engine.py" (
+  echo Cannot find nanochat at "%NANOCHAT_DIR%". Edit NANOCHAT_DIR at the top of this file.
   pause
   exit /b 1
 )
