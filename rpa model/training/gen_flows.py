@@ -39,6 +39,22 @@ def clean_desc(d):
     return d.strip().rstrip(".").strip()
 
 
+# request wordings: full catalog description, its first clause, the short action name, or a numbered list
+STYLES = {"full": 40, "brief": 25, "short": 20, "numbered": 15}
+
+
+def first_clause(d):
+    return re.split(r"; |\. | \(|, optionally |, or |: ", d, maxsplit=1)[0].strip()
+
+
+def phrase(e, desc, style):
+    if style == "full":
+        return desc
+    if style == "short":
+        return f"{e['name'][:1].lower() + e['name'][1:]} ({e['toolkit']})"
+    return first_clause(desc)
+
+
 def build(cat_actions, rng, cfg=None):
     cfg = cfg or {}
     n_steps = rng.choices([1, 2, 3, 4], weights=cfg.get("step_weights", [25, 35, 25, 15]))[0]
@@ -58,7 +74,7 @@ def build(cat_actions, rng, cfg=None):
         return n
 
     prev = None
-    descs_steps = []
+    descs_steps, used = [], []
     for si in range(n_steps):
         e = None
         if pat:
@@ -106,6 +122,7 @@ def build(cat_actions, rng, cfg=None):
         steps.append(step)
         descs_steps.append(step)
         descs.append(clean_desc(e["description"]))
+        used.append(e)
         prev = e
     # optionally wrap the chain in a control-flow container (loop / if / try)
     wrap_kind = rng.choices(["none", "loop", "if", "try"], weights=cfg.get("wrap_weights", [55, 17, 14, 14]))[0]
@@ -156,14 +173,24 @@ def build(cat_actions, rng, cfg=None):
                 if v["name"] == vn:
                     v["direction"] = "output"
                     out_names.append(vn)
-    chain = ", then ".join(d[:1].lower() + d[1:] if k else d for k, d in enumerate(descs)) + "."
-    if prefix:
-        chain = prefix + chain[:1].lower() + chain[1:]
+    # how the request is worded: real users do not paste catalog descriptions, so vary the wording
+    style = rng.choices(list(STYLES), weights=[cfg.get("prompt_styles", STYLES)[k] for k in STYLES])[0]
+    parts = [phrase(e, d, style) for e, d in zip(used, descs)]
+    if style == "numbered":
+        chain = "\n".join(f"{k + 1}. {p[:1].upper() + p[1:]}" for k, p in enumerate(parts))
+        if prefix:
+            chain = prefix.rstrip() + "\n" + chain
+    else:
+        joiner = ", then " if style == "full" else rng.choice([", then ", "; ", ", and then ", ". Then "])
+        chain = joiner.join(p[:1].lower() + p[1:] if k else p[:1].upper() + p[1:] for k, p in enumerate(parts)) + "."
+        if prefix:
+            chain = prefix + chain[:1].lower() + chain[1:]
     chain += suffix
     extra = ""
-    if in_names:
+    io_prob = cfg.get("io_prob", 1.0 if style == "full" else 0.5)    # the "takes / returns" sentence is often left out
+    if in_names and rng.random() < io_prob:
         extra += f" The flow takes {', '.join(in_names)} as input."
-    if out_names:
+    if out_names and rng.random() < io_prob:
         extra += f" It returns {', '.join(out_names)}."
     first = descs[0]
     name = " ".join(first.split()[:6]).title()

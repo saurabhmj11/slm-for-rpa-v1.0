@@ -24,6 +24,7 @@ files = {
     "serving/ooa_server.py": (H.parent / "serving/ooa_server.py").read_text(encoding="utf-8"),
     "serving/backends.py": (H.parent / "serving/backends.py").read_text(encoding="utf-8"),
     "flow_check.py": (H.parent / "eval/flow_check.py").read_text(encoding="utf-8"),
+    "plain_requests.jsonl": (H.parent / "eval/plain_requests.jsonl").read_text(encoding="utf-8"),
 }
 
 cells = []
@@ -66,7 +67,7 @@ NUM_ITERS = P["tokens"] // P["total_batch"]
 SFT_SEQ = 2048             # flows longer than this get cut; the T4 cannot afford much more
 SFT_DEVICE_BATCH = 4
 SFT_EPOCHS = 2 if PROFILE == "smoke" else 6      # passes over the OOA data (the seed set is small)
-FLOW_REPEAT = 15           # each flow example is repeated this many times per pass so flows are about a third of the data
+FLOW_REPEAT = 5            # real flows repeated per pass; was 15, which made the model recite whole training flows (memorising)
 SYNTH_TRAIN = 1500 if PROFILE == "smoke" else 30000   # generated flows (no LLM), see gen_flows.py
 SYNTH_EVAL = 20            # unseen generated flows scored by exact action sequence
 SYNTH_PATTERN = 2000 if PROFILE == "smoke" else 12000   # long, multi-toolkit flows following real-flow patterns (gen_flows.real_patterns)
@@ -166,11 +167,20 @@ if not os.path.exists("/content/platform"):
 !python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform {DRIVE_DIR}/sft/synth_train.jsonl {SYNTH_TRAIN} 1
 !python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform /content/synth_eval_raw.jsonl 400 2
 train_set = {json.loads(l)["messages"][1]["content"] for l in open(f"{DRIVE_DIR}/sft/synth_train.jsonl")}
+def _all_actions(nodes):   # every step, including those inside if / try / loop (the test compares all of them)
+    out = []
+    for n in nodes or []:
+        out.append(n.get("action"))
+        for k in ("children", "else", "finally"):
+            if isinstance(n.get(k), list): out += _all_actions(n[k])
+        for ei in n.get("elseIf") or []: out += _all_actions(ei.get("children"))
+        for c in n.get("catch") or []: out += _all_actions(c.get("children"))
+    return out
 ev = []
 for l in open("/content/synth_eval_raw.jsonl"):
     m = json.loads(l)["messages"]
     if m[1]["content"] not in train_set and len(ev) < SYNTH_EVAL:
-        ev.append({"prompt": m[0]["content"], "gold_actions": [st["action"] for st in json.loads(m[1]["content"])["steps"]]})
+        ev.append({"prompt": m[0]["content"], "gold_actions": _all_actions(json.loads(m[1]["content"])["steps"])})
 open(f"{DRIVE_DIR}/sft/eval_synth.jsonl", "w").write("\\n".join(json.dumps(x) for x in ev))
 # validation set the model never trains on (the old one overlapped training, so its loss looked great for nothing)
 val_rows = [json.loads(l) for l in open(f"{DRIVE_DIR}/sft/val.jsonl")]
@@ -313,6 +323,20 @@ for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval_pattern.jsonl")):
     sc = RW.score(out.split("Assistant:", 1)[-1], RW.gold_actions(row["gold_flow"]))
     pr.append(sc)
 print(f"real-pattern eval: {len(pr)} | valid (passes every rule) {sum(x['valid'] for x in pr)} | exact action sequence {sum(x['solved'] for x in pr)} | mean score {sum(x['total'] for x in pr)/max(1,len(pr)):.3f}")
+print("\\n=== Plain-wording eval: 20 short requests written the way people talk (hand-written, never generated) ===")
+def _in_order(need, got):
+    it = iter(got)
+    return all(any(a == g for g in it) for a in need)
+pl = []
+for row in map(json.loads, open("/content/ooa/plain_requests.jsonl")):
+    out = subprocess.run(["python", "-m", "scripts.chat_cli", "-i", EVAL_SOURCE, "-p", row["prompt"], "-t", "0.2"],
+                         capture_output=True, text=True, cwd="/content/nanochat").stdout
+    sc = RW.score(out.split("Assistant:", 1)[-1])
+    try: got = RW.actions_of(json.loads(RW.clean(out.split("Assistant:", 1)[-1])))
+    except Exception: got = []
+    pl.append((sc["valid"], sc["valid"] and _in_order(row["must"], got)))
+    print(("OK  " if pl[-1][1] else ("VALID" if pl[-1][0] else "FAIL ")), row["prompt"][:70], "->", got[:6])
+print(f"plain-wording eval: {len(pl)} | valid (passes every rule) {sum(v for v, _ in pl)} | has the needed actions in order {sum(o for _, o in pl)}")
 print("\\nTry it yourself:")
 !cd /content/nanochat && python -m scripts.chat_cli -i sft -p "Which OOA action would I use to read a CSV file into a table?" -t 0.2
 ''')

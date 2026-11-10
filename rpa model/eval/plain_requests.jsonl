@@ -1,0 +1,20 @@
+{"prompt": "Read a CSV file into a table, then write the table to an Excel sheet", "must": ["ooa.csv/read", "ooa.excel/write_table"]}
+{"prompt": "Open the website and save its product table as a CSV file", "must": ["ooa.browser/open", "ooa.browser/extract_table", "ooa.csv/write"]}
+{"prompt": "Copy a file to another folder, then delete the original", "must": ["ooa.file/copy", "ooa.file/delete"]}
+{"prompt": "Get the text out of a PDF and save it to a text file", "must": ["ooa.pdf/extract_text", "ooa.file/write_text"]}
+{"prompt": "Merge some PDF files into one", "must": ["ooa.pdf/merge"]}
+{"prompt": "Open a workbook, read the whole sheet as a table, and close it", "must": ["ooa.excel/open", "ooa.excel/get_all_cells", "ooa.excel/close"]}
+{"prompt": "Read a CSV, sort it, and write it back to a CSV", "must": ["ooa.csv/read", "ooa.datatable/sort", "ooa.csv/write"]}
+{"prompt": "Read a CSV and count its rows", "must": ["ooa.csv/read", "ooa.datatable/row_count"]}
+{"prompt": "Log in to a website: open the browser, type the username and password, click Sign in", "must": ["ooa.browser/open", "ooa.browser/type_text", "ooa.browser/type_text", "ooa.browser/click"]}
+{"prompt": "Read a text file and write its contents to a new file", "must": ["ooa.file/read_text", "ooa.file/write_text"]}
+{"prompt": "Open a Word document, replace some text, and save it", "must": ["ooa.word/open", "ooa.word/replace_text", "ooa.word/save"]}
+{"prompt": "For each file in a list, move it to the archive folder", "must": ["core/loop", "ooa.file/move"]}
+{"prompt": "Count the pages of a PDF", "must": ["ooa.pdf/page_count"]}
+{"prompt": "Pull the tables out of a PDF and write the first one to Excel", "must": ["ooa.pdf/extract_tables", "ooa.excel/write_table"]}
+{"prompt": "Open a web page, read the text of the price, then close the browser", "must": ["ooa.browser/open", "ooa.browser/get_text", "ooa.browser/close"]}
+{"prompt": "Read a CSV of orders, keep only the unpaid ones, and save them to a new CSV", "must": ["ooa.csv/read", "ooa.datatable/filter", "ooa.csv/write"]}
+{"prompt": "Save the attachments of an email to a folder", "must": ["ooa.email/save_attachments"]}
+{"prompt": "List the files in a folder", "must": ["ooa.file/list"]}
+{"prompt": "Download a file from a web page", "must": ["ooa.browser/download"]}
+{"prompt": "Create a Word document and add a paragraph to it, then save it", "must": ["ooa.word/create_document", "ooa.word/add_paragraph", "ooa.word/save"]}
