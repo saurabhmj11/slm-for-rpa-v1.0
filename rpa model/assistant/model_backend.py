@@ -112,7 +112,7 @@ class NanochatLocal:
     def _prompt(self, text):
         return [self.bos, self.user_start] + self.tok.encode(text) + [self.user_end, self.assistant_start]
 
-    def _run(self, text, max_tokens, temperature, seed, guard=None, on_token=None, attempt=0):
+    def _run(self, text, max_tokens, temperature, seed, guard=None, on_token=None, attempt=0, flow=False):
         """Stream one reply. Returns the decoded text; details go to self.last_stats."""
         use_guard = self.guard_enabled if guard is None else guard
         g = RepetitionGuard() if use_guard else None
@@ -122,7 +122,7 @@ class NanochatLocal:
             con = self.constraints[attempt % len(self.constraints)]
             ids, reason, ncon, nch = C.generate(
                 self.model, self._prompt(text), con, max_tokens, temperature, 50, seed,
-                {self.assistant_end, self.bos}, lambda t: self._tok_text[t] or self.tok.decode([t]), g)
+                {self.assistant_end, self.bos}, lambda t: self._tok_text[t] or self.tok.decode([t]), g, flow=flow)
             self.last_stats = {"tokens": len(ids), "stop": reason, "seconds": round(time.time() - t0, 2), "ids": ids,
                                "names_locked": ncon, "names_corrected": nch}
             return self.tok.decode(ids)
@@ -139,12 +139,17 @@ class NanochatLocal:
             if g is not None and g.push(tok):
                 reason = "loop: " + g.reason
                 break
+            if flow:
+                import constrained as C
+                if C.not_a_flow(out, lambda t: self.tok.decode([t])):
+                    reason = "not a flow"
+                    break
         stream.close()
         self.last_stats = {"tokens": len(out), "stop": reason, "seconds": round(time.time() - t0, 2), "ids": out}
         return self.tok.decode(out)
 
     def generate(self, request, attempt=0, max_tokens=2500):
-        return self._run(request, max_tokens, 0.2 + 0.3 * attempt, 1000 + attempt, attempt=attempt)
+        return self._run(request, max_tokens, 0.2 + 0.3 * attempt, 1000 + attempt, attempt=attempt, flow=True)
 
     def ask(self, question):
         return self._run(question, 300, 0.2, 1000).strip()

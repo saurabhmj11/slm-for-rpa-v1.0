@@ -62,6 +62,15 @@ def test_allowed_tokens():
     assert default.allowed(("action", None, (), "ooa.file/"), ids)              # action ids always are
 
 
+def test_not_a_flow():
+    vocab = ["", " ", "{", '{"', "The", " answer", "\n"]
+    dec = lambda t: vocab[t]
+    assert not C.not_a_flow([], dec)
+    assert not C.not_a_flow([1, 6], dec)                 # only spaces so far: undecided
+    assert not C.not_a_flow([1, 3], dec)                 # opens a JSON object
+    assert C.not_a_flow([4], dec) and C.not_a_flow([1, 4, 5], dec)
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

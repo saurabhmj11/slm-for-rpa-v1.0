@@ -596,7 +596,7 @@
         el("summary", { text: "Model attempts (" + atts.length + ")" }),
         el("ul", { class: "small" }, atts.map((a, i) => el("li", {
           text: "Attempt " + (i + 1) + ": " + (a.ok ? "passed the checker" : "failed the checker") +
-            (a.stop ? "; stopped at " + (a.stop === "end" ? "the natural end" : String(a.stop).startsWith("loop") ?
+            (a.stop ? "; stopped at " + (a.stop === "end" ? "the natural end" : a.stop === "not a flow" ? "its first words (text, not a flow)" : String(a.stop).startsWith("loop") ?
               "a repetition loop (cut early)" : "the length limit") : "") +
             (typeof a.tokens === "number" ? ", " + a.tokens + " tokens" : "") +
             (typeof a.seconds === "number" ? ", " + a.seconds.toFixed(1) + " s" : "") +

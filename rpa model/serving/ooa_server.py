@@ -89,6 +89,11 @@ def parse_messages(messages):
     return request, system, assistant, existing, text
 
 
+NOT_A_TASK = ("The model did not read this as a task to automate, so it answered with text instead of a flow. "
+              "Describe what the bot should do, step by step, for example: 'Read a CSV file and write it to an "
+              "Excel sheet'. Questions about actions go in the Learn tab.")
+
+
 class Router:
     def __init__(self, catalog, platform, policy, local=None, cloud=None):
         os.environ["OOA_CATALOG"] = catalog
@@ -173,6 +178,12 @@ class Router:
                 if flow:
                     return self.done(request, flow, "local", tried, info, t0)
                 errors = info
+                if not (raw or "").lstrip().startswith("{"):
+                    # Text instead of a flow: the request was not read as a task (a question, an error message
+                    # pasted in, chat). A retry only loops on the same text, and forcing JSON makes up an unrelated
+                    # flow, so stop here and say so.
+                    errors = [NOT_A_TASK]
+                    break
         elif self.local is not None:
             errors = ["request looks complex; skipped the local model"]
         if self.cloud is not None and p.allow_escalation:

@@ -168,10 +168,18 @@ def token_strings(tok, vocab_size):
     return out
 
 
+def not_a_flow(out, decode):
+    """True once the reply's first non-space character is known and is not '{'."""
+    head = "".join(decode(t) for t in out[:8]).lstrip()
+    return bool(head) and not head.startswith("{")
+
+
 def generate(model, prompt_ids, constraint, max_tokens, temperature, top_k, seed, stop_ids, decode, guard=None,
-             first_k=256):
+             first_k=256, flow=False):
     """Decode one reply with the catalog lock. Returns (ids, stop_reason, n_constrained_steps, n_changed).
-    decode(token_id) -> text (used to keep the JSON tracker in step). Sampling matches nanochat's Engine."""
+    decode(token_id) -> text (used to keep the JSON tracker in step). Sampling matches nanochat's Engine.
+    flow=True: stop at once (reason "not a flow") when the reply does not open with '{' (a request it read as chat).
+    The first token is NOT forced to '{': that makes the model invent an unrelated flow for a non-task."""
     import torch
     from nanochat.engine import KVCache, sample_next_token
     from nanochat.common import COMPUTE_DTYPE
@@ -206,6 +214,9 @@ def generate(model, prompt_ids, constraint, max_tokens, temperature, top_k, seed
                 break
             out.append(nxt)
             tracker.feed(decode(nxt))
+            if flow and not_a_flow(out, decode):
+                reason = "not a flow"
+                break
             if guard is not None and guard.push(nxt):
                 reason = "loop: " + guard.reason
                 break
