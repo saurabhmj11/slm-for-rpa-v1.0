@@ -237,7 +237,7 @@ print0(f"extra self-learning files in the mix: {{len(_extra)}}")
 _nat = "{DRIVE_DIR}/sft/natural_train.jsonl"     # everyday-wording requests for generated flows (upload to Drive sft/)
 if _os.path.exists(_nat):
     train_tasks += [OOADialogues(_nat)] * ({NATURAL_REPEAT} * {SFT_EPOCHS})
-print0("natural-wording file in the mix:", _os.path.exists(_nat))
+print0(f"natural-wording file in the mix: {{_os.path.exists(_nat)}}")
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)
