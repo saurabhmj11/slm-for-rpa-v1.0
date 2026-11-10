@@ -1,0 +1,1061 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>OOA Assistant</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --surface-2: #eef1f5;
+    --text: #1c2330;
+    --muted: #586273;
+    --border: #d5dae2;
+    --accent: #2b5cad;
+    --accent-hover: #234c90;
+    --accent-text: #ffffff;
+    --focus: #e38b00;
+    --ok: #1d6a35;
+    --ok-bg: #e5f3e9;
+    --ok-border: #9fd0ae;
+    --warn: #7d4300;
+    --warn-bg: #fff3df;
+    --warn-border: #e6ae5a;
+    --bad: #a12222;
+    --bad-bg: #fdeaea;
+    --bad-border: #e8a3a3;
+    --code-bg: #f0f2f6;
+    --shadow: 0 1px 2px rgba(20, 30, 50, .06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #13171e;
+      --surface: #1b2029;
+      --surface-2: #232a35;
+      --text: #e4e8ef;
+      --muted: #a2abba;
+      --border: #343d4b;
+      --accent: #79a6f2;
+      --accent-hover: #93b8f6;
+      --accent-text: #0f1620;
+      --focus: #ffb547;
+      --ok: #8fd6a5;
+      --ok-bg: #16301f;
+      --ok-border: #2f6b43;
+      --warn: #ffc979;
+      --warn-bg: #33260f;
+      --warn-border: #7a5a22;
+      --bad: #ff9c9c;
+      --bad-bg: #3a1a1c;
+      --bad-border: #7c3438;
+      --code-bg: #141920;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    overflow-wrap: anywhere;
+  }
+  header.top { background: var(--surface); border-bottom: 1px solid var(--border); }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 0 16px; }
+  header.top .wrap { padding-top: 12px; padding-bottom: 4px; }
+  h1 { font-size: 1.25rem; margin: 0; }
+  h2 { font-size: 1.1rem; margin: 0 0 .5rem; }
+  h3 { font-size: 1rem; margin: 1rem 0 .4rem; }
+  p { margin: .4rem 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: .875rem; }
+  #status-line { font-size: .85rem; color: var(--muted); margin: 2px 0 8px; }
+  nav[role=tablist] { display: flex; flex-wrap: wrap; gap: 2px; }
+  [role=tab] {
+    flex: 1 1 auto; min-width: 0; background: none; border: 0; border-bottom: 3px solid transparent;
+    color: var(--muted); font: inherit; font-weight: 600; padding: 8px 10px; cursor: pointer; border-radius: 6px 6px 0 0;
+  }
+  [role=tab]:hover { color: var(--text); background: var(--surface-2); }
+  [role=tab][aria-selected=true] { color: var(--accent); border-bottom-color: var(--accent); }
+  main.wrap { padding-top: 16px; padding-bottom: 48px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+    margin-bottom: 16px; box-shadow: var(--shadow); min-width: 0;
+  }
+  label { display: block; font-weight: 600; margin: .6rem 0 .25rem; }
+  label.inline { display: flex; gap: .5rem; align-items: flex-start; font-weight: 500; }
+  label.inline input { margin-top: .3rem; }
+  input[type=text], input[type=search], input[type=number], textarea, select {
+    width: 100%; max-width: 100%; font: inherit; color: var(--text); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  }
+  textarea { min-height: 5.5rem; resize: vertical; }
+  textarea.code, pre, code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: .85rem; }
+  textarea.code { min-height: 14rem; }
+  button {
+    font: inherit; font-weight: 600; border-radius: 8px; padding: 8px 14px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text);
+  }
+  button:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+  button.secondary { background: var(--surface); color: var(--accent); }
+  button.secondary:hover:not(:disabled) { background: var(--surface-2); color: var(--accent); }
+  button.danger { background: var(--surface); color: var(--bad); border-color: var(--bad-border); }
+  button.danger:hover:not(:disabled) { background: var(--bad-bg); color: var(--bad); border-color: var(--bad); }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  button.link { background: none; border: 0; color: var(--accent); padding: 0; font-weight: 600; text-align: left; text-decoration: underline; }
+  button.link:hover:not(:disabled) { background: none; color: var(--accent-hover); }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: .4rem 0; }
+  .chip {
+    background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 999px;
+    font-weight: 500; font-size: .85rem; padding: 4px 12px; text-align: left;
+  }
+  .chip:hover:not(:disabled) { background: var(--surface); color: var(--text); border-color: var(--accent); }
+  .banner { border-left: 4px solid var(--accent); background: var(--surface-2); padding: 10px 12px; border-radius: 6px; margin-bottom: 12px; }
+  .banner p { margin: .2rem 0; }
+  .box { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 10px 0; }
+  .box.ok { background: var(--ok-bg); border-color: var(--ok-border); color: var(--ok); }
+  .box.warn { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn); }
+  .box.bad { background: var(--bad-bg); border-color: var(--bad-border); color: var(--bad); }
+  .box ul, .box ol { margin: .3rem 0 0; padding-left: 1.2rem; }
+  .box strong { color: inherit; }
+  .badge { display: inline-block; font-size: .78rem; font-weight: 700; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); white-space: nowrap; }
+  .badge.ok { background: var(--ok-bg); border-color: var(--ok-border); color: var(--ok); }
+  .badge.warn { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn); }
+  .badge.bad { background: var(--bad-bg); border-color: var(--bad-border); color: var(--bad); }
+  .spinner {
+    display: inline-block; width: 1em; height: 1em; border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; overflow: auto; max-width: 100%; max-height: 28rem; white-space: pre; margin: .4rem 0; }
+  code { background: var(--code-bg); padding: 0 4px; border-radius: 4px; }
+  details > summary { cursor: pointer; font-weight: 600; margin: .4rem 0; }
+  ol.steps { list-style: none; padding: 0; margin: .4rem 0; }
+  ol.steps > li { border-left: 3px solid var(--border); padding: 6px 0 6px 10px; margin: 6px 0; }
+  ol.steps > li.unknown { border-left-color: var(--warn-border); }
+  .step-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+  .step-head strong { font-weight: 650; }
+  .kv { margin: .2rem 0 0; padding-left: 1.1rem; font-size: .9rem; }
+  .kv li { margin: .1rem 0; }
+  .grid2 { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); }
+  .grid2 > * { min-width: 0; }
+  .tiles { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(min(120px, 100%), 1fr)); }
+  .tile { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .tile .n { font-size: 1.5rem; font-weight: 700; display: block; }
+  ul.plain { list-style: none; padding: 0; margin: .4rem 0; }
+  ul.plain > li { padding: 6px 0; border-bottom: 1px solid var(--border); }
+  ul.plain > li:last-child { border-bottom: 0; }
+  .choices { display: grid; gap: 8px; margin-top: 10px; }
+  .choice { background: var(--surface); color: var(--text); border: 1px solid var(--border); text-align: left; font-weight: 500; }
+  .choice:hover:not(:disabled) { background: var(--surface-2); color: var(--text); border-color: var(--accent); }
+  .choice.right { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); opacity: 1; }
+  .choice.wrong { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); opacity: 1; }
+  .events { max-height: 20rem; overflow: auto; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  [hidden] { display: none !important; }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  @media (max-width: 480px) {
+    .card { padding: 12px; }
+    [role=tab] { padding: 8px 6px; font-size: .92rem; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <h1>OOA Assistant</h1>
+    <p id="status-line" aria-live="polite">Connecting to the local server...</p>
+    <nav role="tablist" aria-label="Sections">
+      <button role="tab" id="tab-build" aria-controls="panel-build" aria-selected="true">Build</button>
+      <button role="tab" id="tab-learn" aria-controls="panel-learn" aria-selected="false" tabindex="-1">Learn</button>
+      <button role="tab" id="tab-practice" aria-controls="panel-practice" aria-selected="false" tabindex="-1">Practice</button>
+      <button role="tab" id="tab-run" aria-controls="panel-run" aria-selected="false" tabindex="-1">Run</button>
+      <button role="tab" id="tab-progress" aria-controls="panel-progress" aria-selected="false" tabindex="-1">Progress</button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <!-- ============================== BUILD ============================== -->
+  <section role="tabpanel" id="panel-build" aria-labelledby="tab-build">
+    <div class="card">
+      <div class="banner" id="build-banner">
+        <p><strong>What to expect.</strong> The model is good at step-by-step requests and at questions about the action catalog.
+          Everyday wording and long business flows are still weak.
+          Every answer is checked before it is shown: if the check fails you see the problems, not a flow.</p>
+        <details id="build-goodweak" hidden>
+          <summary class="small">More about what it is good and weak at</summary>
+          <p class="small"><strong>Good at:</strong></p>
+          <ul class="small" id="good-at"></ul>
+          <p class="small"><strong>Weak at:</strong></p>
+          <ul class="small" id="weak-at"></ul>
+        </details>
+      </div>
+      <form id="build-form" novalidate>
+        <label for="build-request">Describe the flow, one step at a time</label>
+        <textarea id="build-request" maxlength="500" placeholder="Read a CSV file into a table, then write the table to an Excel sheet."></textarea>
+        <p class="small muted" id="chips-label">Examples that work well (step-by-step wording):</p>
+        <div class="chips" role="group" aria-labelledby="chips-label" id="build-chips"></div>
+        <div class="row">
+          <button type="submit" id="build-btn">Build</button>
+          <span id="build-progress" class="muted" hidden><span class="spinner" aria-hidden="true"></span><span id="build-elapsed">0 s</span>
+            <span class="small">(the model can take up to about 20 s on a CPU)</span></span>
+        </div>
+      </form>
+    </div>
+    <div id="build-result" aria-live="polite"></div>
+  </section>
+
+  <!-- ============================== LEARN ============================== -->
+  <section role="tabpanel" id="panel-learn" aria-labelledby="tab-learn" hidden>
+    <div class="card">
+      <h2>Search the action catalog</h2>
+      <form id="search-form" novalidate>
+        <label for="search-q">What do you want to do?</label>
+        <input type="search" id="search-q" placeholder="e.g. read csv, send email, rename file" autocomplete="off">
+        <div class="row"><button type="submit" id="search-btn">Search</button></div>
+      </form>
+      <div id="search-results" aria-live="polite"></div>
+    </div>
+    <div class="card" id="action-card-wrap" hidden>
+      <div id="action-card" aria-live="polite" tabindex="-1"></div>
+    </div>
+    <div class="card">
+      <h2>Lessons by toolkit</h2>
+      <label for="toolkit-select">Toolkit</label>
+      <select id="toolkit-select"><option value="">Loading toolkits...</option></select>
+      <div class="row"><button type="button" id="lesson-btn" class="secondary">Show lesson</button></div>
+      <div id="lesson" aria-live="polite"></div>
+    </div>
+    <div class="card">
+      <h2>Ask the model</h2>
+      <p class="small muted">Ask a question about the catalog. The model's answer is shown next to the catalog's own matches.
+        The catalog is the source of truth; the model can be wrong.</p>
+      <form id="ask-form" novalidate>
+        <label for="ask-q">Your question</label>
+        <input type="text" id="ask-q" maxlength="1000" placeholder="Which action reads a CSV file into a table?">
+        <div class="row"><button type="submit" id="ask-btn">Ask</button></div>
+      </form>
+      <div id="ask-result" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <!-- ============================== PRACTICE ============================== -->
+  <section role="tabpanel" id="panel-practice" aria-labelledby="tab-practice" hidden>
+    <div class="card">
+      <h2>Practice</h2>
+      <p class="small muted">Questions are made from the action catalog. Your score is kept in this browser only.</p>
+      <div class="row">
+        <span>Score: <strong id="quiz-score">0 / 0</strong></span>
+        <button type="button" id="quiz-reset" class="secondary">Reset score</button>
+      </div>
+      <label for="quiz-kind">Question type</label>
+      <select id="quiz-kind">
+        <option value="">Any</option>
+        <option value="which_action">Which action does this?</option>
+        <option value="required_inputs">Which inputs are required?</option>
+        <option value="which_toolkit">Which toolkit has this action?</option>
+      </select>
+      <div class="row"><button type="button" id="quiz-new">New question</button></div>
+    </div>
+    <div class="card" id="quiz-card" hidden>
+      <p id="quiz-question" tabindex="-1"></p>
+      <div class="choices" id="quiz-choices" role="group" aria-labelledby="quiz-question"></div>
+      <div id="quiz-feedback" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <!-- ============================== RUN ============================== -->
+  <section role="tabpanel" id="panel-run" aria-labelledby="tab-run" hidden>
+    <div class="card">
+      <h2>Run a flow on this PC</h2>
+      <p class="small muted">Runs with the platform's reference runner, only for the actions it supports, inside the
+        assistant's sandbox folder. File paths are relative to that folder. Risky actions need your confirmation.</p>
+      <label for="run-flow">Flow JSON</label>
+      <textarea id="run-flow" class="code" spellcheck="false" placeholder='{"kind": "TaskBot", "variables": [], "steps": []}'></textarea>
+      <div class="row">
+        <button type="button" id="run-use-built" class="secondary" disabled>Use the built flow</button>
+        <button type="button" id="run-check">Check if it can run</button>
+        <button type="button" id="run-explain" class="secondary">Explain it</button>
+      </div>
+      <div id="run-check-result" aria-live="polite"></div>
+    </div>
+    <div class="card" id="run-form-card" hidden>
+      <h2>Inputs</h2>
+      <form id="run-form" novalidate>
+        <div id="run-inputs"></div>
+        <div id="run-risky"></div>
+        <div class="row"><button type="submit" id="run-btn" disabled>Run</button>
+          <span id="run-progress" class="muted" hidden><span class="spinner" aria-hidden="true"></span>Running...</span></div>
+      </form>
+    </div>
+    <div id="run-result" aria-live="polite"></div>
+    <div id="run-explanation" aria-live="polite"></div>
+  </section>
+
+  <!-- ============================== PROGRESS ============================== -->
+  <section role="tabpanel" id="panel-progress" aria-labelledby="tab-progress" hidden>
+    <div class="card">
+      <h2>Your feedback</h2>
+      <p class="banner small" id="learning-note">The model does not change while you use it. Your Accept / Edit / Reject
+        feedback is saved on this PC; "Export training data" turns it into verified training rows for the next training run.</p>
+      <div id="progress-body" aria-live="polite"><p class="muted">Loading...</p></div>
+      <div class="row"><button type="button" id="progress-refresh" class="secondary">Refresh</button></div>
+    </div>
+    <div class="card">
+      <h2>Export training data</h2>
+      <p class="small muted">Only flows that pass the checker become training rows. Rejected requests without an edit are
+        listed separately so you can write correct answers for them.</p>
+      <div class="row"><button type="button" id="export-btn">Export training data</button></div>
+      <div id="export-result" aria-live="polite"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------------------------------------------------------------- helpers
+  const $ = (sel, root) => (root || document).querySelector(sel);
+
+  function el(tag, props, ...kids) {
+    const n = document.createElement(tag);
+    if (props) {
+      for (const [k, v] of Object.entries(props)) {
+        if (v === null || v === undefined || v === false) continue;
+        if (k === "class") n.className = v;
+        else if (k === "text") n.textContent = v;
+        else if (k.startsWith("on") && typeof v === "function") n.addEventListener(k.slice(2), v);
+        else if (typeof v === "boolean") n[k] = v;
+        else n.setAttribute(k, v);
+      }
+    }
+    for (const c of kids.flat(Infinity)) {
+      if (c === null || c === undefined || c === false) continue;
+      n.append(c.nodeType ? c : String(c));
+    }
+    return n;
+  }
+
+  function clear(node) { node.replaceChildren(); return node; }
+
+  function show(node, ...kids) { clear(node).append(...kids.flat().filter(Boolean)); }
+
+  function asText(v) {
+    if (v === null || v === undefined) return "";
+    return typeof v === "string" ? v : JSON.stringify(v);
+  }
+
+  function errorBox(msg) {
+    return el("div", { class: "box bad", role: "alert" }, el("strong", { text: "Something went wrong: " }), msg);
+  }
+
+  async function api(method, path, body) {
+    // X-OOA-Assistant: the server refuses POSTs without it, so other web sites cannot drive this local server.
+    const opt = { method, headers: { "X-OOA-Assistant": "1" } };
+    if (method === "POST" && body === undefined) body = {};
+    if (body !== undefined) {
+      opt.headers["Content-Type"] = "application/json";
+      opt.body = JSON.stringify(body);
+    }
+    let res;
+    try {
+      res = await fetch(path, opt);
+    } catch (e) {
+      throw new Error("cannot reach the assistant server. Is it still running?");
+    }
+    let data = null;
+    try { data = await res.json(); } catch (e) { data = null; }
+    if (!res.ok) throw new Error((data && data.error) || ("request failed (HTTP " + res.status + ")"));
+    if (data === null || typeof data !== "object") throw new Error("the server sent an unreadable answer");
+    return data;
+  }
+
+  // Disable the given buttons (and mark the region busy) while fn runs.
+  async function busy(buttons, region, fn) {
+    const prev = buttons.map(b => b.disabled);
+    buttons.forEach(b => { b.disabled = true; });
+    if (region) region.setAttribute("aria-busy", "true");
+    try {
+      return await fn();
+    } finally {
+      buttons.forEach((b, i) => { b.disabled = prev[i]; });
+      if (region) region.removeAttribute("aria-busy");
+    }
+  }
+
+  const store = {
+    get(key, fallback) {
+      try {
+        const v = window.localStorage.getItem(key);
+        return v === null ? fallback : JSON.parse(v);
+      } catch (e) { return fallback; }
+    },
+    set(key, value) {
+      try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* storage unavailable */ }
+    }
+  };
+
+  function pretty(obj) { try { return JSON.stringify(obj, null, 2); } catch (e) { return String(obj); } }
+
+  function parseFlow(text) {
+    const t = (text || "").trim();
+    if (!t) throw new Error("paste a flow first (JSON)");
+    let v;
+    try { v = JSON.parse(t); } catch (e) { throw new Error("the flow is not valid JSON: " + e.message); }
+    if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("the flow must be a JSON object");
+    return v;
+  }
+
+  // ---------------------------------------------------------------- tabs
+  const TABS = ["build", "learn", "practice", "run", "progress"];
+  const tabBtns = TABS.map(t => $("#tab-" + t));
+  const onShow = {};
+
+  function selectTab(name, focus) {
+    if (!TABS.includes(name)) name = "build";
+    TABS.forEach((t, i) => {
+      const on = t === name;
+      tabBtns[i].setAttribute("aria-selected", on ? "true" : "false");
+      tabBtns[i].tabIndex = on ? 0 : -1;
+      $("#panel-" + t).hidden = !on;
+    });
+    if (focus) tabBtns[TABS.indexOf(name)].focus();
+    store.set("ooa.assistant.lastTab", name);
+    if (onShow[name]) onShow[name]();
+  }
+
+  tabBtns.forEach((b, i) => {
+    b.addEventListener("click", () => selectTab(TABS[i]));
+    b.addEventListener("keydown", e => {
+      let j = null;
+      if (e.key === "ArrowRight") j = (i + 1) % TABS.length;
+      else if (e.key === "ArrowLeft") j = (i - 1 + TABS.length) % TABS.length;
+      else if (e.key === "Home") j = 0;
+      else if (e.key === "End") j = TABS.length - 1;
+      if (j !== null) { e.preventDefault(); selectTab(TABS[j], true); }
+    });
+  });
+
+  // ---------------------------------------------------------------- status
+  async function loadStatus() {
+    const line = $("#status-line");
+    try {
+      const s = await api("GET", "/api/status");
+      const m = s.model || {};
+      const parts = [];
+      parts.push("Model: " + (m.source || "loaded") + (m.device ? " on " + m.device : "") +
+                 (m.step ? ", step " + m.step : ""));
+      if (typeof s.catalog_size === "number") parts.push("catalog: " + s.catalog_size + " entries");
+      const r = s.runner || {};
+      parts.push(r.available ? "local runner: " + (r.supported_count || 0) + " actions" : "local runner: not available");
+      line.textContent = parts.join(" · ");
+      const good = Array.isArray(s.good_at) ? s.good_at : [];
+      const weak = Array.isArray(s.weak_at) ? s.weak_at : [];
+      if (good.length || weak.length) {
+        show($("#good-at"), good.map(t => el("li", { text: t })));
+        show($("#weak-at"), weak.map(t => el("li", { text: t })));
+        $("#build-goodweak").hidden = false;
+      }
+      if (s.learning) $("#learning-note").textContent = s.learning;
+    } catch (e) {
+      line.textContent = "The local server is not answering (" + e.message + ").";
+    }
+  }
+
+  // ---------------------------------------------------------------- explanation
+  const BLOCK_LABEL = {
+    "if": "if the condition holds", "elseif": "else-if branch", "else": "otherwise (else)",
+    "loop": "inside the loop", "try": "inside try", "catch": "on error (catch)", "finally": "always (finally)"
+  };
+
+  function renderExplanation(exp, heading) {
+    const box = el("div", { class: "card" });
+    box.append(el("h2", { text: heading || "What this flow does, step by step" }));
+    if (exp.summary) box.append(el("p", { text: exp.summary }));
+    const io = (title, items) => items && items.length ? el("div", null,
+      el("h3", { text: title }),
+      el("ul", { class: "kv" }, items.map(v => el("li", null, el("code", { text: v.name }),
+        v.type ? " (" + v.type + ")" : "", v.description ? ": " + v.description : "")))) : null;
+    const g = el("div", { class: "grid2" }, io("Inputs", exp.inputs), io("Outputs", exp.outputs));
+    if (g.childNodes.length) box.append(g);
+    const steps = Array.isArray(exp.steps) ? exp.steps : [];
+    if (steps.length) {
+      box.append(el("h3", { text: "Steps" }));
+      const ol = el("ol", { class: "steps" });
+      steps.forEach((s, i) => {
+        const depth = Math.max(0, Math.min(8, Number(s.depth) || 0));
+        const li = el("li", { class: s.known === false ? "unknown" : null });
+        li.style.marginLeft = (depth * 1.1) + "rem";
+        const head = el("div", { class: "step-head" },
+          el("span", { class: "muted small", text: "Step " + (i + 1) }),
+          el("strong", { text: s.title || s.action || "(no action)" }));
+        if (s.block) head.append(el("span", { class: "badge", text: BLOCK_LABEL[s.block] || s.block }));
+        if (s.known === false) head.append(el("span", { class: "badge warn", text: "not in the catalog" }));
+        li.append(head);
+        if (s.what) li.append(el("p", { class: "small", text: s.what }));
+        const details = [];
+        (s.args || []).forEach(a => details.push(el("li", null, el("code", { text: a.name }), " = ",
+          el("code", { text: asText(a.value) }), a.meaning ? " — " + a.meaning : "")));
+        (s.outs || []).forEach(o => details.push(el("li", null, "saves ", el("code", { text: o.name }),
+          " in ", el("code", { text: asText(o.variable) }))));
+        if (details.length) li.append(el("ul", { class: "kv" }, details));
+        ol.append(li);
+      });
+      box.append(ol);
+    }
+    return box;
+  }
+
+  // ---------------------------------------------------------------- BUILD
+  const EXAMPLES = [
+    // Each of these was verified with the real model (step 2000): 1-7 s on a 4-core CPU, and the flow uses the named
+    // inputs. The first three also run locally.
+    "List files in a folder matching a glob pattern. The flow takes folder as input. It returns files.",
+    "Read a text file, then parse JSON text into a Dictionary or List. The flow takes path as input. It returns value.",
+    "Read a text file. The flow takes path as input. It returns text.",
+    "Read a CSV or delimited text file into a table, then sort rows by a column, then write a table to a CSV file, overwriting or appending rows. The flow takes path, path_2 as input."
+  ];
+  const buildReq = $("#build-request");
+  const buildBtn = $("#build-btn");
+  const buildResult = $("#build-result");
+  let lastBuild = null;   // { request, data }
+
+  show($("#build-chips"), EXAMPLES.map(t => el("button", {
+    type: "button", class: "chip", text: t,
+    onclick: () => { buildReq.value = t; buildReq.focus(); }
+  })));
+
+  $("#build-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const request = buildReq.value.trim();
+    if (!request) {
+      show(buildResult, el("div", { class: "box warn", role: "alert", text: "Type a request first (or pick an example)." }));
+      buildReq.focus();
+      return;
+    }
+    const prog = $("#build-progress"), elapsed = $("#build-elapsed");
+    const t0 = Date.now();
+    elapsed.textContent = "0 s";
+    prog.hidden = false;
+    show(buildResult, el("p", { class: "muted", text: "Building your flow..." }));
+    const timer = setInterval(() => { elapsed.textContent = Math.floor((Date.now() - t0) / 1000) + " s"; }, 250);
+    try {
+      await busy([buildBtn, ...document.querySelectorAll("#build-chips button")], buildResult, async () => {
+        const data = await api("POST", "/api/build", { request });
+        lastBuild = { request, data };
+        $("#run-use-built").disabled = !(data.verified && data.flow);
+        renderBuild(request, data);
+      });
+    } catch (err) {
+      show(buildResult, errorBox(err.message));
+    } finally {
+      clearInterval(timer);
+      prog.hidden = true;
+    }
+  });
+
+  function renderBuild(request, d) {
+    const out = [];
+    const secs = typeof d.seconds === "number" ? " in " + d.seconds.toFixed(1) + " s" : "";
+    if (d.verified && d.flow) {
+      const ok = el("div", { class: "box ok" },
+        el("strong", { text: "Verified." }), " The flow passed the checker" + secs + ".");
+      const repairs = Array.isArray(d.repairs) ? d.repairs : [];
+      if (repairs.length) {
+        ok.append(el("details", null,
+          el("summary", { text: "Small automatic fixes were applied (" + repairs.length + ")" }),
+          el("ul", null, repairs.map(r => el("li", { text: asText(r) })))));
+      }
+      out.push(ok);
+    } else if (d.model_tried === false) {
+      out.push(el("div", { class: "box warn", role: "alert" },
+        el("strong", { text: "Not built: the model was not tried on this request." }),
+        d.reason ? el("p", { text: d.reason }) : null));
+    } else {
+      const probs = Array.isArray(d.problems) ? d.problems : [];
+      out.push(el("div", { class: "box warn", role: "alert" },
+        el("strong", { text: "Not verified: no flow is shown because the answer failed the checker" + secs + "." }),
+        d.reason ? el("p", { text: d.reason }) : null,
+        probs.length ? el("p", { text: "Problems found:" }) : null,
+        probs.length ? el("ul", null, probs.map(p => el("li", { text: asText(p) }))) : null,
+        el("p", { class: "small", text: "Tip: say each step plainly, in order, naming what to read and where to write it. " +
+          "Short step-by-step requests work best." })));
+    }
+    const atts = Array.isArray(d.attempts) ? d.attempts.filter(a => a && typeof a === "object") : [];
+    if (atts.length) {
+      out.push(el("details", null,
+        el("summary", { text: "Model attempts (" + atts.length + ")" }),
+        el("ul", { class: "small" }, atts.map((a, i) => el("li", {
+          text: "Attempt " + (i + 1) + ": " + (a.ok ? "passed the checker" : "failed the checker") +
+            (a.stop ? "; stopped at " + (a.stop === "end" ? "the natural end" : String(a.stop).startsWith("loop") ?
+              "a repetition loop (cut early)" : "the length limit") : "") +
+            (typeof a.tokens === "number" ? ", " + a.tokens + " tokens" : "") +
+            (typeof a.seconds === "number" ? ", " + a.seconds.toFixed(1) + " s" : "")
+        })))));
+    }
+    const card = el("div", { class: "card" }, out);
+    show(buildResult, card);
+
+    if (d.verified && d.flow) {
+      if (d.explanation) buildResult.append(renderExplanation(d.explanation));
+      const cr = d.can_run;
+      const runBox = el("div", { class: "card" }, el("h2", { text: "Run it on this PC" }));
+      if (cr && cr.ok) {
+        runBox.append(el("p", { class: "small", text: "The local runner supports every step of this flow." +
+          (cr.risky && cr.risky.length ? " Some actions are risky and need your confirmation." : "") }));
+        runBox.append(el("div", { class: "row" }, el("button", {
+          type: "button", id: "try-run", text: "Try running it", onclick: () => openRun(d.flow, cr)
+        })));
+      } else if (cr) {
+        const why = [];
+        (cr.unsupported || []).forEach(a => why.push(el("li", null, "Not supported by the local runner: ", el("code", { text: a }))));
+        (cr.problems || []).forEach(p => why.push(el("li", { text: "Cannot run locally: " + asText(p) })));
+        runBox.append(el("div", { class: "box warn" }, el("strong", { text: "This flow cannot run on this PC." }),
+          why.length ? el("ul", null, why) : null));
+      }
+      buildResult.append(runBox);
+      buildResult.append(el("div", { class: "card" }, el("details", null,
+        el("summary", { text: "Show the flow JSON" }), el("pre", { tabindex: "0", text: pretty(d.flow) }))));
+    }
+    buildResult.append(renderFeedback(request, d));
+  }
+
+  function renderFeedback(request, d) {
+    const flow = d.verified ? d.flow : null;
+    const msg = el("div", { "aria-live": "polite" });
+    const note = el("input", { type: "text", id: "fb-note", maxlength: "2000", placeholder: "What was wrong or right?" });
+    const editArea = el("textarea", { id: "fb-edit", class: "code", spellcheck: "false" });
+    editArea.value = flow ? pretty(flow) : pretty({ kind: "TaskBot", id: "my_flow", name: "", description: request,
+      variables: [], steps: [] });
+    const btns = [];
+    const send = async (verdict, extra) => {
+      await busy(btns, msg, async () => {
+        try {
+          const body = Object.assign({ request, flow, verdict, note: note.value.trim() }, extra || {});
+          const r = await api("POST", "/api/feedback", body);
+          btns.forEach(b => { b.dataset.done = "1"; });
+          editWrap.hidden = true;
+          show(msg, el("div", { class: "box ok" }, el("strong", { text: "Saved (" + verdict + "). " }),
+            r.learning || "The model does not change now; it learns from this at the next training run."));
+        } catch (err) {
+          show(msg, errorBox(err.message));
+        }
+      });
+      if (btns[0] && btns[0].dataset.done) btns.forEach(b => { b.disabled = true; });
+    };
+    const saveEdit = el("button", { type: "button", id: "fb-save-edit", text: "Save edit", onclick: () => {
+      let edited;
+      try { edited = parseFlow(editArea.value); } catch (err) { show(msg, errorBox(err.message)); editArea.focus(); return; }
+      send("edit", { edited_flow: edited });
+    } });
+    const cancelEdit = el("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => { editWrap.hidden = true; } });
+    const editWrap = el("div", { hidden: true },
+      el("label", { for: "fb-edit", text: flow ? "Edit the flow JSON, then save" : "Write the correct flow JSON, then save" }),
+      editArea, el("div", { class: "row" }, saveEdit, cancelEdit));
+    const accept = flow ? el("button", { type: "button", id: "fb-accept", text: "Accept", onclick: () => send("accept") }) : null;
+    const edit = el("button", { type: "button", id: "fb-edit-btn", class: "secondary",
+      text: flow ? "Edit" : "Write the correct flow",
+      onclick: () => { editWrap.hidden = false; editArea.focus(); } });
+    const reject = el("button", { type: "button", id: "fb-reject", class: "danger", text: "Reject", onclick: () => send("reject") });
+    [accept, edit, reject, saveEdit].forEach(b => { if (b) btns.push(b); });
+    return el("div", { class: "card" },
+      el("h2", { text: "Was this right?" }),
+      el("p", { class: "small muted", text: "Your answer is saved on this PC. The model does not change live: it improves at " +
+        "the next training run, after you export your feedback (Progress tab)." }),
+      el("label", { for: "fb-note", text: "Note (optional)" }), note,
+      el("div", { class: "row" }, accept, edit, reject),
+      editWrap, msg);
+  }
+
+  // ---------------------------------------------------------------- LEARN
+  const searchResults = $("#search-results");
+  const cardWrap = $("#action-card-wrap"), cardBox = $("#action-card");
+
+  function shortCardItem(c) {
+    return el("li", null,
+      el("button", { type: "button", class: "link", text: c.name || c.id, onclick: () => openCard(c.id) }),
+      " ", el("span", { class: "badge", text: c.toolkit || "" }),
+      el("div", { class: "small muted" }, el("code", { text: c.id })),
+      c.description ? el("div", { class: "small", text: c.description }) : null);
+  }
+
+  $("#search-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const q = $("#search-q").value.trim();
+    if (!q) { show(searchResults, el("p", { class: "muted", text: "Type a few words to search." })); return; }
+    await busy([$("#search-btn")], searchResults, async () => {
+      try {
+        const d = await api("GET", "/api/search?q=" + encodeURIComponent(q) + "&k=10");
+        const rs = Array.isArray(d.results) ? d.results : [];
+        show(searchResults, rs.length
+          ? [el("p", { class: "small muted", text: rs.length + " result" + (rs.length === 1 ? "" : "s") }),
+             el("ul", { class: "plain" }, rs.map(shortCardItem))]
+          : el("p", { class: "muted", text: "No matching actions." }));
+      } catch (err) { show(searchResults, errorBox(err.message)); }
+    });
+  });
+
+  async function openCard(id) {
+    cardWrap.hidden = false;
+    show(cardBox, el("p", { class: "muted", text: "Loading " + id + "..." }));
+    try {
+      const c = await api("GET", "/api/action?id=" + encodeURIComponent(id));
+      const ioTable = (title, items) => el("div", null, el("h3", { text: title }),
+        items && items.length
+          ? el("table", null, el("thead", null, el("tr", null, el("th", { text: "Name" }), el("th", { text: "Type" }),
+              el("th", { text: "What it is" }))),
+              el("tbody", null, items.map(i => el("tr", null, el("td", null, el("code", { text: i.name })),
+                el("td", { text: i.type || "" }), el("td", { text: i.description || "" })))))
+          : el("p", { class: "small muted", text: "None." }));
+      show(cardBox,
+        el("h2", { text: c.name }),
+        el("p", null, el("span", { class: "badge", text: c.toolkit }), " ", el("code", { text: c.id })),
+        el("p", { text: c.description || "" }),
+        c.notes ? el("p", { class: "small muted", text: "Notes: " + c.notes }) : null,
+        ioTable("Required inputs", c.required),
+        ioTable("Optional inputs", c.optional),
+        ioTable("Outputs", c.outputs));
+      cardBox.focus();
+    } catch (err) { show(cardBox, errorBox(err.message)); }
+  }
+
+  let toolkitsLoaded = false;
+  async function loadToolkits() {
+    if (toolkitsLoaded) return;
+    const sel = $("#toolkit-select");
+    try {
+      const d = await api("GET", "/api/toolkits");
+      const tks = Array.isArray(d.toolkits) ? d.toolkits : [];
+      show(sel, el("option", { value: "", text: "Choose a toolkit (" + tks.length + ")" }),
+        tks.map(t => el("option", { value: t.id, text: t.name + " (" + t.count + ")" })));
+      toolkitsLoaded = true;
+    } catch (err) {
+      show(sel, el("option", { value: "", text: "Could not load toolkits" }));
+      show($("#lesson"), errorBox(err.message));
+    }
+  }
+
+  $("#lesson-btn").addEventListener("click", async () => {
+    const id = $("#toolkit-select").value, box = $("#lesson");
+    if (!id) { show(box, el("p", { class: "muted", text: "Choose a toolkit first." })); return; }
+    await busy([$("#lesson-btn")], box, async () => {
+      try {
+        const l = await api("GET", "/api/lesson?toolkit=" + encodeURIComponent(id));
+        const acts = Array.isArray(l.actions) ? l.actions : [];
+        show(box, el("h3", { text: l.toolkit }), el("p", { text: l.intro || "" }),
+          el("ul", { class: "plain" }, acts.map(shortCardItem)));
+      } catch (err) { show(box, errorBox(err.message)); }
+    });
+  });
+
+  $("#ask-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const q = $("#ask-q").value.trim(), box = $("#ask-result");
+    if (!q) { show(box, el("p", { class: "muted", text: "Type a question first." })); return; }
+    show(box, el("p", { class: "muted" }, el("span", { class: "spinner", "aria-hidden": "true" }), "Asking the model..."));
+    await busy([$("#ask-btn")], box, async () => {
+      try {
+        const d = await api("POST", "/api/ask", { question: q });
+        const ms = Array.isArray(d.catalog_matches) ? d.catalog_matches : [];
+        show(box,
+          el("p", { class: "box warn small", text: d.note || "The catalog matches are the source of truth; the model's answer can be wrong." }),
+          el("div", { class: "grid2" },
+            el("div", null, el("h3", { text: "Model's answer (may be wrong)" }),
+              el("pre", { tabindex: "0", style: "white-space: pre-wrap", text: d.model_answer || "(no answer)" })),
+            el("div", null, el("h3", { text: "Catalog matches (source of truth)" }),
+              ms.length ? el("ul", { class: "plain" }, ms.map(shortCardItem)) : el("p", { class: "muted", text: "No matches." }))));
+      } catch (err) { show(box, errorBox(err.message)); }
+    });
+  });
+
+  onShow.learn = loadToolkits;
+
+  // ---------------------------------------------------------------- PRACTICE
+  const SCORE_KEY = "ooa.assistant.quizScore";
+  let score = store.get(SCORE_KEY, { correct: 0, total: 0 });
+  if (!score || typeof score.correct !== "number" || typeof score.total !== "number") score = { correct: 0, total: 0 };
+  let quiz = null;
+
+  function showScore() { $("#quiz-score").textContent = score.correct + " / " + score.total; }
+  showScore();
+
+  $("#quiz-reset").addEventListener("click", () => {
+    score = { correct: 0, total: 0 }; store.set(SCORE_KEY, score); showScore();
+  });
+
+  $("#quiz-new").addEventListener("click", async () => {
+    const card = $("#quiz-card"), fb = $("#quiz-feedback");
+    const kind = $("#quiz-kind").value;
+    await busy([$("#quiz-new")], card, async () => {
+      try {
+        const q = await api("GET", "/api/quiz" + (kind ? "?kind=" + encodeURIComponent(kind) : ""));
+        quiz = { id: q.id, answered: false };
+        card.hidden = false;
+        $("#quiz-question").textContent = q.question;
+        clear(fb);
+        show($("#quiz-choices"), (q.choices || []).map((c, i) => el("button", {
+          type: "button", class: "choice", text: String.fromCharCode(65 + i) + ". " + c, "data-index": String(i),
+          onclick: () => answer(i)
+        })));
+        $("#quiz-question").focus();
+      } catch (err) { card.hidden = false; $("#quiz-question").textContent = ""; clear($("#quiz-choices")); show(fb, errorBox(err.message)); }
+    });
+  });
+
+  async function answer(i) {
+    if (!quiz || quiz.answered) return;
+    const btns = Array.from(document.querySelectorAll("#quiz-choices button"));
+    const fb = $("#quiz-feedback");
+    btns.forEach(b => { b.disabled = true; });
+    try {
+      const r = await api("POST", "/api/quiz/check", { id: quiz.id, choice: i });
+      quiz.answered = true;
+      score.total += 1;
+      if (r.correct) score.correct += 1;
+      store.set(SCORE_KEY, score);
+      showScore();
+      if (btns[r.answer_index]) btns[r.answer_index].classList.add("right");
+      if (!r.correct && btns[i]) btns[i].classList.add("wrong");
+      show(fb, el("div", { class: "box " + (r.correct ? "ok" : "bad") },
+        el("strong", { text: r.correct ? "Correct. " : "Not quite. " }), r.explanation || ""),
+        el("div", { class: "row" }, el("button", { type: "button", class: "secondary", text: "Next question",
+          onclick: () => $("#quiz-new").click() })));
+    } catch (err) {
+      btns.forEach(b => { b.disabled = false; });
+      show(fb, errorBox(err.message));
+    }
+  }
+
+  // ---------------------------------------------------------------- RUN
+  const runFlow = $("#run-flow"), runBtn = $("#run-btn");
+  let runState = null;   // { flow, check }
+
+  function invalidateRun() {
+    if (runState) {
+      runState = null;
+      runBtn.disabled = true;
+      $("#run-form-card").hidden = true;
+      show($("#run-check-result"), el("p", { class: "small muted", text: "The flow changed: check it again before running." }));
+    }
+  }
+  runFlow.addEventListener("input", invalidateRun);
+
+  $("#run-use-built").addEventListener("click", () => {
+    if (lastBuild && lastBuild.data.verified && lastBuild.data.flow) openRun(lastBuild.data.flow, lastBuild.data.can_run);
+  });
+
+  function openRun(flow, check) {
+    selectTab("run");
+    runFlow.value = pretty(flow);
+    clear($("#run-result"));
+    clear($("#run-explanation"));
+    if (check) renderCheck(flow, check);
+    else runFlow.focus();
+  }
+
+  $("#run-check").addEventListener("click", async () => {
+    const box = $("#run-check-result");
+    let flow;
+    try { flow = parseFlow(runFlow.value); } catch (err) { show(box, errorBox(err.message)); return; }
+    await busy([$("#run-check"), runBtn], box, async () => {
+      try { renderCheck(flow, await api("POST", "/api/can_run", { flow })); } catch (err) { show(box, errorBox(err.message)); }
+    });
+  });
+
+  $("#run-explain").addEventListener("click", async () => {
+    const box = $("#run-explanation");
+    let flow;
+    try { flow = parseFlow(runFlow.value); } catch (err) { show(box, errorBox(err.message)); return; }
+    await busy([$("#run-explain")], box, async () => {
+      try {
+        show(box, el("div", { class: "box warn", id: "explain-unchecked" },
+          el("strong", { text: "Explanation only: this flow has not been checked." }),
+          " Use \"Check if it can run\" (or build it on the Build tab) to check it."));
+        box.append(renderExplanation(await api("POST", "/api/explain", { flow })));
+      }
+      catch (err) { show(box, errorBox(err.message)); }
+    });
+  });
+
+  const isNumberType = t => /^(number|integer|int|float|double|decimal|long)$/i.test(t || "");
+  const isBoolType = t => /^bool(ean)?$/i.test(t || "");
+  const isJsonType = t => /(list|table|dict|object|json|array|map|record)/i.test(t || "");
+
+  function renderCheck(flow, c) {
+    const box = $("#run-check-result");
+    runState = { flow, check: c };
+    const items = [];
+    (c.unsupported || []).forEach(a => items.push(el("li", null, "Not supported by the local runner: ", el("code", { text: a }))));
+    (c.problems || []).forEach(p => items.push(el("li", { text: "Cannot run locally: " + asText(p) })));
+    if (c.ok) show(box, el("div", { class: "box ok" }, el("strong", { text: "This flow can run on this PC." })));
+    else show(box, el("div", { class: "box warn", role: "alert" }, el("strong", { text: "This flow cannot run on this PC." }),
+      items.length ? el("ul", null, items) : null));
+
+    const formCard = $("#run-form-card");
+    formCard.hidden = !c.ok;
+    if (!c.ok) { runBtn.disabled = true; return; }
+    const inputs = Array.isArray(c.inputs) ? c.inputs : [];
+    show($("#run-inputs"), inputs.length ? inputs.map((v, i) => {
+      const id = "run-in-" + i;
+      const label = v.name + (v.type ? " (" + v.type + ")" : "") + (v.required ? ", required" : ", optional");
+      let field;
+      if (isBoolType(v.type)) {
+        field = el("label", { class: "inline", for: id }, el("input", { type: "checkbox", id, "data-name": v.name,
+          "data-type": v.type || "" }), label);
+        if (v.default === true) field.querySelector("input").checked = true;
+        return el("div", null, field, v.description ? el("p", { class: "small muted", text: v.description }) : null);
+      }
+      field = el("input", { type: isNumberType(v.type) ? "number" : "text", id, "data-name": v.name,
+        "data-type": v.type || "", "data-required": v.required ? "1" : "", step: isNumberType(v.type) ? "any" : null,
+        "aria-describedby": v.description ? id + "-d" : null });
+      if (v.default !== null && v.default !== undefined) field.value = asText(v.default);
+      return el("div", null, el("label", { for: id, text: label }), field,
+        v.description ? el("p", { class: "small muted", id: id + "-d", text: v.description }) : null);
+    }) : el("p", { class: "small muted", text: "This flow has no inputs." }));
+
+    const risky = Array.isArray(c.risky) ? c.risky : [];
+    const riskyBox = $("#run-risky");
+    if (risky.length) {
+      const cb = el("input", { type: "checkbox", id: "run-allow-risky" });
+      cb.addEventListener("change", () => { runBtn.disabled = !cb.checked; });
+      show(riskyBox, el("div", { class: "box warn" },
+        el("strong", { text: "Risky actions: " }), "this flow uses actions that can delete or overwrite files, " +
+          "call the network or start other bots.",
+        el("ul", null, risky.map(a => el("li", null, el("code", { text: a })))),
+        el("label", { class: "inline", for: "run-allow-risky" }, cb, "I understand and allow these actions for this run.")));
+      runBtn.disabled = true;
+    } else {
+      clear(riskyBox);
+      runBtn.disabled = false;
+    }
+  }
+
+  function collectInputs() {
+    const out = {};
+    document.querySelectorAll("#run-inputs input[data-name]").forEach(inp => {
+      const name = inp.dataset.name, type = inp.dataset.type;
+      if (inp.type === "checkbox") { out[name] = inp.checked; return; }
+      const raw = inp.value;
+      if (raw.trim() === "") {
+        if (inp.dataset.required) throw new Error("please fill in the required input '" + name + "'");
+        return;
+      }
+      if (isNumberType(type)) {
+        const n = Number(raw);
+        if (!Number.isFinite(n)) throw new Error("'" + name + "' must be a number");
+        out[name] = n;
+      } else if (isJsonType(type)) {
+        try { out[name] = JSON.parse(raw); } catch (e) { out[name] = raw; }
+      } else {
+        out[name] = raw;
+      }
+    });
+    return out;
+  }
+
+  $("#run-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const box = $("#run-result");
+    if (!runState || !runState.check.ok) { show(box, errorBox("check the flow first")); return; }
+    let inputs;
+    try { inputs = collectInputs(); } catch (err) { show(box, errorBox(err.message)); return; }
+    const cb = $("#run-allow-risky");
+    const allow = !!(cb && cb.checked);
+    const prog = $("#run-progress");
+    prog.hidden = false;
+    clear(box);
+    try {
+      await busy([runBtn, $("#run-check")], box, async () => {
+        try {
+          const r = await api("POST", "/api/run", { flow: runState.flow, inputs, allow_risky: allow });
+          renderRunResult(r);
+        } catch (err) { show(box, errorBox(err.message)); }
+      });
+    } finally { prog.hidden = true; }
+  });
+
+  function renderRunResult(r) {
+    const card = el("div", { class: "card" }, el("h2", { text: "Run result" }));
+    const secs = typeof r.seconds === "number" && r.seconds ? " (" + r.seconds.toFixed(2) + " s)" : "";
+    if (r.refused) card.append(el("div", { class: "box warn", role: "alert" }, el("strong", { text: "Not run: " }), r.refused));
+    else if (r.ok) card.append(el("div", { class: "box ok" }, el("strong", { text: "Finished successfully" + secs + "." })));
+    else card.append(el("div", { class: "box bad", role: "alert" }, el("strong", { text: "The run failed" + secs + ": " }),
+      r.error || "unknown error"));
+    const outs = r.outputs && typeof r.outputs === "object" ? r.outputs : {};
+    card.append(el("h3", { text: "Outputs" }), Object.keys(outs).length
+      ? el("pre", { tabindex: "0", text: pretty(outs) }) : el("p", { class: "small muted", text: "No outputs." }));
+    const ev = Array.isArray(r.events) ? r.events : [];
+    card.append(el("h3", { text: "Events (" + ev.length + ")" }), ev.length
+      ? el("div", { class: "events", tabindex: "0", role: "region", "aria-label": "Run events" },
+          el("ol", { class: "kv" }, ev.map(x => el("li", null, el("span", { class: "badge", text: x.type || "event" }), " ",
+            x.step ? el("code", { text: x.step }) : null, x.step ? " " : null, x.message || ""))))
+      : el("p", { class: "small muted", text: "No events." }));
+    const files = Array.isArray(r.files) ? r.files : [];
+    card.append(el("h3", { text: "Files in the sandbox folder" }), files.length
+      ? el("ul", { class: "kv" }, files.map(f => el("li", null, el("code", { text: f }))))
+      : el("p", { class: "small muted", text: "No files." }));
+    show($("#run-result"), card);
+  }
+
+  // ---------------------------------------------------------------- PROGRESS
+  const VERDICT_BADGE = { accept: "ok", edit: "warn", reject: "bad" };
+  async function loadProgress() {
+    const body = $("#progress-body");
+    await busy([$("#progress-refresh")], body, async () => {
+      try {
+        const p = await api("GET", "/api/progress");
+        const c = p.counts || {};
+        const tile = (n, label) => el("div", { class: "tile" }, el("span", { class: "n", text: String(n || 0) }),
+          el("span", { class: "small muted", text: label }));
+        const recent = Array.isArray(p.recent) ? p.recent : [];
+        if (p.learning) $("#learning-note").textContent = p.learning;
+        show(body,
+          el("div", { class: "tiles" }, tile(c.accept, "Accepted"), tile(c.edit, "Edited"), tile(c.reject, "Rejected"),
+            tile(c.total, "Total")),
+          el("h3", { text: "Recent feedback" }),
+          recent.length ? el("ul", { class: "plain" }, recent.map(r => el("li", null,
+            el("span", { class: "badge " + (VERDICT_BADGE[r.verdict] || ""), text: r.verdict || "?" }), " ",
+            r.prompt || "", r.time ? el("div", { class: "small muted", text: r.time }) : null)))
+            : el("p", { class: "muted", text: "No feedback yet. Build a flow and press Accept, Edit or Reject." }));
+      } catch (err) { show(body, errorBox(err.message)); }
+    });
+  }
+  onShow.progress = loadProgress;
+  $("#progress-refresh").addEventListener("click", loadProgress);
+
+  $("#export-btn").addEventListener("click", async () => {
+    const box = $("#export-result");
+    show(box, el("p", { class: "muted" }, el("span", { class: "spinner", "aria-hidden": "true" }), "Exporting..."));
+    await busy([$("#export-btn")], box, async () => {
+      try {
+        const x = await api("POST", "/api/export", {});
+        const steps = Array.isArray(x.instructions) ? x.instructions : [];
+        show(box,
+          el("div", { class: "box ok" }, el("strong", { text: "Exported. " }),
+            x.usable + " usable training row" + (x.usable === 1 ? "" : "s") + ", " + x.dropped + " dropped (failed the checker), " +
+            x.rejected + " rejected request" + (x.rejected === 1 ? "" : "s") + "."),
+          el("p", null, "Folder: ", el("code", { text: x.path || "" })),
+          x.train_file ? el("p", null, "Training file: ", el("code", { text: x.train_file })) : null,
+          x.note ? el("p", { class: "small muted", text: x.note }) : null,
+          steps.length ? el("h3", { text: "Next steps" }) : null,
+          steps.length ? el("ol", null, steps.map(s => el("li", { text: s }))) : null);
+      } catch (err) { show(box, errorBox(err.message)); }
+    });
+  });
+
+  // ---------------------------------------------------------------- start
+  loadStatus();
+  selectTab(store.get("ooa.assistant.lastTab", "build"));
+})();
+</script>
+</body>
+</html>

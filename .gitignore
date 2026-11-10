@@ -10,3 +10,5 @@ nanochat-master/
 nanoGPT-master/
 .claude/
 rpa model/local_check_report.txt
+rpa model/assistant/tests/screens/
+rpa model/assistant/assistant_data/
