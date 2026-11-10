@@ -135,3 +135,29 @@ stay valid (all got the same 3.0M), but conclusions apply to a SHORT training re
 did not show "variety beats repetition": 3M tokens is only a slice of the shuffled mixture either way, so it changed the PROPORTIONS in
 that slice (generated flows about 60% -> about 81% of rows; catalog Q&A about 19% -> 7%), which also explains val_bpb rising (catalog loss).
 The same micro-batch rule applies to the main SFT cell: SFT_ITERS=3000 gives 750 steps (about 24M tokens); raise SFT_ITERS to train longer.
+
+## Varied wordings, checker fix, catalog lock, local assistant (2026-11-10)
+- **Eval bug fixed:** cell 8's synthetic answer key listed only top-level steps, so every correct flow wrapped in
+  if/try/loop was marked wrong. The 750- and 2000-step runs really scored 20/20 on simple requests, not 10/20.
+- **New plain-wording eval** (`eval/plain_requests.jsonl`, 20 hand-written everyday requests). Model v1 (step 2000,
+  generator wording only): 0/20 valid, most answers looped to the token limit.
+- **Training change:** generated requests now come in 4 wordings (full description, first clause, short action name,
+  numbered list) and the "takes / returns" sentence is often dropped; real flows repeated 5x (was 15x).
+  Model v2 (same budget, 2000 steps): real-pattern 20/20, synthetic 19/20, held-out real flows 3/5 valid (was 0/5),
+  plain wording 5/20 valid. Answers are short now (1-3 s on CPU) instead of looping.
+- **Checker bug fixed (`ooa_reward.py`):** it read `${folder}/data.csv` or `$row.Name` as an undeclared variable, so it
+  rejected 42 of the 48 real platform flows (and penalised real-style flows in RL and self-improvement). It now reads the
+  root variable of references and templates (docs/llms.txt rules); 47/48 real flows pass (the 48th has no steps).
+  Regression test added to `test_reward.py`. Note: autoresearch scores before this date used the old checker.
+- **Repair additions (`repair.py`):** invalid flow id cleaned, duplicate step ids renumbered, undeclared variables declared
+  (read-only -> String input; written -> local), a wrong input key mapped to the one missing required input it clearly
+  means (`target_folder` -> `target`), a wrong output key mapped to the action's only output. Leaves all 48 real flows unchanged.
+- **Catalog lock (`assistant/constrained.py`):** while the model writes an action id (and, on the first attempt, an
+  input/output name) it may only pick tokens that stay on a real catalog name. Identical output to nanochat's Engine
+  when off. End to end on the 20 plain requests (model -> repair -> checker, one retry, CPU):
+  v1: 1/20 verified; v2: 10/20 verified, 2/20 right; v2 + lock: 12/20 verified, 3/20 right, 4.2 s average.
+  "Right" = verified and contains the needed actions in order. Main remaining gap: the model stops early or picks a
+  neighbouring toolkit (office_attach for word, web_agent for browser). Synthetic and real-pattern results unchanged.
+- **Local assistant app (`assistant/`):** Build + plain-English explanation, Learn (catalog search, cards, lessons, ask),
+  Practice (quizzes), Run (reference runner, sandbox, risky actions need confirmation; 47 actions), Progress + export of
+  feedback into verified training rows. 20+12+12+9+2 tests, reviewed adversarially (CSRF/Host checks, runtime path guard).

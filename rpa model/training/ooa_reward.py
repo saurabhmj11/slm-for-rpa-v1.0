@@ -8,7 +8,7 @@ Parts (weights): starts_obj .05 | json .20 | schema .15 | actions_exist .15 | ar
  - solved = every part passes and (if gold given) the action sequence matches exactly.
 Needs env OOA_CATALOG (catalog.jsonl) and OOA_SCHEMA (flow.v1.json), or call configure().
 """
-import difflib, json, os
+import difflib, json, os, re
 
 _CAT = None
 _SCHEMA = None
@@ -50,6 +50,30 @@ def actions_of(flow):
 
 def gold_actions(flow_text):
     return actions_of(json.loads(flow_text))
+
+
+# variable references in arg values (platform docs/llms.txt): "$a.b[0]" reference, "text ${name} ${len($xs)}"
+# interpolation, {"expr": "$a * 2"} expression, {"literal": "$x"} escape (not a reference). sys / global are built in.
+_REF_PLAIN = re.compile(r"\$(?!\{)([A-Za-z_]\w*)")
+_REF_TEMPLATE = re.compile(r"\$\{\s*([A-Za-z_]\w*)(?![\w(])")
+BUILTIN_ROOTS = {"sys", "global"}
+
+
+def refs(value):
+    """Root variable names an arg value reads, e.g. "${folder}/data.csv" -> {"folder"}, "$row.Name" -> {"row"}."""
+    out = set()
+    if isinstance(value, str):
+        out.update(_REF_PLAIN.findall(value))
+        out.update(_REF_TEMPLATE.findall(value))
+    elif isinstance(value, dict):
+        if set(value) == {"literal"}:
+            return out
+        for v in value.values():
+            out |= refs(v)
+    elif isinstance(value, list):
+        for v in value:
+            out |= refs(v)
+    return out - BUILTIN_ROOTS
 
 
 def clean(text):
@@ -98,9 +122,8 @@ def score(text, gold=None):
             req = {i["name"] for i in e["inputs"] if i["required"]}
             if not (set(args) <= ins and set(out) <= outs and req <= set(args)):
                 ok = False
-        for v in list(args.values()):
-            if isinstance(v, str) and v.startswith("$") and v[1:] not in declared:
-                vars_ok = False
+        if refs(args) - declared:
+            vars_ok = False
         for v in out.values():
             if v not in declared:
                 vars_ok = False
@@ -157,9 +180,8 @@ def problems(text, limit=8):
                     out.append(f"{a} has no output {k!r}. Outputs: {', '.join(sorted(outs)) or '-'}.")
             for k in sorted(req - set(args)):
                 out.append(f"{a} is missing required input {k!r}.")
-        for v in args.values():
-            if isinstance(v, str) and v.startswith("$") and v[1:] not in declared:
-                out.append(f"Variable {v!r} is used but not declared in variables.")
+        for v in sorted(refs(args) - declared):
+            out.append(f"Variable {v!r} is used but not declared in variables.")
         for v in o.values():
             if v not in declared:
                 out.append(f"Output variable {v!r} is not declared in variables.")

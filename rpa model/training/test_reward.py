@@ -34,4 +34,13 @@ assert sc(mut(lambda f: f.update(steps=f["steps"][:1])))["total"] < 1.0, "cut-of
 other = next(x for x in flows if R.gold_actions(x[2]) != gold)[2]
 r = sc(other); assert r["valid"] and not r["solved"], "valid flow for a different task is not solved"
 assert sc(txt, None)["total"] <= 0.75, "without gold the total is capped at .75"
+# variable references: templates and member access are references to their ROOT variable (docs/llms.txt)
+assert R.refs("${folder}/data/x.csv") == {"folder"} and R.refs("$row.Name") == {"row"} and R.refs("$n - 1") == {"n"}
+assert R.refs("${len($xs)}") == {"xs"} and R.refs("${sys.date}") == set() and R.refs({"literal": "$x"}) == set()
+assert not sc(mut(lambda f: f["steps"][0].update(args={k: "${nope}/x" for k in f["steps"][0]["args"]})))["solved"], "undeclared template variable fails"
+# the real platform example flows are the ground truth: the verifier must accept them (all but the stepless agent file)
+import glob as _g
+_real = [json.load(open(p)) for p in sorted(_g.glob(os.path.join(repo, "examples", "**", "*.flow.json"), recursive=True))]
+_ok = sum(R.score(json.dumps(f))["valid"] for f in _real if f.get("steps"))
+assert _ok == sum(1 for f in _real if f.get("steps")), f"verifier rejects real example flows: {_ok}"
 print("all reward tests passed")

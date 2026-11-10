@@ -69,7 +69,7 @@ class RepetitionGuard:
 
 
 class NanochatLocal:
-    def __init__(self, model_dir, nanochat_dir, source="sft", device=None, guard=True):
+    def __init__(self, model_dir, nanochat_dir, source="sft", device=None, guard=True, catalog=None):
         os.environ["NANOCHAT_BASE_DIR"] = str(Path(model_dir).resolve())
         dev_type = device
         if dev_type is None:
@@ -93,17 +93,39 @@ class NanochatLocal:
         self.user_start, self.user_end = enc("<|user_start|>"), enc("<|user_end|>")
         self.assistant_start, self.assistant_end = enc("<|assistant_start|>"), enc("<|assistant_end|>")
         params = sum(p.numel() for p in self.model.parameters())
-        self.info = {"device": dev_type, "params_M": round(params / 1e6, 1), "step": meta.get("step"), "source": source}
+        self.info = {"device": dev_type, "params_M": round(params / 1e6, 1), "step": meta.get("step"), "source": source,
+                     "catalog_lock": False}
         self.last_stats = {}
+        # catalog lock (constrained.py): action ids and input/output names can only be real catalog names
+        self.constraint = None
+        if catalog:
+            import constrained as C
+            entries = [json.loads(l) for l in open(catalog, encoding="utf-8") if l.strip()]
+            self._tok_text = C.token_strings(self.tok, self.model.config.vocab_size)
+            # attempt 0 locks action ids AND input/output names; the retry locks only action ids and leaves names to
+            # the repair step. Each fixes cases the other misses (measured on eval/plain_requests.jsonl).
+            self.constraints = [C.NameConstraint(entries, self._tok_text, lock_keys=True),
+                                C.NameConstraint(entries, self._tok_text, lock_keys=False)]
+            self.constraint = self.constraints[0]
+            self.info["catalog_lock"] = True
 
     def _prompt(self, text):
         return [self.bos, self.user_start] + self.tok.encode(text) + [self.user_end, self.assistant_start]
 
-    def _run(self, text, max_tokens, temperature, seed, guard=None, on_token=None):
+    def _run(self, text, max_tokens, temperature, seed, guard=None, on_token=None, attempt=0):
         """Stream one reply. Returns the decoded text; details go to self.last_stats."""
         use_guard = self.guard_enabled if guard is None else guard
         g = RepetitionGuard() if use_guard else None
         out, reason, t0 = [], "max_tokens", time.time()
+        if self.constraint is not None and on_token is None:
+            import constrained as C
+            con = self.constraints[attempt % len(self.constraints)]
+            ids, reason, ncon, nch = C.generate(
+                self.model, self._prompt(text), con, max_tokens, temperature, 50, seed,
+                {self.assistant_end, self.bos}, lambda t: self._tok_text[t] or self.tok.decode([t]), g)
+            self.last_stats = {"tokens": len(ids), "stop": reason, "seconds": round(time.time() - t0, 2), "ids": ids,
+                               "names_locked": ncon, "names_corrected": nch}
+            return self.tok.decode(ids)
         stream = self.engine.generate(self._prompt(text), num_samples=1, max_tokens=max_tokens,
                                       temperature=temperature, top_k=50, seed=seed)
         for column, _ in stream:
@@ -122,7 +144,7 @@ class NanochatLocal:
         return self.tok.decode(out)
 
     def generate(self, request, attempt=0, max_tokens=2500):
-        return self._run(request, max_tokens, 0.2 + 0.3 * attempt, 1000 + attempt)
+        return self._run(request, max_tokens, 0.2 + 0.3 * attempt, 1000 + attempt, attempt=attempt)
 
     def ask(self, question):
         return self._run(question, 300, 0.2, 1000).strip()

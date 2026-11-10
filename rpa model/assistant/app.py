@@ -64,14 +64,14 @@ def default_catalog(model_dir: str | None) -> str:
     return str(ROOT / "data" / "catalog" / "catalog.jsonl")
 
 
-def load_model(args):
+def load_model(args, catalog=None):
     if args.fake_model:
         from model_backend import FakeModel
         return FakeModel()
     if not args.model_dir or not args.nanochat:
         raise SystemExit("--model-dir and --nanochat are required (or use --fake-model to try the app without the model)")
     from model_backend import NanochatLocal
-    return NanochatLocal(args.model_dir, args.nanochat)
+    return NanochatLocal(args.model_dir, args.nanochat, catalog=None if args.no_catalog_lock else catalog)
 
 
 class _StatsRecorder:
@@ -426,6 +426,8 @@ def parse_args(argv=None):
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--data-dir", default="assistant_data", help="feedback, sandbox and exports go here")
     ap.add_argument("--fake-model", action="store_true", help="use a canned fake model (for trying the app / tests)")
+    ap.add_argument("--no-catalog-lock", action="store_true",
+                    help="let the model write any action / input name (default: only real catalog names, see constrained.py)")
     return ap.parse_args(argv)
 
 
@@ -433,7 +435,7 @@ def main(argv=None):
     args = parse_args(argv)
     catalog = args.catalog or default_catalog(args.model_dir)
     print("Loading the model (this can take a minute on CPU) ...", flush=True)
-    model = load_model(args)
+    model = load_model(args, catalog)
     app = Assistant(catalog, args.platform, args.data_dir, model)
     srv = make_server(app, args.port)
     print(f"OOA Assistant is running: open http://127.0.0.1:{srv.server_address[1]}/ in your browser "
