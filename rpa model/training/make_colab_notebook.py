@@ -68,6 +68,7 @@ NUM_ITERS = P["tokens"] // P["total_batch"]
 SFT_SEQ = 2048             # flows longer than this get cut; the T4 cannot afford much more
 SFT_DEVICE_BATCH = 4
 SFT_EPOCHS = 2 if PROFILE == "smoke" else 6      # passes over the OOA data (the seed set is small)
+NATURAL_REPEAT = 3         # passes over sft/natural_train.jsonl per epoch, if that file is in Drive (everyday wording)
 FLOW_REPEAT = 5            # real flows repeated per pass; was 15, which made the model recite whole training flows (memorising)
 SYNTH_TRAIN = 1500 if PROFILE == "smoke" else 30000   # generated flows (no LLM), see gen_flows.py
 SYNTH_EVAL = 20            # unseen generated flows scored by exact action sequence
@@ -233,6 +234,10 @@ _extra = [OOADialogues("{DRIVE_DIR}/sft/" + _f) for _f in ("self_improved.jsonl"
           if _os.path.exists("{DRIVE_DIR}/sft/" + _f)]
 train_tasks += _extra * {SFT_EPOCHS}
 print0(f"extra self-learning files in the mix: {{len(_extra)}}")
+_nat = "{DRIVE_DIR}/sft/natural_train.jsonl"     # everyday-wording requests for generated flows (upload to Drive sft/)
+if _os.path.exists(_nat):
+    train_tasks += [OOADialogues(_nat)] * ({NATURAL_REPEAT} * {SFT_EPOCHS})
+print0("natural-wording file in the mix:", _os.path.exists(_nat))
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)
