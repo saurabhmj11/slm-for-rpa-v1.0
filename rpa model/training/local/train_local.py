@@ -81,7 +81,7 @@ def main():
     ap.add_argument("--steps", type=int, default=2000, help="optimizer steps of 32,768 tokens each (Colab default 2000)")
     ap.add_argument("--device-batch", type=int, default=4, choices=[1, 2, 4, 8, 16],
                     help="rows per GPU pass: 4 needs ~10+ GB, use 2 for 6-8 GB, 1 for 4 GB (same result, slower)")
-    ap.add_argument("--seq", type=int, default=2048)
+    ap.add_argument("--seq", type=int, default=2048, choices=[512, 1024, 2048])
     ap.add_argument("--epochs", type=int, default=6)
     ap.add_argument("--flow-repeat", type=int, default=5)
     ap.add_argument("--natural-repeat", type=int, default=3)
@@ -108,7 +108,12 @@ def main():
         if not (sft / f).exists():
             problems.append(f"missing {sft / f}")
     if not (nano / "scripts" / "chat_sft.py").exists():
-        problems.append(f"nanochat code not found at {nano}")
+        problems.append(f"nanochat code not found at {nano}. Unzip the NEW ooa_assistant.zip (it has rpa model/nanochat), "
+                        "or: cd \"<rpa model folder>\" && git clone https://github.com/karpathy/nanochat.git && "
+                        "cd nanochat && git checkout 92d63d4e8bb4df75c3b71618f31ddde2378b2bcd")
+    other = sorted(p.name for p in (base / "base_checkpoints").glob("d*") if p.is_dir() and p.name != "d8")
+    if other:
+        print("note: base_checkpoints also has", ", ".join(other), "- training uses d8 only (the one checked here)")
 
     import torch
     gpu = torch.cuda.is_available()
@@ -116,6 +121,10 @@ def main():
     print("base model  :", f"{bdir} step {step}" if step is not None else "-")
     print("GPU         :", torch.cuda.get_device_name(0) if gpu else "NONE")
     if gpu:
+        cap = torch.cuda.get_device_capability()
+        if cap < (7, 5):
+            problems.append(f"GPU {torch.cuda.get_device_name(0)} (compute capability {cap[0]}.{cap[1]}) is too old for the "
+                            "training code (torch.compile); it needs an RTX 20xx / GTX 16xx or newer")
         mem = torch.cuda.get_device_properties(0).total_memory / 2**30
         print(f"GPU memory  : {mem:.1f} GB", "(use --device-batch 2)" if mem < 10 and a.device_batch > 2 else "")
     print("data        :", ", ".join(f"{f} {'yes' if (sft / f).exists() else 'NO'}" for f in REQUIRED_SFT + OPTIONAL_SFT))
@@ -149,7 +158,8 @@ def main():
     accum = max(1, total // (a.seq * a.device_batch))       # nanochat counts --num-iterations in micro-batches
     cmd = [sys.executable, "-m", "scripts.chat_sft_ooa", f"--max-seq-len={a.seq}", f"--device-batch-size={a.device_batch}",
            f"--total-batch-size={a.seq * a.device_batch * accum}", f"--num-iterations={a.steps * accum}",
-           "--eval-every=100", f"--eval-tokens={a.seq * a.device_batch * 8}", "--chatcore-every=-1", "--run=dummy"]
+           "--eval-every=100", f"--eval-tokens={a.seq * a.device_batch * 8}", "--chatcore-every=-1", "--run=dummy",
+           "--model-tag=d8", f"--model-step={step}"]       # exactly the base checkpoint checked above
     if not gpu:
         cmd.append("--device-type=cpu")
     log = work / f"train_{time.strftime('%Y%m%d_%H%M%S')}.log"
@@ -166,9 +176,12 @@ def main():
         raise SystemExit(f"\ntraining stopped with an error after {mins:.0f} min (see {log}). Send the last 30 lines.")
     d8 = out / "d8"
     s = newest_step(d8)
-    print(f"\nDONE in {mins:.0f} min. New model: {d8}/model_{s:06d}.pt and meta_{s:06d}.json")
-    print("Use it on the PC: copy those two files into  rpa model\\nanochat_base\\chatsft_checkpoints\\d8\\  "
-          "(replace the old ones), restart start_assistant.bat, then run  python basic_test.py")
+    if s is None:
+        raise SystemExit(f"\nTraining finished but no model_*.pt is in {d8}. Contents of {out}: "
+                         f"{sorted(str(p.relative_to(out)) for p in out.rglob('*'))}")
+    print(f"\nDONE in {mins:.0f} min. New model files: {d8}/model_{s:06d}.pt and {d8}/meta_{s:06d}.json")
+    print("Use it on the PC: in  rpa model\\nanochat_base\\chatsft_checkpoints\\d8\\  first move the old model_*.pt and "
+          "meta_*.json out, then copy these two in, restart start_assistant.bat and run  python basic_test.py")
 
 
 if __name__ == "__main__":
