@@ -16,3 +16,4 @@ rpa model/platform/
 rpa model/nanochat/
 rpa model/nanochat_base/
 rpa model/sft/
+rpa model/assistant/basic_test_results.json
