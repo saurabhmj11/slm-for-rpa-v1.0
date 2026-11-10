@@ -50,6 +50,7 @@ code('''
 #@title 1. Config
 PROFILE = "t4"             # "t4" = real free-Colab run, "smoke" = quick pipeline check (tiny model), "a100" = Colab Pro (A100/L4)
 DRIVE_DIR = "/content/drive/MyDrive/ooa-nanochat"   # checkpoints, data and tokenizer live here
+SHARED_FOLDER_ID = ""      # optional: Drive ID of the ooa-nanochat folder shared from another Google account (from its link)
 NANOCHAT_COMMIT = "92d63d4e8bb4df75c3b71618f31ddde2378b2bcd"   # version this notebook was written against
 PLATFORM_REPO = "https://github.com/OneOfficeautomation-Private-Limited/OneOfficeAutomation-Platform"
 VOCAB_SIZE = 16384         # tokenizer size (nanochat default is 32768; smaller suits a small model)
@@ -89,12 +90,18 @@ print("SFT settings -> SYNTH_TRAIN:", SYNTH_TRAIN, "| SFT_EPOCHS:", SFT_EPOCHS, 
 
 code('''
 #@title 2. Setup: GPU, Drive, nanochat, dependencies
-import os, subprocess, sys, torch
+import os, subprocess, sys, torch, glob
 assert torch.cuda.is_available(), "No GPU. Runtime -> Change runtime type -> GPU"
 cap = torch.cuda.get_device_capability()
 print(torch.cuda.get_device_name(0), "compute capability", cap)
 from google.colab import drive
 drive.mount("/content/drive")
+# a folder shared from another Google account is reached by its ID (needs "Add shortcut to My Drive" once in this account)
+if SHARED_FOLDER_ID:
+    hits = glob.glob(f"/content/drive/.shortcut-targets-by-id/{SHARED_FOLDER_ID}/**/nanochat_base/base_checkpoints", recursive=True)
+    if hits:
+        DRIVE_DIR = os.path.dirname(os.path.dirname(hits[0]))
+    print("shared folder:", DRIVE_DIR if hits else "NOT FOUND, using " + DRIVE_DIR)
 os.makedirs(DRIVE_DIR, exist_ok=True)
 os.environ["NANOCHAT_BASE_DIR"] = DRIVE_DIR + "/nanochat_base"      # checkpoints, tokenizer, data, all persistent
 # T4 has no bf16: use fp16 with loss scaling (supported by nanochat). If you see NaN losses, set "float32" (slower).
