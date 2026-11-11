@@ -117,6 +117,7 @@ def main():
     a = ap.parse_args()
     os.environ.setdefault("PYTHONUTF8", "1")          # child processes (training, scoring) write UTF-8 logs on Windows too
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")   # a Windows/company proxy must not catch the local scoring calls
     try:
         sys.stdout.reconfigure(errors="replace")
     except Exception:
@@ -126,7 +127,7 @@ def main():
     base = rpa / "nanochat_base"
     d8 = base / "chatsft_checkpoints" / "d8"
     sft = rpa / "sft"
-    work = rpa / "topup_work"
+    work = rpa / f"topup_work_{time.strftime('%Y%m%d_%H%M%S')}"   # a fresh folder each round (Windows can leave files locked)
     fb = rpa / "assistant" / "assistant_data" / "feedback.jsonl"
     catalog = sft / "catalog.jsonl" if (sft / "catalog.jsonl").exists() else rpa / "data" / "catalog" / "catalog.jsonl"
     schema = rpa / "platform" / "contracts" / "flow-schema" / "flow.v1.json"
@@ -161,7 +162,14 @@ def main():
     log = rpa / f"topup_{stamp}.log"
     model, meta = d8 / f"model_{step:06d}.pt", d8 / f"meta_{step:06d}.json"
     print(f"\n== 1/4 preparing (log: {log})")
-    shutil.rmtree(work, ignore_errors=True)
+    for old in rpa.glob("topup_work_*"):                       # leftovers of earlier rounds
+        shutil.rmtree(old, ignore_errors=True)
+    if os.name == "nt":                                         # keep the PC awake while this process runs
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)
+        except Exception:
+            pass
     wb = work / "nanochat_base"
     (wb / "base_checkpoints" / "d8").mkdir(parents=True)
     shutil.copytree(base / "tokenizer", wb / "tokenizer")

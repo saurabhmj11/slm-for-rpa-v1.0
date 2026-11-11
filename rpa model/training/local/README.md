@@ -115,8 +115,8 @@ it scores better**; the old one is always kept in `nanochat_base\old_model_<date
   The PC must be on and not asleep at that time.
 - After a round that installed a new model, restart the assistant to use it.
 
-(On Windows the model runs without `torch.compile`, which needs a C++ compiler Windows does not have; on a CPU this is
-measured to be just as fast: about 32 s per step on 4 cores. WSL also works: `setup_wsl.sh --cpu`, then run
+(On Windows the model runs without `torch.compile`, which needs a C++ compiler Windows does not have; on a CPU that is
+only a little slower: measured about 35-40 s per step on 4 cores, so a 200-step round takes about 2-2.5 hours. WSL also works: `setup_wsl.sh --cpu`, then run
 `topup_local.py` with `~/ooa-train-venv/bin/python`.)
 
 ## How it learns from you

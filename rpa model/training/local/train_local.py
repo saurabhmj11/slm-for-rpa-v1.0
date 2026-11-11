@@ -36,7 +36,7 @@ def patch_chat_sft(src, sft_dir, a):
     s = src
     s = s.replace("from tasks.smoltalk import SmolTalk", "from tasks.smoltalk import SmolTalk\nfrom tasks.ooa import OOADialogues")
     i, j = s.index("train_tasks = ["), s.index("\n", s.index("# total: 24K"))
-    d = str(sft_dir)
+    d = Path(sft_dir).as_posix()      # forward slashes: a Windows path pasted into Python code has no escapes
     new = f"""train_tasks = ([OOADialogues("{d}/train_flows.jsonl") for _ in range({a.flow_repeat})]
                + [OOADialogues("{d}/train_catalog.jsonl"), OOADialogues("{d}/synth_train.jsonl"),
                   OOADialogues("{d}/synth_pattern.jsonl")]) * {a.epochs}
@@ -73,6 +73,10 @@ val_dataset = TaskMixture([OOADialogues("{d}/val.jsonl")])"""
         if old_c not in s:
             raise SystemExit("nanochat's chat_sft.py is not the expected version (torch.compile line)")
         s = s.replace(old_c, "pass  # torch.compile switched off (--no-compile)")
+        # nanochat's optimizer (nanochat/optim.py) is also @torch.compile'd: make torch.compile a no-op before it is
+        # imported (disabling dynamo instead fails on its fullgraph=True functions)
+        s = ("import torch as _torch_nc\n"
+             "_torch_nc.compile = lambda fn=None, **kw: fn if fn is not None else (lambda f: f)\n") + s
     s = s.replace('print0(f"Total training time:',
                   'print0(f"Conversations skipped as longer than the window (not cut): {skipped_long[0]}")\nprint0(f"Total training time:')
     return s
@@ -183,6 +187,7 @@ def main():
            "--model-tag=d8", f"--model-step={step}"]       # exactly the base checkpoint checked above
     if not gpu:
         cmd.append("--device-type=cpu")
+
     log = work / f"train_{time.strftime('%Y%m%d_%H%M%S')}.log"
     print("dtype:", env["NANOCHAT_DTYPE"], "| log:", log, "\n" + " ".join(cmd) + "\n")
     t0 = time.time()
