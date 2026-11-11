@@ -22,6 +22,7 @@ exit /b
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $root = $env:OOA_ROOT.TrimEnd('\')
+if ((Split-Path $root -Leaf) -eq 'assistant' -and (Split-Path (Split-Path $root -Parent) -Leaf) -eq 'rpa model') { $root = Split-Path $root -Parent }
 if ((Split-Path $root -Leaf) -eq 'rpa model') { $root = Split-Path $root -Parent }
 $rpa = Join-Path $root 'rpa model'
 $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -82,10 +83,11 @@ if ($sac -eq 1) {
 
 # ---------------------------------------------------------------- 3. find the files
 Say "[3/7] Looking for ooa_assistant.zip and the model files (this folder, Downloads, Desktop, also inside .zip files)"
-$searchDirs = @($root, (Join-Path $env:USERPROFILE 'Downloads'), (Join-Path $env:USERPROFILE 'Desktop')) |
-    Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique
+$searchDirs = @($root, (Join-Path $env:USERPROFILE 'Downloads'), (Join-Path $env:USERPROFILE 'Desktop'), [Environment]::GetFolderPath('Desktop')) |
+    Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
 $files = foreach ($d in $searchDirs) { Get-ChildItem -LiteralPath $d -Recurse -File -ErrorAction SilentlyContinue }
-$files = @($files | Where-Object { $_.FullName -notlike '*\_ooa_setup_tmp\*' -and $_.FullName -notlike '*\old_model_*' })
+# skip setup leftovers, kept older models and the old catalog that ships inside the zip
+$files = @($files | Where-Object { $_.FullName -notmatch '\\_ooa_setup_tmp\\|old_model_|_before_|\\data\\catalog\\' })
 $cands = New-Object System.Collections.ArrayList
 $want = '^(tokenizer.*\.pkl|token_bytes.*\.pt|model_\d+.*\.pt|meta_\d+.*\.json|catalog.*\.jsonl)$'
 foreach ($f in $files) {
@@ -95,7 +97,7 @@ foreach ($zf in ($files | Where-Object { $_.Extension -eq '.zip' -and $_.Name -n
     try {
         $z = [System.IO.Compression.ZipFile]::OpenRead($zf.FullName)
         foreach ($e in $z.Entries) {
-            if ($e.Name -match $want) {
+            if ($e.Name -match $want -and $e.FullName -notmatch 'old_model_|_before_|/data/catalog/') {
                 [void]$cands.Add([pscustomobject]@{ Name = $e.Name; Zip = $zf.FullName; Entry = $e.FullName
                                                     Path = "$($zf.FullName) -> $($e.FullName)"; Time = $e.LastWriteTime.DateTime })
             }
@@ -112,6 +114,7 @@ function Read-Text($c) {
     return [System.IO.File]::ReadAllText($c.Path)
 }
 function Step-Of($name) { if ($name -match '_(\d+)') { return [int]$Matches[1] } return -1 }
+function Src-Of($c) { if ($c.Zip) { $c.Zip + '|' + [IO.Path]::GetDirectoryName($c.Entry) } else { [IO.Path]::GetDirectoryName($c.Path) } }
 
 $zipFile = $files | Where-Object { $_.Name -like 'ooa_assistant*.zip' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 $tokPkl = $cands | Where-Object { $_.Name -like 'tokenizer*.pkl' } | Sort-Object Time -Descending | Select-Object -First 1
@@ -124,7 +127,10 @@ foreach ($m in $metas) {
     try { $j = (Read-Text $m) | ConvertFrom-Json } catch { continue }
     if (-not ($j.user_config.PSObject.Properties.Name -contains 'mmlu_epochs')) { continue }   # base model meta: skip
     if ($j.user_config.num_iterations -lt 1000) { continue }                                     # autoresearch mini run: skip
-    $mm = $cands | Where-Object { $_.Name -like 'model_*.pt' -and (Step-Of $_.Name) -eq $j.step } | Sort-Object Time -Descending | Select-Object -First 1
+    # same step AND preferably the same folder/zip as the meta (every full run ends at the same step number)
+    $mm = $cands | Where-Object { $_.Name -like 'model_*.pt' -and (Step-Of $_.Name) -eq $j.step } |
+        Sort-Object @{ Expression = { (Src-Of $_) -eq (Src-Of $m) }; Descending = $true }, @{ Expression = { $_.Time }; Descending = $true } |
+        Select-Object -First 1
     if ($mm) { $model = $mm; $meta = $m; break }
 }
 $missing = @()
@@ -172,10 +178,12 @@ $tokDir = Join-Path $rpa 'nanochat_base\tokenizer'
 $ckDir = Join-Path $rpa 'nanochat_base\chatsft_checkpoints\d8'
 foreach ($d in @($tokDir, $ckDir, (Join-Path $rpa 'sft'))) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
 $old = @(Get-ChildItem -LiteralPath $ckDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(model|meta|optim)_' })
-if ($old.Count) {             # the assistant loads the highest step in d8, so an old model must not stay there
+$oldTok = @(Get-ChildItem -LiteralPath $tokDir -File -ErrorAction SilentlyContinue)
+if ($old.Count -or $oldTok.Count) {             # the assistant loads the highest step in d8, so an old model must not stay there
     $keep = Join-Path $rpa "nanochat_base\old_model_$stamp"
     New-Item -ItemType Directory -Force -Path $keep | Out-Null
     $old | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination $keep }
+    $oldTok | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $keep -Force }   # the old model needs its tokenizer
     Say "  previous model moved to $keep"
 }
 Move-Item -LiteralPath (Join-Path $stage 'tokenizer.pkl') -Destination $tokDir -Force
@@ -193,13 +201,15 @@ Say "[5/7] Installing Python packages (first time: several minutes, about 1 GB d
 if ($LASTEXITCODE -ne 0) { Bad "  Installing PyTorch failed (see the messages above). Check the internet connection and run this again."; return }
 & $pyExe -m pip install rustbpe tiktoken filelock jsonschema --quiet
 if ($LASTEXITCODE -ne 0) { Bad "  Installing packages failed (see the messages above)."; return }
-$t = & $pyExe -c "import torch; print('torch', torch.__version__)" 2>&1
-if ($LASTEXITCODE -ne 0) {
+$prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'   # warnings on stderr must not stop the setup
+$t = (& $pyExe -c "import torch; print('torch', torch.__version__)" 2>&1 | ForEach-Object { "$_" }) -join ' '
+$torchExit = $LASTEXITCODE; $ErrorActionPreference = $prevEap
+if ($torchExit -ne 0) {
     if ("$t" -match '4551') { Bad "  Windows blocked PyTorch (WinError 4551): turn Smart App Control Off (step 2 above) and run this again." }
     else { Bad "  PyTorch does not load: $t" }
     return
 }
-Good "  $t"
+Good ("  " + ($t -replace '.*(torch \S+)$', '$1'))
 
 # ---------------------------------------------------------------- 6. launcher + shortcut
 Say "[6/7] Desktop shortcut"
