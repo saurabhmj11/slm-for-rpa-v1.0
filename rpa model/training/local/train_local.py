@@ -91,6 +91,9 @@ def main():
     ap.add_argument("--natural-repeat", type=int, default=5)
     ap.add_argument("--core-repeat", type=int, default=5)
     ap.add_argument("--smoltalk", type=int, default=3000, help="general chat rows (downloads once); 0 = none")
+    ap.add_argument("--init-lr-frac", type=float, default=0.8, help="learning rate as a fraction of the base one "
+                    "(0.8 = Colab; a top-up from an already trained model uses less)")
+    ap.add_argument("--eval-every", type=int, default=100, help="validation every N steps (costly on a CPU)")
     ap.add_argument("--check", action="store_true", help="only check files and the GPU, do not train")
     ap.add_argument("--allow-cpu", action="store_true", help="train without a GPU (days; only for testing)")
     a = ap.parse_args()
@@ -156,14 +159,16 @@ def main():
         out.rename(keep)
         print("previous model kept in", keep)
 
-    env = dict(os.environ, NANOCHAT_BASE_DIR=str(base), OMP_NUM_THREADS="1",
+    # one CPU thread is right next to a GPU, but on a CPU-only run it would leave all other cores idle
+    env = dict(os.environ, NANOCHAT_BASE_DIR=str(base), OMP_NUM_THREADS=("1" if gpu else str(os.cpu_count() or 4)),
                NANOCHAT_DTYPE=("bfloat16" if gpu and torch.cuda.get_device_capability() >= (8, 0) else
                                "float16" if gpu else "float32"))
     total = 32768                                           # tokens per optimizer step, same as Colab
     accum = max(1, total // (a.seq * a.device_batch))       # nanochat counts --num-iterations in micro-batches
     cmd = [sys.executable, "-m", "scripts.chat_sft_ooa", f"--max-seq-len={a.seq}", f"--device-batch-size={a.device_batch}",
            f"--total-batch-size={a.seq * a.device_batch * accum}", f"--num-iterations={a.steps * accum}",
-           "--eval-every=100", f"--eval-tokens={a.seq * a.device_batch * 8}", "--chatcore-every=-1", "--run=dummy",
+           f"--eval-every={a.eval_every}", f"--eval-tokens={a.seq * a.device_batch * 8}", "--chatcore-every=-1", "--run=dummy",
+           f"--init-lr-frac={a.init_lr_frac}",
            "--model-tag=d8", f"--model-step={step}"]       # exactly the base checkpoint checked above
     if not gpu:
         cmd.append("--device-type=cpu")

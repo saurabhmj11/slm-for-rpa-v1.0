@@ -84,3 +84,43 @@ python basic_test.py
 ```
 A previous model in `C:\ooa_train\nanochat_base\chatsft_checkpoints` is never deleted: each run renames it to
 `chatsft_checkpoints_before_<date>` first.
+
+---
+
+# Overnight top-up on a normal PC (no graphics card needed)
+
+A full training run needs a GPU (Colab, Kaggle or an RTX laptop). A normal PC can still keep the model improving:
+`topup_local.py` starts from the model the assistant uses now, trains a short round (200 steps, about 2 hours on
+a 4-core CPU, faster with more cores) on your **Accept / Edit feedback** plus a sample of the existing training
+data, then scores the old and the new model on the same 20 everyday requests. **The new model is installed only if
+it scores better**; the old one is always kept in `nanochat_base\old_model_<date>`. History of every round:
+`nanochat_base\topup_history.jsonl`.
+
+## One-time setup
+
+1. The assistant is installed and works (`setup_windows.bat`), e.g. in `F:\model slm 100 k parameter\rpa model v2\rpa model`.
+2. Copy the training data: download the Drive folder `ooa-nanochat\sft` and put its files in `rpa model\sft\`
+   (at least `natural_train.jsonl` and `core_train.jsonl`; `synth_train.jsonl`, `synth_pattern.jsonl`,
+   `train_flows.jsonl`, `train_catalog.jsonl` help it not forget).
+3. Install WSL (PowerShell as Administrator: `wsl --install`, restart, open Ubuntu, choose a user name and password).
+4. In Ubuntu, the CPU-only setup (about 10 minutes; replace the path with yours, `F:\` is `/mnt/f/`):
+   ```
+   tr -d '\r' < "/mnt/f/model slm 100 k parameter/rpa model v2/rpa model/training/local/setup_wsl.sh" | bash -s -- --cpu
+   ```
+5. Check (in Ubuntu):
+   ```
+   ~/ooa-train-venv/bin/python "/mnt/f/model slm 100 k parameter/rpa model v2/rpa model/training/local/topup_local.py" --check
+   ```
+
+## Run it
+
+- Once, now: double-click `rpa model\training\local\topup_nightly.bat` (output in `topup_nightly.log` next to it).
+- Every night at 01:30: run `topup_nightly.bat install` once in Command Prompt (`topup_nightly.bat remove` stops it).
+  The PC must be on and not asleep at that time.
+- After a round that installed a new model, restart the assistant to use it.
+
+## How it learns from you
+
+Use the assistant during the day and click **Accept** (the flow was right), **Edit** (fix it and save: the most
+valuable signal) or **Reject**. Every round trains on all Accept/Edit answers that pass the platform's rules
+(5x weight), so the requests you actually use get better first. Rejected requests are not trained on.

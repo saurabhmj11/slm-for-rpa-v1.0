@@ -126,7 +126,7 @@ $metas = $cands | Where-Object { $_.Name -like 'meta_*.json' } | Sort-Object Tim
 foreach ($m in $metas) {
     try { $j = (Read-Text $m) | ConvertFrom-Json } catch { continue }
     if (-not ($j.user_config.PSObject.Properties.Name -contains 'mmlu_epochs')) { continue }   # base model meta: skip
-    if ($j.user_config.num_iterations -lt 1000) { continue }                                     # autoresearch mini run: skip
+    if ($j.user_config.num_iterations -lt 1000 -and -not $j.ooa_topup) { continue }             # autoresearch mini run: skip (overnight top-ups are fine)
     # same step AND preferably the same folder/zip as the meta (every full run ends at the same step number)
     $mm = $cands | Where-Object { $_.Name -like 'model_*.pt' -and (Step-Of $_.Name) -eq $j.step } |
         Sort-Object @{ Expression = { (Src-Of $_) -eq (Src-Of $m) }; Descending = $true }, @{ Expression = { $_.Time }; Descending = $true } |
