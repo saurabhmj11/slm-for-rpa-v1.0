@@ -117,7 +117,15 @@ run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-c
      "rustbpe", "tiktoken", "filelock", "jsonschema", "wandb", "psutil", "pyarrow", "numpy", "requests", "gdown"])
 t = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
 if t.returncode != 0:
-    raise SystemExit("PyTorch does not load:\\n" + t.stderr[-800:])
+    err = t.stderr[-800:]
+    if "WinError 126" in err or "WinError 193" in err:
+        raise SystemExit("PyTorch cannot load its DLLs: this PC is missing the Microsoft Visual C++ Redistributable. "
+                         "Install it from https://aka.ms/vs/17/release/vc_redist.x64.exe (choose Repair if it is "
+                         "already there), restart the PC, then run cells 1 and 2 again.")
+    if "4551" in err:
+        raise SystemExit("Windows Smart App Control blocks PyTorch: Windows Security > App & browser control > "
+                         "Smart App Control settings > Off, then run cells 1 and 2 again.")
+    raise SystemExit("PyTorch does not load:\\n" + err)
 print("PyTorch", t.stdout.strip())
 CUDA = GPU and t.stdout.strip().endswith("True")
 MODE_NOW = MODE if MODE in ("full", "topup") else ("full" if CUDA else "topup")
