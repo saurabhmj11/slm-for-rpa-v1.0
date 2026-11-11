@@ -115,6 +115,12 @@ def main():
     ap.add_argument("--port", type=int, default=8799, help="port for the scoring runs (not the assistant's 8765)")
     ap.add_argument("--check", action="store_true", help="only show what would be used")
     a = ap.parse_args()
+    os.environ.setdefault("PYTHONUTF8", "1")          # child processes (training, scoring) write UTF-8 logs on Windows too
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except Exception:
+        pass
 
     rpa = Path(a.rpa).expanduser().resolve()
     base = rpa / "nanochat_base"

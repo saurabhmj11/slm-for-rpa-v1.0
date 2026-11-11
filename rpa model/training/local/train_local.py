@@ -68,6 +68,11 @@ val_dataset = TaskMixture([OOADialogues("{d}/val.jsonl")])"""
                          "            else:\n"
                          "                skipped_long[0] += 1")
     s = s.replace("last_step = False # we will toggle this", "skipped_long = [0]\nlast_step = False # we will toggle this")
+    if a.no_compile:   # plain Windows has no C++ compiler for torch.compile; the model then runs uncompiled
+        old_c = "model = torch.compile(model, dynamic=False)"
+        if old_c not in s:
+            raise SystemExit("nanochat's chat_sft.py is not the expected version (torch.compile line)")
+        s = s.replace(old_c, "pass  # torch.compile switched off (--no-compile)")
     s = s.replace('print0(f"Total training time:',
                   'print0(f"Conversations skipped as longer than the window (not cut): {skipped_long[0]}")\nprint0(f"Total training time:')
     return s
@@ -79,6 +84,10 @@ def newest_step(folder, prefix="model_"):
 
 
 def main():
+    try:                                    # a Windows console / log file may not take every character: never crash on it
+        sys.stdout.reconfigure(errors="replace")
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--work", required=True, help="folder with nanochat_base/ and sft/ copied from Drive")
     ap.add_argument("--nanochat", default=str(RPA / "nanochat"), help="nanochat code (pinned version, bundled)")
@@ -94,6 +103,8 @@ def main():
     ap.add_argument("--init-lr-frac", type=float, default=0.8, help="learning rate as a fraction of the base one "
                     "(0.8 = Colab; a top-up from an already trained model uses less)")
     ap.add_argument("--eval-every", type=int, default=100, help="validation every N steps (costly on a CPU)")
+    ap.add_argument("--no-compile", action="store_true", default=(os.name == "nt"),
+                    help="run without torch.compile (automatic on Windows, which has no compiler for it)")
     ap.add_argument("--check", action="store_true", help="only check files and the GPU, do not train")
     ap.add_argument("--allow-cpu", action="store_true", help="train without a GPU (days; only for testing)")
     a = ap.parse_args()
@@ -160,7 +171,7 @@ def main():
         print("previous model kept in", keep)
 
     # one CPU thread is right next to a GPU, but on a CPU-only run it would leave all other cores idle
-    env = dict(os.environ, NANOCHAT_BASE_DIR=str(base), OMP_NUM_THREADS=("1" if gpu else str(os.cpu_count() or 4)),
+    env = dict(os.environ, NANOCHAT_BASE_DIR=str(base), PYTHONUTF8="1", PYTHONIOENCODING="utf-8", OMP_NUM_THREADS=("1" if gpu else str(os.cpu_count() or 4)),
                NANOCHAT_DTYPE=("bfloat16" if gpu and torch.cuda.get_device_capability() >= (8, 0) else
                                "float16" if gpu else "float32"))
     total = 32768                                           # tokens per optimizer step, same as Colab
@@ -176,7 +187,8 @@ def main():
     print("dtype:", env["NANOCHAT_DTYPE"], "| log:", log, "\n" + " ".join(cmd) + "\n")
     t0 = time.time()
     with open(log, "w", encoding="utf-8") as lf:
-        p = subprocess.Popen(cmd, cwd=nano, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        p = subprocess.Popen(cmd, cwd=nano, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                             encoding="utf-8", errors="replace")   # nanochat prints characters like the square-root sign
         for line in p.stdout:
             sys.stdout.write(line)
             lf.write(line)

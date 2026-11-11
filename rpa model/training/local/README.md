@@ -96,28 +96,28 @@ data, then scores the old and the new model on the same 20 everyday requests. **
 it scores better**; the old one is always kept in `nanochat_base\old_model_<date>`. History of every round:
 `nanochat_base\topup_history.jsonl`.
 
-## One-time setup
+## One-time setup (directly on Windows)
 
 1. The assistant is installed and works (`setup_windows.bat`), e.g. in `F:\model slm 100 k parameter\rpa model v2\rpa model`.
 2. Copy the training data: download the Drive folder `ooa-nanochat\sft` and put its files in `rpa model\sft\`
    (at least `natural_train.jsonl` and `core_train.jsonl`; `synth_train.jsonl`, `synth_pattern.jsonl`,
    `train_flows.jsonl`, `train_catalog.jsonl` help it not forget).
-3. Install WSL (PowerShell as Administrator: `wsl --install`, restart, open Ubuntu, choose a user name and password).
-4. In Ubuntu, the CPU-only setup (about 10 minutes; replace the path with yours, `F:\` is `/mnt/f/`):
+3. In Command Prompt, in the folder `rpa model\training\local`:
    ```
-   tr -d '\r' < "/mnt/f/model slm 100 k parameter/rpa model v2/rpa model/training/local/setup_wsl.sh" | bash -s -- --cpu
+   topup_nightly.bat check
    ```
-5. Check (in Ubuntu):
-   ```
-   ~/ooa-train-venv/bin/python "/mnt/f/model slm 100 k parameter/rpa model v2/rpa model/training/local/topup_local.py" --check
-   ```
+   It installs three small extra packages and must end with **READY**.
 
 ## Run it
 
-- Once, now: double-click `rpa model\training\local\topup_nightly.bat` (output in `topup_nightly.log` next to it).
-- Every night at 01:30: run `topup_nightly.bat install` once in Command Prompt (`topup_nightly.bat remove` stops it).
+- Once, now: double-click `topup_nightly.bat` (output goes to `topup_nightly.log` next to it).
+- Every night at 01:30: `topup_nightly.bat install` once in Command Prompt (`topup_nightly.bat remove` stops it).
   The PC must be on and not asleep at that time.
 - After a round that installed a new model, restart the assistant to use it.
+
+(On Windows the model runs without `torch.compile`, which needs a C++ compiler Windows does not have; on a CPU this is
+measured to be just as fast: about 32 s per step on 4 cores. WSL also works: `setup_wsl.sh --cpu`, then run
+`topup_local.py` with `~/ooa-train-venv/bin/python`.)
 
 ## How it learns from you
 
