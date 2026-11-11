@@ -38,16 +38,39 @@ FULL_STEPS = 2500          # full training length (same as Colab)
 REPLACE_LOCAL_MODEL = False   # True: replace this PC's model with the newest one from Drive (the old one is kept)
 REFRESH_DATA = False       # True: download the training data again even if it is already here
 
+RPA_FOLDER = r""           # optional: the 'rpa model' folder, e.g. r"C:/OOA/rpa model" (empty = search for it)
+
 import os, sys, json, shutil, subprocess, time
 from pathlib import Path
-ROOT = Path.cwd()
-for cand in [ROOT, ROOT / "rpa model", *ROOT.parents]:
-    if (cand / "assistant" / "app.py").exists() and (cand / "training" / "local" / "topup_local.py").exists():
-        ROOT = cand
-        break
-else:
-    raise SystemExit("Open this notebook from the 'rpa model' folder of the NEW ooa_assistant.zip "
-                     "(it must contain assistant/app.py and training/local/topup_local.py)")
+
+def _ok(p):
+    return (p / "assistant" / "app.py").exists() and (p / "training" / "local" / "topup_local.py").exists()
+
+def _find():
+    starts = [Path(RPA_FOLDER)] if RPA_FOLDER else []
+    here = Path.cwd()
+    starts += [here, *here.parents]
+    home = Path.home()
+    starts += [Path("C:/OOA"), home / "Downloads", home / "Desktop", home / "OneDrive" / "Desktop", home / "Documents", here]
+    seen = set()
+    for s0 in starts:
+        for p in [s0, s0 / "rpa model"]:
+            if p in seen or not p.exists():
+                continue
+            seen.add(p)
+            if _ok(p):
+                return p
+    for s0 in starts[len(starts) - 6:]:          # one more level down, e.g. Downloads/ooa_assistant/rpa model
+        if s0.exists():
+            for p in list(s0.glob("*/rpa model")) + list(s0.glob("*/*/rpa model")):
+                if _ok(p):
+                    return p
+    print("Looked in:", *[str(p) for p in seen], sep=chr(10) + "  ")
+    raise SystemExit("Could not find the 'rpa model' folder of the NEW ooa_assistant.zip (it must contain "
+                     "assistant/app.py and training/local/topup_local.py). Unzip the new zip to C:/OOA, "
+                     "or put its path in RPA_FOLDER above, then run this cell again.")
+
+ROOT = _find()
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
 print("assistant folder:", ROOT)
