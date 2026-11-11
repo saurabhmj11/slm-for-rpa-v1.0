@@ -108,13 +108,19 @@ def score(rpa, model_dir, catalog, port, log):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rpa", default=str(RPA_DEFAULT), help='the "rpa model" folder of the assistant')
-    ap.add_argument("--steps", type=int, default=200, help="training steps this round (32,768 tokens each)")
-    ap.add_argument("--lr", type=float, default=0.3, help="learning rate fraction (lower than a full run: it only adjusts)")
+    ap.add_argument("--mode", choices=["topup", "full"], default="topup",
+                    help="topup: short round from the current model (CPU ok); full: the Colab recipe from the "
+                         "pretrained base model (needs nanochat_base/base_checkpoints; GPU, or about a day on a CPU)")
+    ap.add_argument("--steps", type=int, default=None, help="training steps (32,768 tokens each); default 200 topup, 2500 full")
+    ap.add_argument("--lr", type=float, default=None, help="learning rate fraction; default 0.3 topup (it only adjusts), 0.8 full")
     ap.add_argument("--device-batch", type=int, default=4, choices=[1, 2, 4, 8, 16])
     ap.add_argument("--feedback-repeat", type=int, default=5, help="how often each piece of your feedback is shown")
     ap.add_argument("--port", type=int, default=8799, help="port for the scoring runs (not the assistant's 8765)")
     ap.add_argument("--check", action="store_true", help="only show what would be used")
     a = ap.parse_args()
+    full = a.mode == "full"
+    a.steps = a.steps or (2500 if full else 200)
+    a.lr = a.lr if a.lr is not None else (0.8 if full else 0.3)
     os.environ.setdefault("PYTHONUTF8", "1")          # child processes (training, scoring) write UTF-8 logs on Windows too
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")   # a Windows/company proxy must not catch the local scoring calls
@@ -137,6 +143,10 @@ def main():
     problems = []
     if step is None:
         problems.append(f"no model_<N>.pt with its meta in {d8}")
+    bd8 = base / "base_checkpoints" / "d8"
+    bstep = newest(bd8) if full else None
+    if full and bstep is None:
+        problems.append(f"full mode needs the pretrained base model in {bd8} (model_<N>.pt + meta_<N>.json + optim)")
     for f in (base / "tokenizer" / "tokenizer.pkl", base / "tokenizer" / "token_bytes.pt", schema,
               rpa / "nanochat" / "scripts" / "chat_sft.py", rpa / "assistant" / "app.py", rpa / "eval" / "plain_requests.jsonl"):
         if not f.exists():
@@ -173,13 +183,26 @@ def main():
     wb = work / "nanochat_base"
     (wb / "base_checkpoints" / "d8").mkdir(parents=True)
     shutil.copytree(base / "tokenizer", wb / "tokenizer")
-    shutil.copy2(model, wb / "base_checkpoints" / "d8" / model.name)      # train FROM the current model
-    shutil.copy2(meta, wb / "base_checkpoints" / "d8" / meta.name)
+    if full:                                                    # train from the pretrained base model, like Colab
+        for f in bd8.iterdir():
+            if re.match(rf"(model|meta|optim)_{bstep:06d}", f.name):
+                shutil.copy2(f, wb / "base_checkpoints" / "d8" / f.name)
+    else:
+        shutil.copy2(model, wb / "base_checkpoints" / "d8" / model.name)      # train FROM the current model
+        shutil.copy2(meta, wb / "base_checkpoints" / "d8" / meta.name)
     ws = work / "sft"
     ws.mkdir()
     rng = random.Random(stamp)
     val = []
-    for name, (src, n) in MIX.items():
+    if full:                                                    # the whole data folder, as Colab cell 7 uses it
+        for f in sft.glob("*.jsonl"):
+            if f.name not in ("catalog.jsonl", "feedback_train.jsonl"):
+                shutil.copy2(f, ws / f.name)
+        val = read_rows(ws / "val.jsonl") if (ws / "val.jsonl").exists() else []
+        for need in ("train_flows.jsonl", "train_catalog.jsonl", "synth_train.jsonl", "synth_pattern.jsonl"):
+            if not (ws / need).exists():
+                (ws / need).write_text("", encoding="utf-8")
+    for name, (src, n) in ({} if full else MIX).items():
         rows = read_rows(sft / src) if (sft / src).exists() else []
         rng.shuffle(rows)
         if name == "natural_train.jsonl" and len(rows) > 200:
@@ -202,11 +225,16 @@ def main():
     (ws / "val.jsonl").write_text("".join(val), encoding="utf-8")
     shutil.copy2(catalog, ws / "catalog.jsonl")
 
-    print(f"== 2/4 training {a.steps} steps from model step {step} (CPU: about {a.steps * 35 // 60} min on 4 cores)")
-    cmd = [sys.executable, str(HERE / "train_local.py"), "--work", str(work), "--nanochat", str(rpa / "nanochat"),
-           "--steps", str(a.steps), "--device-batch", str(a.device_batch), "--epochs", "1", "--flow-repeat", "1",
-           "--natural-repeat", "1", "--core-repeat", "1", "--smoltalk", "0", "--init-lr-frac", str(a.lr),
-           "--eval-every", str(max(50, a.steps // 2)), "--allow-cpu"]
+    if full:
+        print(f"== 2/4 full training: {a.steps} steps from the pretrained base model (GPU: about 1 h; CPU: about a day)")
+        cmd = [sys.executable, str(HERE / "train_local.py"), "--work", str(work), "--nanochat", str(rpa / "nanochat"),
+               "--steps", str(a.steps), "--device-batch", str(a.device_batch), "--init-lr-frac", str(a.lr), "--allow-cpu"]
+    else:
+        print(f"== 2/4 training {a.steps} steps from model step {step} (CPU: about {a.steps * 38 // 60} min on 4 cores)")
+        cmd = [sys.executable, str(HERE / "train_local.py"), "--work", str(work), "--nanochat", str(rpa / "nanochat"),
+               "--steps", str(a.steps), "--device-batch", str(a.device_batch), "--epochs", "1", "--flow-repeat", "1",
+               "--natural-repeat", "1", "--core-repeat", "1", "--smoltalk", "0", "--init-lr-frac", str(a.lr),
+               "--eval-every", str(max(50, a.steps // 2)), "--allow-cpu"]
     with open(log, "a", encoding="utf-8") as lf:
         r = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
     if r.returncode != 0:
@@ -234,7 +262,7 @@ def main():
     rec = {"time": stamp, "trained_steps": cstep, "from_step": step, "feedback_rows": fb_rows,
            "old_score": [b_right, b_ver], "new_score": [n_right, n_ver], "installed": better, "details": details}
     if better:
-        new_step = step + cstep                                 # higher than the old step, so it is the one loaded
+        new_step = cstep if full else step + cstep              # the old model is moved out of d8 below in any case
         keep = base / f"old_model_{stamp}"
         keep.mkdir()
         for f in d8.iterdir():
@@ -243,7 +271,8 @@ def main():
         shutil.copy2(cd8 / f"model_{cstep:06d}.pt", d8 / f"model_{new_step:06d}.pt")
         m = json.loads((cd8 / f"meta_{cstep:06d}.json").read_text(encoding="utf-8"))
         m["step"] = new_step
-        m["ooa_topup"] = {"time": stamp, "from_step": step, "steps": cstep, "lr": a.lr, "score": [n_right, n_ver]}
+        m["ooa_topup"] = {"time": stamp, "mode": a.mode, "from_step": bstep if full else step, "steps": cstep,
+                          "lr": a.lr, "score": [n_right, n_ver]}
         (d8 / f"meta_{new_step:06d}.json").write_text(json.dumps(m, indent=2), encoding="utf-8")
         rec.update(kept=f"model_{new_step:06d}.pt", kept_score=[n_right, n_ver], old_kept_in=str(keep))
         rec["kept_id"] = ident(d8 / f"model_{new_step:06d}.pt")
