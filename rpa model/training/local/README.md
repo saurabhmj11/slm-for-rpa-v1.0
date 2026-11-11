@@ -1,6 +1,6 @@
 # Train the OOA model on a laptop with an NVIDIA GPU
 
-Same training as Colab cell 7 (2000 steps on the OOA data mix, including `natural_train.jsonl` when present), in one
+Same training as Colab cell 7 (2500 steps on the OOA data mix, including `natural_train.jsonl` and `core_train.jsonl` when present), in one
 command, with no time limit or disconnects. It runs inside WSL (Ubuntu inside Windows) because nanochat compiles the
 model with `torch.compile`, which plain Windows does not support.
 
@@ -10,7 +10,7 @@ Needs:
 - About 15 GB free disk.
 - Internet for setup **and for the first training run** (it downloads a few hundred MB of general chat data once).
 
-Expected time for one run: about 30-60 min on an RTX 3060/4060 class GPU (similar to the Colab T4).
+Expected time for one run: about 40-75 min on an RTX 3060/4060 class GPU (similar to the Colab T4).
 
 ## 1. Check the GPU (Windows Command Prompt)
 
@@ -75,7 +75,7 @@ Fix anything marked `!`, then start the real run:
 ## 6. Use the new model
 
 The run ends by printing the new files, normally
-`C:\ooa_train\nanochat_base\chatsft_checkpoints\d8\model_002000.pt` and `meta_002000.json`.
+`C:\ooa_train\nanochat_base\chatsft_checkpoints\d8\model_002500.pt` and `meta_002500.json`.
 On the PC, in the assistant's `rpa model\nanochat_base\chatsft_checkpoints\d8\`, first move the old `model_*.pt` and
 `meta_*.json` out (keep them as a backup), then copy the two new files in. The assistant loads the highest step number
 in that folder, so an old file left there could be loaded instead. Restart `start_assistant.bat`, then score it:

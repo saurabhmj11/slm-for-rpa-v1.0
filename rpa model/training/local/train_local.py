@@ -27,7 +27,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RPA = HERE.parent.parent                                   # "rpa model"
 REQUIRED_SFT = ["train_flows.jsonl", "train_catalog.jsonl", "synth_train.jsonl", "synth_pattern.jsonl", "val.jsonl"]
-OPTIONAL_SFT = ["self_improved.jsonl", "hard_fixed.jsonl", "feedback_train.jsonl", "natural_train.jsonl"]
+OPTIONAL_SFT = ["self_improved.jsonl", "hard_fixed.jsonl", "feedback_train.jsonl", "natural_train.jsonl", "core_train.jsonl"]
 NANOCHAT_COMMIT = "92d63d4"
 
 
@@ -49,6 +49,10 @@ _nat = "{d}/natural_train.jsonl"
 if _os.path.exists(_nat):
     train_tasks += [OOADialogues(_nat)] * ({a.natural_repeat} * {a.epochs})
 print0(f"natural-wording file in the mix: {{_os.path.exists(_nat)}}")
+_core = "{d}/core_train.jsonl"
+if _os.path.exists(_core):
+    train_tasks += [OOADialogues(_core)] * ({a.core_repeat} * {a.epochs})
+print0(f"core-actions file in the mix: {{_os.path.exists(_core)}}")
 if {a.smoltalk} > 0:
     train_tasks.append(SmolTalk(split="train", stop={a.smoltalk}))
 train_dataset = TaskMixture(train_tasks)
@@ -78,13 +82,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--work", required=True, help="folder with nanochat_base/ and sft/ copied from Drive")
     ap.add_argument("--nanochat", default=str(RPA / "nanochat"), help="nanochat code (pinned version, bundled)")
-    ap.add_argument("--steps", type=int, default=2000, help="optimizer steps of 32,768 tokens each (Colab default 2000)")
+    ap.add_argument("--steps", type=int, default=2500, help="optimizer steps of 32,768 tokens each (same as Colab: 2500)")
     ap.add_argument("--device-batch", type=int, default=4, choices=[1, 2, 4, 8, 16],
                     help="rows per GPU pass: 4 needs ~10+ GB, use 2 for 6-8 GB, 1 for 4 GB (same result, slower)")
     ap.add_argument("--seq", type=int, default=2048, choices=[512, 1024, 2048])
     ap.add_argument("--epochs", type=int, default=6)
     ap.add_argument("--flow-repeat", type=int, default=5)
-    ap.add_argument("--natural-repeat", type=int, default=3)
+    ap.add_argument("--natural-repeat", type=int, default=5)
+    ap.add_argument("--core-repeat", type=int, default=5)
     ap.add_argument("--smoltalk", type=int, default=3000, help="general chat rows (downloads once); 0 = none")
     ap.add_argument("--check", action="store_true", help="only check files and the GPU, do not train")
     ap.add_argument("--allow-cpu", action="store_true", help="train without a GPU (days; only for testing)")

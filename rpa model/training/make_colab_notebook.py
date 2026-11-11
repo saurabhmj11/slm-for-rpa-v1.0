@@ -68,7 +68,9 @@ NUM_ITERS = P["tokens"] // P["total_batch"]
 SFT_SEQ = 2048             # flows longer than this get cut; the T4 cannot afford much more
 SFT_DEVICE_BATCH = 4
 SFT_EPOCHS = 2 if PROFILE == "smoke" else 6      # passes over the OOA data (the seed set is small)
-NATURAL_REPEAT = 3         # passes over sft/natural_train.jsonl per epoch, if that file is in Drive (everyday wording)
+NATURAL_REPEAT = 5         # passes over sft/natural_train.jsonl per epoch, if that file is in Drive (everyday wording)
+CORE_REPEAT = 5            # passes over sft/core_train.jsonl per epoch, if in Drive (everyday requests for the 65 most used actions)
+REBUILD_DATA = False       # cell 6 reuses the generated flows already in Drive (saves time); True = generate them again
 FLOW_REPEAT = 5            # real flows repeated per pass; was 15, which made the model recite whole training flows (memorising)
 SYNTH_TRAIN = 1500 if PROFILE == "smoke" else 30000   # generated flows (no LLM), see gen_flows.py
 SYNTH_EVAL = 20            # unseen generated flows scored by exact action sequence
@@ -82,7 +84,7 @@ SELF_IMPROVE_ROUNDS = 2
 SI_PROMPTS = 20 if PROFILE == "smoke" else 100     # fresh requests per self-improvement round
 SI_SAMPLES = 8
 EVAL_SOURCE = "sft"        # which model the test cell loads: "sft" or "rl"
-SFT_ITERS = 400 if PROFILE == "smoke" else 8000            # counted in MICRO-batches (4 per optimizer step): 8000 = 2000 steps, about 35 min on a T4
+SFT_ITERS = 400 if PROFILE == "smoke" else 10000           # counted in MICRO-batches (4 per optimizer step): 10000 = 2500 steps, about 45 min on a T4 (was 8000)
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
 MAX_FLOW_CHARS = 9000      # skip training flows longer than this (about SFT_SEQ tokens)
 print(PROFILE, P, "iterations:", NUM_ITERS)
@@ -172,7 +174,13 @@ for name, text in FILES.items():
 if not os.path.exists("/content/platform"):
     !git clone -q --depth 1 {PLATFORM_REPO} /content/platform
 !python /content/ooa/build_sft_data.py /content/platform {DRIVE_DIR}/sft {MAX_FLOW_CHARS}
-!python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform {DRIVE_DIR}/sft/synth_train.jsonl {SYNTH_TRAIN} 1
+def _have(name, rows):        # reuse a generated file from an earlier run unless REBUILD_DATA
+    f = f"{DRIVE_DIR}/sft/{name}"
+    ok = (not REBUILD_DATA) and os.path.exists(f) and sum(1 for _ in open(f)) >= rows * 0.9
+    print(("reusing " if ok else "generating ") + name)
+    return ok
+if not _have("synth_train.jsonl", SYNTH_TRAIN):
+    !python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform {DRIVE_DIR}/sft/synth_train.jsonl {SYNTH_TRAIN} 1
 !python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform /content/synth_eval_raw.jsonl 400 2
 train_set = {json.loads(l)["messages"][1]["content"] for l in open(f"{DRIVE_DIR}/sft/synth_train.jsonl")}
 def _all_actions(nodes):   # every step, including those inside if / try / loop (the test compares all of them)
@@ -200,7 +208,8 @@ with open(f"{DRIVE_DIR}/sft/val.jsonl", "w") as f:
         f.write(json.dumps(r) + "\\n")
 print("validation rows (unseen):", len(val_rows) + len(extra))
 print("synthetic eval prompts (not in train):", len(ev))
-!python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform {DRIVE_DIR}/sft/synth_pattern.jsonl {SYNTH_PATTERN} 1 patterns
+if not _have("synth_pattern.jsonl", SYNTH_PATTERN):
+    !python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform {DRIVE_DIR}/sft/synth_pattern.jsonl {SYNTH_PATTERN} 1 patterns
 !python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform /content/pattern_eval_raw.jsonl 200 2 patterns
 _ptrain = {json.loads(l)["messages"][1]["content"] for l in open(f"{DRIVE_DIR}/sft/synth_pattern.jsonl")}
 _pev = []
@@ -238,6 +247,10 @@ _nat = "{DRIVE_DIR}/sft/natural_train.jsonl"     # everyday-wording requests for
 if _os.path.exists(_nat):
     train_tasks += [OOADialogues(_nat)] * ({NATURAL_REPEAT} * {SFT_EPOCHS})
 print0(f"natural-wording file in the mix: {{_os.path.exists(_nat)}}")
+_core = "{DRIVE_DIR}/sft/core_train.jsonl"       # everyday requests for the most used actions (upload to Drive sft/)
+if _os.path.exists(_core):
+    train_tasks += [OOADialogues(_core)] * ({CORE_REPEAT} * {SFT_EPOCHS})
+print0(f"core-actions file in the mix: {{_os.path.exists(_core)}}")
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)
@@ -257,9 +270,13 @@ val_dataset = TaskMixture([OOADialogues("{DRIVE_DIR}/sft/val.jsonl")])"""
     s = s.replace('print0(f"Total training time:', 'print0(f"Conversations skipped as longer than the window (not cut): {skipped_long[0]}")\\nprint0(f"Total training time:')
     open(p, "w").write(s)
     print("patched chat_sft.py")
-# remove old SFT checkpoints: nanochat loads the highest step number, so a stale step-100 would hide a newer, shorter run
-import shutil
-shutil.rmtree(os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatsft_checkpoints"), ignore_errors=True)
+# keep the previous model: nanochat loads the highest step in chatsft_checkpoints, so move it aside (never deleted)
+import shutil, time
+_ck = os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatsft_checkpoints")
+if os.path.exists(_ck):
+    _keep = _ck + "_before_" + time.strftime("%Y%m%d_%H%M%S")
+    shutil.move(_ck, _keep)
+    print("previous model kept in", _keep)
 !python -m scripts.chat_sft --max-seq-len={SFT_SEQ} --device-batch-size={SFT_DEVICE_BATCH} \\
     --total-batch-size={SFT_SEQ*SFT_DEVICE_BATCH*4} --num-iterations={SFT_ITERS} \\
     --eval-every=100 --eval-tokens={SFT_SEQ*SFT_DEVICE_BATCH*8} --chatcore-every=-1 --run=dummy
@@ -276,6 +293,24 @@ t = open(cli).read()
 t = t.replace('"max_tokens": 256', '"max_tokens": 3000')
 open(cli, "w").write(t)
 sys.path.insert(0, "/content/ooa")
+# load the model ONCE (it used to be reloaded for every test request through chat_cli, which was slow)
+sys.path.insert(0, "/content/nanochat")
+import torch
+from nanochat.checkpoint_manager import load_model as _load_model
+from nanochat.engine import Engine as _Engine
+_model, _tok, _ = _load_model(EVAL_SOURCE, torch.device("cuda"), phase="eval")
+_engine = _Engine(_model, _tok)
+_stop = {_tok.encode_special("<|assistant_end|>"), _tok.get_bos_token_id()}
+def run_cli(prompt, max_tokens=3000):
+    """Same output shape as chat_cli ("Assistant: <answer>"), temperature 0.2, without reloading the model."""
+    ids = [_tok.get_bos_token_id(), _tok.encode_special("<|user_start|>")] + _tok.encode(prompt) + \
+          [_tok.encode_special("<|user_end|>"), _tok.encode_special("<|assistant_start|>")]
+    out = []
+    for col, _ in _engine.generate(ids, num_samples=1, max_tokens=max_tokens, temperature=0.2, top_k=50):
+        if col[0] in _stop:
+            break
+        out.append(col[0])
+    return "Assistant: " + _tok.decode(out)
 import jsonschema
 schema = json.load(open("/content/platform/contracts/flow-schema/flow.v1.json"))
 catalog = {json.loads(l)["id"]: json.loads(l) for l in open(f"{DRIVE_DIR}/sft/catalog.jsonl")}
@@ -291,8 +326,7 @@ def steps(nodes):
 
 results = []
 for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval.jsonl")):
-    out = subprocess.run(["python", "-m", "scripts.chat_cli", "-i", EVAL_SOURCE, "-p", row["prompt"], "-t", "0.2"],
-                         capture_output=True, text=True, cwd="/content/nanochat").stdout
+    out = run_cli(row["prompt"])
     text = out.split("Assistant:", 1)[-1].split("<|assistant_end|>")[0].strip()   # drop the end-of-answer marker
     print("---", row["family"], "| first 250 chars:", text[:250])
     r = {"family": row["family"], "json": False, "schema": False, "actions_known": False}
@@ -309,8 +343,7 @@ print(f"\\nheld-out flows: {n} | valid JSON {sum(r['json'] for r in results)} | 
 print("\\n=== Synthetic eval: unseen generated flows, exact action sequence ===")
 sr = []
 for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval_synth.jsonl")):
-    out = subprocess.run(["python", "-m", "scripts.chat_cli", "-i", EVAL_SOURCE, "-p", row["prompt"], "-t", "0.2"],
-                         capture_output=True, text=True, cwd="/content/nanochat").stdout
+    out = run_cli(row["prompt"])
     text = out.split("Assistant:", 1)[-1].split("<|assistant_end|>")[0].strip()
     r = {"json": False, "schema": False, "actions_known": False, "actions_match": False}
     try:
@@ -330,8 +363,7 @@ os.environ["OOA_CATALOG"] = f"{DRIVE_DIR}/sft/catalog.jsonl"; os.environ["OOA_SC
 RW.configure()
 pr = []
 for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval_pattern.jsonl")):
-    out = subprocess.run(["python", "-m", "scripts.chat_cli", "-i", EVAL_SOURCE, "-p", row["prompt"], "-t", "0.2"],
-                         capture_output=True, text=True, cwd="/content/nanochat").stdout
+    out = run_cli(row["prompt"])
     sc = RW.score(out.split("Assistant:", 1)[-1], RW.gold_actions(row["gold_flow"]))
     pr.append(sc)
 print(f"real-pattern eval: {len(pr)} | valid (passes every rule) {sum(x['valid'] for x in pr)} | exact action sequence {sum(x['solved'] for x in pr)} | mean score {sum(x['total'] for x in pr)/max(1,len(pr)):.3f}")
@@ -341,14 +373,15 @@ def _in_order(need, got):
     return all(any(a == g for g in it) for a in need)
 pl = []
 for row in map(json.loads, open("/content/ooa/plain_requests.jsonl")):
-    out = subprocess.run(["python", "-m", "scripts.chat_cli", "-i", EVAL_SOURCE, "-p", row["prompt"], "-t", "0.2"],
-                         capture_output=True, text=True, cwd="/content/nanochat").stdout
+    out = run_cli(row["prompt"])
     sc = RW.score(out.split("Assistant:", 1)[-1])
     try: got = RW.actions_of(json.loads(RW.clean(out.split("Assistant:", 1)[-1])))
     except Exception: got = []
     pl.append((sc["valid"], sc["valid"] and _in_order(row["must"], got)))
     print(("OK  " if pl[-1][1] else ("VALID" if pl[-1][0] else "FAIL ")), row["prompt"][:70], "->", got[:6])
 print(f"plain-wording eval: {len(pl)} | valid (passes every rule) {sum(v for v, _ in pl)} | has the needed actions in order {sum(o for _, o in pl)}")
+del _engine, _model                    # free the GPU for later cells (RL, self-improvement)
+torch.cuda.empty_cache()
 print("\\nTry it yourself:")
 !cd /content/nanochat && python -m scripts.chat_cli -i sft -p "Which OOA action would I use to read a CSV file into a table?" -t 0.2
 ''')
