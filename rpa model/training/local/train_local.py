@@ -109,6 +109,8 @@ def main():
     ap.add_argument("--eval-every", type=int, default=100, help="validation every N steps (costly on a CPU)")
     ap.add_argument("--no-compile", action="store_true", default=(os.name == "nt"),
                     help="run without torch.compile (automatic on Windows, which has no compiler for it)")
+    ap.add_argument("--threads", type=int, default=0, help="CPU threads for training (0 = all; fewer keeps the PC usable)")
+    ap.add_argument("--low-priority", action="store_true", help="run training at low priority so the PC stays responsive")
     ap.add_argument("--check", action="store_true", help="only check files and the GPU, do not train")
     ap.add_argument("--allow-cpu", action="store_true", help="train without a GPU (days; only for testing)")
     a = ap.parse_args()
@@ -175,7 +177,7 @@ def main():
         print("previous model kept in", keep)
 
     # one CPU thread is right next to a GPU, but on a CPU-only run it would leave all other cores idle
-    env = dict(os.environ, NANOCHAT_BASE_DIR=str(base), PYTHONUTF8="1", PYTHONIOENCODING="utf-8", OMP_NUM_THREADS=("1" if gpu else str(os.cpu_count() or 4)),
+    env = dict(os.environ, NANOCHAT_BASE_DIR=str(base), PYTHONUTF8="1", PYTHONIOENCODING="utf-8", OMP_NUM_THREADS=("1" if gpu else str(a.threads or os.cpu_count() or 4)),
                NANOCHAT_DTYPE=("bfloat16" if gpu and torch.cuda.get_device_capability() >= (8, 0) else
                                "float16" if gpu else "float32"))
     total = 32768                                           # tokens per optimizer step, same as Colab
@@ -192,8 +194,14 @@ def main():
     print("dtype:", env["NANOCHAT_DTYPE"], "| log:", log, "\n" + " ".join(cmd) + "\n")
     t0 = time.time()
     with open(log, "w", encoding="utf-8") as lf:
+        prio = {}
+        if a.low_priority:                                   # the PC stays usable while it trains
+            if os.name == "nt":
+                prio["creationflags"] = 0x00004000           # BELOW_NORMAL_PRIORITY_CLASS
+            else:
+                prio["preexec_fn"] = lambda: os.nice(10)
         p = subprocess.Popen(cmd, cwd=nano, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-                             encoding="utf-8", errors="replace")   # nanochat prints characters like the square-root sign
+                             encoding="utf-8", errors="replace", **prio)   # nanochat prints characters like the square-root sign
         for line in p.stdout:
             sys.stdout.write(line)
             lf.write(line)

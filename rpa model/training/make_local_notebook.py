@@ -21,6 +21,7 @@ Run the cells from top to bottom (Shift+Enter). Works on Windows and Linux, with
 |---|---|---|
 | NVIDIA RTX 20xx / GTX 16xx or newer | **full training** from the pretrained base model (same recipe as Colab) | about 1-2 h |
 | no graphics card | **top-up**: a short round from the current model on your feedback + training data | about 2-2.5 h on 4 cores |
+| no graphics card, `MODE = "long"` in cell 1 | **long run**: the full Colab-size training in 10 saved chunks, at low priority so the PC stays usable; resumes after a restart | about 1-1.5 days on 4 cores |
 
 Either way the new model is scored on the same 20 everyday requests and **installed only if it is better** than the
 current one (the old one is kept in `nanochat_base/old_model_<date>`). Cell 6 starts the assistant in your browser.
@@ -32,7 +33,9 @@ Jupyter extensions) or Jupyter, and pick a Python 3.10+ kernel. Internet is need
 code(f'''
 #@title 1. Settings
 DRIVE_FOLDER_ID = "{FOLDER_ID}"     # Google Drive folder ooa-nanochat (shared as "anyone with the link")
-MODE = "auto"              # "auto": full training with an NVIDIA GPU, top-up without; or force "full" / "topup"
+MODE = "auto"              # "auto": "full" with an NVIDIA GPU, "topup" without. Or choose:
+                           #   "long"  : Colab-size training on a CPU, day and night, in 10 saved chunks (resumable)
+                           #   "full"  : Colab-size training in one go (GPU)    "topup": short round from the current model
 TOPUP_STEPS = 200          # top-up length (CPU: about 2-2.5 h on 4 cores)
 FULL_STEPS = 2500          # full training length (same as Colab)
 REPLACE_LOCAL_MODEL = False   # True: replace this PC's model with the newest one from Drive (the old one is kept)
@@ -128,8 +131,8 @@ if t.returncode != 0:
     raise SystemExit("PyTorch does not load:\\n" + err)
 print("PyTorch", t.stdout.strip())
 CUDA = GPU and t.stdout.strip().endswith("True")
-MODE_NOW = MODE if MODE in ("full", "topup") else ("full" if CUDA else "topup")
-DEVICE_BATCH = 4 if (not CUDA or GPU_MEM >= 10) else (2 if GPU_MEM >= 6 else 1)
+MODE_NOW = MODE if MODE in ("full", "topup", "long") else ("full" if CUDA else "topup")
+DEVICE_BATCH = (2 if MODE_NOW == "long" else 4) if not CUDA else (4 if GPU_MEM >= 10 else 2 if GPU_MEM >= 6 else 1)
 print("training mode:", MODE_NOW, "| device batch:", DEVICE_BATCH)
 
 # the desktop launcher and the nightly top-up use the same Python as this notebook
@@ -219,7 +222,7 @@ for name in SFT:
     fetch(f"sft/{name}", ROOT / "sft" / name, refresh=REFRESH_DATA)
 
 # full training starts from the pretrained base model
-if MODE_NOW == "full":
+if MODE_NOW in ("full", "long"):
     s = newest_pair("nanochat_base/base_checkpoints/d8")
     assert s, "no pretrained base model on Drive (nanochat_base/base_checkpoints/d8)"
     for name in (f"model_{s}.pt", f"meta_{s}.json", f"optim_{s}_rank0.pt"):
@@ -230,15 +233,21 @@ print("downloads done")
 
 code('''
 #@title 4. Check everything is in place
-TOPUP = [sys.executable, str(ROOT / "training" / "local" / "topup_local.py"), "--rpa", str(ROOT), "--mode", MODE_NOW,
-         "--steps", str(FULL_STEPS if MODE_NOW == "full" else TOPUP_STEPS), "--device-batch", str(DEVICE_BATCH)]
+if MODE_NOW == "long":     # 10 saved chunks; run cell 5 again after any interruption to continue
+    TOPUP = [sys.executable, str(ROOT / "training" / "local" / "train_long.py"), "--rpa", str(ROOT),
+             "--chunks", "10", "--chunk-steps", str(max(1, FULL_STEPS // 10)), "--device-batch", str(DEVICE_BATCH)]
+else:
+    TOPUP = [sys.executable, str(ROOT / "training" / "local" / "topup_local.py"), "--rpa", str(ROOT), "--mode", MODE_NOW,
+             "--steps", str(FULL_STEPS if MODE_NOW == "full" else TOPUP_STEPS), "--device-batch", str(DEVICE_BATCH)]
 r = subprocess.run(TOPUP + ["--check"])
 print("\\nOK: run cell 5" if r.returncode == 0 else "\\nfix the lines marked ! above, then run this cell again")
 ''')
 
 code('''
 #@title 5. Train, test, and install the new model only if it is better
-# Keep the PC on and awake. You can stop with the stop button: the current model is only replaced at the very end.
+# Keep the PC on and plugged in. The current model is only replaced at the very end, after scoring.
+# MODE "long": each finished chunk is saved; after a stop, restart or crash just run this cell again to continue.
+# It runs at low priority with one CPU core left free, so you can keep using the PC (slower, but smooth).
 p = subprocess.Popen(TOPUP, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
 try:
     for line in p.stdout:

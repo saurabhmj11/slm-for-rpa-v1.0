@@ -124,3 +124,14 @@ only a little slower: measured about 35-40 s per step on 4 cores, so a 200-step 
 Use the assistant during the day and click **Accept** (the flow was right), **Edit** (fix it and save: the most
 valuable signal) or **Reject**. Every round trains on all Accept/Edit answers that pass the platform's rules
 (5x weight), so the requests you actually use get better first. Rejected requests are not trained on.
+
+---
+
+# Long run on a PC without a GPU (Colab-size training, day and night)
+
+`train_long.py` does the full Colab training (2500 steps from the pretrained base model) on a CPU, split into 10
+chunks of 250 steps that are each saved. A restart, update or sleep loses at most the chunk in progress: run it again
+and it continues. It runs at low priority with one CPU core left free and 2 rows in memory at a time (about 4-5 GB
+RAM; `--device-batch 1` about 3 GB), so the PC stays usable. About 1-1.5 days on 4 cores, less with more cores.
+At the end the result is scored against the assistant's model and installed only if it is better.
+Easiest: the notebook `ooa_local_pc.ipynb` with `MODE = "long"` in cell 1 (it downloads the base model).
