@@ -28,6 +28,44 @@ def test_unknown_fixed_setting_dropped_data_key_kept():
     assert "header" not in args and "zzz_data" in args, args
 
 
+
+
+def test_missing_open_step_added():
+    f, notes = repair.repair(flow([], [{"id": "s1", "action": "ooa.excel/row_count", "description": "n",
+                                        "out": {"count": "count"}}]), CAT)
+    assert [s["action"] for s in f["steps"]] == ["ooa.excel/open", "ooa.excel/row_count"], f["steps"]
+    assert f["steps"][0]["args"] == {"path": "$workbook_path"} and any(v["name"] == "workbook_path" for v in f["variables"])
+    assert len({s["id"] for s in f["steps"]}) == 2 and any("missing" in n for n in notes), notes
+
+
+def test_open_step_not_added_when_already_open():
+    steps = [{"id": "s1", "action": "ooa.excel/open", "description": "o", "args": {"path": "$p"}},
+             {"id": "s2", "action": "ooa.excel/row_count", "description": "n"}]
+    f, notes = repair.repair(flow([{"name": "p", "type": "String", "direction": "input"}], steps), CAT)
+    assert [s["action"] for s in f["steps"]] == ["ooa.excel/open", "ooa.excel/row_count"] and not notes, notes
+
+
+def test_missing_save_added_before_close():
+    steps = [{"id": "s1", "action": "ooa.excel/open", "description": "o", "args": {"path": "$p"}},
+             {"id": "s2", "action": "ooa.excel/write_table", "description": "w", "args": {"table": "$t"}},
+             {"id": "s3", "action": "ooa.excel/close", "description": "c"}]
+    f, notes = repair.repair(flow([{"name": "p", "type": "String", "direction": "input"},
+                                   {"name": "t", "type": "Table", "direction": "input"}], steps), CAT)
+    assert [s["action"].split("/")[1] for s in f["steps"]] == ["open", "write_table", "save", "close"], f["steps"]
+
+
+def test_no_save_when_only_reading_or_already_saved():
+    read = [{"id": "s1", "action": "ooa.excel/open", "description": "o", "args": {"path": "$p"}},
+            {"id": "s2", "action": "ooa.excel/get_all_cells", "description": "r"}]
+    f, notes = repair.repair(flow([{"name": "p", "type": "String", "direction": "input"}], read), CAT)
+    assert len(f["steps"]) == 2 and not notes, notes
+    saved = [{"id": "s1", "action": "ooa.word/open", "description": "o", "args": {"path": "$p"}},
+             {"id": "s2", "action": "ooa.word/add_paragraph", "description": "a", "args": {"text": "$p"}},
+             {"id": "s3", "action": "ooa.word/close", "description": "c", "args": {"save": True}}]
+    f, notes = repair.repair(flow([{"name": "p", "type": "String", "direction": "input"}], saved), CAT)
+    assert len(f["steps"]) == 3 and not notes, notes
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

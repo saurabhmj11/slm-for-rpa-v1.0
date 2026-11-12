@@ -28,7 +28,7 @@ HERE = Path(__file__).resolve().parent
 RPA = HERE.parent.parent                                   # "rpa model"
 REQUIRED_SFT = ["train_flows.jsonl", "train_catalog.jsonl", "synth_train.jsonl", "synth_pattern.jsonl", "val.jsonl"]
 OPTIONAL_SFT = ["self_improved.jsonl", "hard_fixed.jsonl", "feedback_train.jsonl", "natural_train.jsonl", "core_train.jsonl",
-                "chains_train.jsonl", "combos_train.jsonl"]
+                "chains_train.jsonl", "combos_train.jsonl", "notask_train.jsonl"]
 NANOCHAT_COMMIT = "92d63d4"
 
 
@@ -62,6 +62,10 @@ _combos = "{d}/combos_train.jsonl"
 if _os.path.exists(_combos):
     train_tasks += [OOADialogues(_combos)] * ({a.core_repeat} * {a.epochs})
 print0(f"combinations file in the mix: {{_os.path.exists(_combos)}}")
+_notask = "{d}/notask_train.jsonl"   # questions / chat / pasted errors -> short text reply, not a flow
+if _os.path.exists(_notask):
+    train_tasks += [OOADialogues(_notask)] * ({a.core_repeat} * {a.epochs})
+print0(f"not-a-task file in the mix: {{_os.path.exists(_notask)}}")
 if {a.smoltalk} > 0:
     train_tasks.append(SmolTalk(split="train", stop={a.smoltalk}))
 train_dataset = TaskMixture(train_tasks)
@@ -186,7 +190,7 @@ def main():
         print("previous model kept in", keep)
 
     # one CPU thread is right next to a GPU, but on a CPU-only run it would leave all other cores idle
-    env = dict(os.environ, NANOCHAT_BASE_DIR=str(base), PYTHONUTF8="1", PYTHONIOENCODING="utf-8", OMP_NUM_THREADS=("1" if gpu else str(a.threads or os.cpu_count() or 4)),
+    env = dict(os.environ, OOA_TRAINING_DIR=str(RPA / "training"), NANOCHAT_BASE_DIR=str(base), PYTHONUTF8="1", PYTHONIOENCODING="utf-8", OMP_NUM_THREADS=("1" if gpu else str(a.threads or os.cpu_count() or 4)),
                NANOCHAT_DTYPE=("bfloat16" if gpu and torch.cuda.get_device_capability() >= (8, 0) else
                                "float16" if gpu else "float32"))
     total = 32768                                           # tokens per optimizer step, same as Colab

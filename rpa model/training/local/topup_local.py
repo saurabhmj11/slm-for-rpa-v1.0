@@ -35,11 +35,13 @@ MIX = {
     "core_train.jsonl": ("core_train.jsonl", None),
     "chains_train.jsonl": ("chains_train.jsonl", None),        # multi-step chains across tools: all of them, every round
     "combos_train.jsonl": ("combos_train.jsonl", None),        # many different combinations, loops, conditions: all
+    "notask_train.jsonl": ("notask_train.jsonl", None),        # questions / chat -> a short text reply, not a flow
     "synth_train.jsonl": ("synth_train.jsonl", 2000),
     "synth_pattern.jsonl": ("synth_pattern.jsonl", 800),
     "train_flows.jsonl": ("train_flows.jsonl", None),
     "train_catalog.jsonl": ("train_catalog.jsonl", 400),
 }
+REPEAT = {"notask_train.jsonl": 2}                            # small file: shown twice so the habit sticks
 
 
 def newest(d8):
@@ -233,7 +235,7 @@ def main():
         if name == "natural_train.jsonl" and len(rows) > 200:
             val, rows = rows[:100], rows[100:]                 # held out: watched during training, never trained on
         rows = rows if n is None else rows[:n]
-        (ws / name).write_text("".join(rows), encoding="utf-8")
+        (ws / name).write_text("".join(rows * REPEAT.get(name, 1)), encoding="utf-8")
     if not val:
         val = read_rows(sft / "val.jsonl")[:150] if (sft / "val.jsonl").exists() else []
     if fb_rows:

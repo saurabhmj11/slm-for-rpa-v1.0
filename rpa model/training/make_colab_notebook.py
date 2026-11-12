@@ -259,6 +259,10 @@ _combos = "{DRIVE_DIR}/sft/combos_train.jsonl"   # many different combinations, 
 if _os.path.exists(_combos):
     train_tasks += [OOADialogues(_combos)] * ({CORE_REPEAT} * {SFT_EPOCHS})
 print0(f"combinations file in the mix: {{_os.path.exists(_combos)}}")
+_notask = "{DRIVE_DIR}/sft/notask_train.jsonl"   # questions / chat / pasted errors -> short text reply, not a flow
+if _os.path.exists(_notask):
+    train_tasks += [OOADialogues(_notask)] * ({CORE_REPEAT} * {SFT_EPOCHS})
+print0(f"not-a-task file in the mix: {{_os.path.exists(_notask)}}")
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)

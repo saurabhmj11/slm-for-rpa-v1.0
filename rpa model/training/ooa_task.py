@@ -8,8 +8,37 @@ Each JSONL line: {"messages": [{"role": "user"|"assistant", "content": str}, ...
  - roles must alternate user, assistant, ...; assistant content is the minified Flow JSON or a short reply
 Format checked against nanochat tasks/smoltalk.py and Tokenizer.render_conversation (commit 92d63d4).
 """
+import importlib.util
 import json
+import os
 from tasks.common import Task
+
+_FIXERS = {}
+
+
+def _session_fixer(data_path):
+    """repair.session_fix + the catalog next to the data file, or None. Training flows that use Excel / Word / a
+    browser without opening it first, or change a file without saving it, cannot run; they are corrected on load
+    so older data files teach the runnable form too."""
+    cat_path = os.path.join(os.path.dirname(os.path.abspath(data_path)), "catalog.jsonl")
+    if cat_path in _FIXERS:
+        return _FIXERS[cat_path]
+    fixer = None
+    dirs = [os.environ.get("OOA_TRAINING_DIR"), "/content/ooa", os.path.dirname(os.path.abspath(__file__))]
+    rp = next((os.path.join(d, "repair.py") for d in dirs if d and os.path.exists(os.path.join(d, "repair.py"))), None)
+    if rp and os.path.exists(cat_path):
+        try:
+            spec = importlib.util.spec_from_file_location("ooa_repair_for_data", rp)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            with open(cat_path, encoding="utf-8") as f:
+                cat = {e["id"]: e for e in (json.loads(l) for l in f if l.strip())}
+            if hasattr(mod, "session_fix"):
+                fixer = lambda flow: mod.session_fix(flow, cat)
+        except Exception as ex:          # never stop training over this
+            print(f"note: training flows not session-checked ({ex})")
+    _FIXERS[cat_path] = fixer
+    return fixer
 
 
 class OOADialogues(Task):
@@ -17,6 +46,20 @@ class OOADialogues(Task):
         super().__init__(**kwargs)
         with open(path, encoding="utf-8") as f:
             self.rows = [json.loads(l) for l in f if l.strip()]
+        fix, fixed = _session_fixer(path), 0
+        for row in self.rows if fix else []:
+            m = row["messages"][-1]
+            if m.get("role") != "assistant" or not m.get("content", "").lstrip().startswith("{"):
+                continue
+            try:
+                flow = json.loads(m["content"])
+                if isinstance(flow, dict) and isinstance(flow.get("steps"), list) and fix(flow):
+                    m["content"] = json.dumps(flow, separators=(",", ":"), ensure_ascii=False)
+                    fixed += 1
+            except Exception:
+                continue
+        if fixed:
+            print(f"{os.path.basename(path)}: {fixed} flows given their missing open / save step")
 
     @property
     def eval_type(self):

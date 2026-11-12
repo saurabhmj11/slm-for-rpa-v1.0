@@ -1,6 +1,8 @@
 """Deterministic repair of near-miss flows before verification: snap misspelled action ids and input/output names to
 the closest real one (only when very close), so small typos do not cost an escalation. Never invents anything new and
-never adds or removes steps. Returns (flow, notes)."""
+never removes steps. The only steps it may add are session steps the flow cannot run without (session_fix): the missing
+open step before Excel / Word / browser steps that work on an open session, and the missing save step after Excel / Word
+changes (nothing is saved automatically). Returns (flow, notes)."""
 import copy, difflib, re
 
 
@@ -47,8 +49,112 @@ def repair(flow, cat):
                         d.pop(k)
     _fix_ids(flow, notes)
     _fix_variable_names(flow, notes)
+    session_fix(flow, cat, notes)
     _declare_used_inputs(flow, notes, walk)
     return flow, notes
+
+
+# toolkit -> (open action, its required input, variable name to declare for it)
+OPENERS = {"ooa.excel": ("ooa.excel/open", "path", "workbook_path"),
+           "ooa.word": ("ooa.word/open", "path", "document_path"),
+           "ooa.browser": ("ooa.browser/open", "url", "url")}
+OPENS = {"ooa.excel/open", "ooa.excel/create_workbook", "ooa.word/open", "ooa.word/create_document", "ooa.browser/open"}
+
+
+CHANGES = re.compile(r"^(write|set|add|replace|insert|append|delete|clear|format|rename|merge|sort|create_(table|chart|pivot)|"
+                     r"copy_sheet|remove|fill|hide|unhide|protect|unprotect|paste|move_sheet|auto_?fit)")
+SAVES = {"ooa.excel": {"ooa.excel/save", "ooa.excel/save_as"}, "ooa.word": {"ooa.word/save", "ooa.word/save_as"}}
+
+
+def session_fix(flow, cat, notes=None):
+    """Make Excel / Word / browser session use runnable: add a missing open step, and a missing save step after changes.
+    Also used by the data generators so training flows are runnable too. Returns notes."""
+    notes = [] if notes is None else notes
+    _add_missing_open(flow, notes, cat)
+    _add_missing_save(flow, notes, cat)
+    return notes
+
+
+def _add_missing_save(flow, notes, cat):
+    """An Excel / Word step changes the open file but nothing saves it (save, save as, or close with save on):
+    add the save step at the end, before that toolkit's closing step when the flow ends with one."""
+    steps = flow.get("steps")
+    if not isinstance(steps, list):
+        return
+    def all_steps(nodes):
+        for n in nodes or []:
+            if isinstance(n, dict):
+                yield n
+                for k in ("children", "else", "finally"):
+                    yield from all_steps(n.get(k) if isinstance(n.get(k), list) else [])
+                for c in n.get("catch") or []:
+                    if isinstance(c, dict):
+                        yield from all_steps(c.get("children"))
+    flat = list(all_steps(steps))
+    for t, saves in SAVES.items():
+        acts = [(n.get("action") or "") for n in flat]
+        changed = [k for k, a in enumerate(acts) if isinstance(a, str) and a.startswith(t + "/") and a not in OPENS
+                   and CHANGES.match(a.split("/", 1)[1])]
+        if not changed:
+            continue
+        last = changed[-1]
+        saved = any(acts[k] in saves or (acts[k] == t + "/close" and str((flat[k].get("args") or {}).get("save", "")).lower()
+                                         in ("true", "yes", "1")) for k in range(last + 1, len(flat)))
+        if saved or (t + "/save") not in cat:
+            continue
+        step = {"id": "save_" + t.split(".")[-1], "action": t + "/save",
+                "description": cat[t + "/save"]["description"][:140].rstrip("."), "args": {}}
+        pos = len(steps)
+        while pos > 0 and isinstance(steps[pos - 1], dict) and steps[pos - 1].get("action") == t + "/close":
+            pos -= 1
+        steps.insert(pos, step)
+        notes.append(f"added the missing {t}/save step (the changes would not be saved)")
+
+
+def _add_missing_open(flow, notes, cat):
+    """Excel/Word/browser steps that act on an open session (they take 'session' and no file path of their own)
+    used before any open/create step of that toolkit: insert the open step right before the first one."""
+    opened = set()
+
+    def needs_open(a):
+        e = cat.get(a)
+        if not e or a in OPENS:
+            return False
+        names = {i["name"] for i in e["inputs"]}
+        req = {i["name"] for i in e["inputs"] if i["required"]}
+        return "session" in names and "path" not in req
+
+    def visit(nodes):
+        if not isinstance(nodes, list):
+            return
+        k = 0
+        while k < len(nodes):
+            n = nodes[k]
+            if not isinstance(n, dict):
+                k += 1
+                continue
+            a = n.get("action") if isinstance(n.get("action"), str) else ""
+            t = a.split("/")[0]
+            if a in OPENS:
+                opened.add(t)
+            elif t in OPENERS and t not in opened and needs_open(a) and OPENERS[t][0] in cat:
+                op, inp, var = OPENERS[t]
+                variables = flow.setdefault("variables", [])
+                if not any(isinstance(v, dict) and v.get("name") == var for v in variables):
+                    variables.append({"name": var, "type": "String", "direction": "input", "required": True,
+                                      "description": "Added by repair: the file or page to open first."})
+                nodes.insert(k, {"id": "open_" + t.split(".")[-1], "action": op,
+                                 "description": cat[op]["description"][:140].rstrip("."), "args": {inp: "$" + var}})
+                notes.append(f"added the missing {op} step before {a}")
+                opened.add(t)
+                k += 1
+            for key in ("children", "else", "finally"):
+                visit(n.get(key))
+            for c in n.get("catch") or []:
+                if isinstance(c, dict):
+                    visit(c.get("children"))
+            k += 1
+    visit(flow.get("steps"))
 
 
 def _contained_match(k, valid, d, e, key):
