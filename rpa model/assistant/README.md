@@ -128,3 +128,16 @@ these are set:
 `Content-Type: application/json` and the header `X-OOA-Assistant: 1` (the page sends it), so a web site you visit cannot
 make it run flows. During a run every file path an action opens must be inside the sandbox folder, even paths built
 at run time. Build requests are limited to 500 characters and 6 steps: longer ones are not sent to the model.
+
+## Use your model inside ONEOFFICEAUTOMATION (One Agent Studio)
+
+Double-click **start_platform.bat**: it downloads the platform from GitHub (first time; needs Git and Java 21 and
+says how to install them), then starts the platform (http://localhost:8720) and this assistant
+(http://127.0.0.1:8765), each in its own window. The first platform start builds it (10-20 minutes).
+
+The assistant answers OpenAI-style requests at `http://127.0.0.1:8765/v1/chat/completions` (only from this
+computer), so Studio's **Assistant** can use your trained model. Once, in Studio: sun icon > **One Model
+Connections...** > **+ Connection**: name `ooa`, provider **OpenAI-compatible**, model `ooa-assistant`,
+**No key (local model)**, endpoint `http://127.0.0.1:8765/v1`, tick **Default**, **Save**. Then **Assistant >
+Build from a description**, describe the job, **Generate steps**, review, **Insert into the agent**. Answers are
+repaired (missing open / save steps) and checked before Studio shows them; Studio checks them again.

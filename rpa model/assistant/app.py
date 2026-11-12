@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT / "training"))
 
 from knowledge import Knowledge              # noqa: E402
 from runner_bridge import RunnerBridge       # noqa: E402
-from ooa_server import Router, Policy        # noqa: E402
+from ooa_server import Router, Policy, chat_completion        # noqa: E402
 
 STATIC = HERE / "static"
 INGEST = ROOT / "training" / "ingest_feedback.py"
@@ -307,7 +307,11 @@ def make_handler(app: Assistant):
                 raise ApiError(403, "forbidden: requests from other web sites are refused")
             if method == "POST":
                 ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-                if ctype != "application/json" or self.headers.get(CSRF_HEADER) != "1":
+                # /v1/chat/completions is for programs on this computer (One Agent Studio's model connection), which
+                # do not send our header. Still safe: only JSON from this computer, and a web page cannot send JSON
+                # to it without the browser asking first (we never say yes), so other sites cannot reach it.
+                openai = urlparse(self.path).path == "/v1/chat/completions" and origin is None
+                if ctype != "application/json" or (self.headers.get(CSRF_HEADER) != "1" and not openai):
                     raise ApiError(403, f"forbidden: POST needs Content-Type application/json and {CSRF_HEADER}: 1")
 
         def _dispatch(self, method):
@@ -319,6 +323,9 @@ def make_handler(app: Assistant):
                     return self._static("index.html")
                 if path.startswith("/static/"):
                     return self._static(path[len("/static/"):])
+                if path == "/v1/models":          # OpenAI-compatible model list (for model connection set-up screens)
+                    return self._send(200, {"object": "list", "data": [{"id": "ooa-assistant", "object": "model",
+                                                                        "owned_by": "local"}]})
                 k = app.knowledge
                 if path == "/api/status":
                     return self._send(200, app.status())
@@ -363,6 +370,10 @@ def make_handler(app: Assistant):
                 raise ApiError(400, "invalid JSON body")
             if not isinstance(body, dict):
                 raise ApiError(400, "the body must be a JSON object")
+            if path == "/v1/chat/completions":
+                with app.model_lock:              # one generation at a time, like the Build tab
+                    code, out = chat_completion(app.router, body)
+                return self._send(code, out)
             routes = {
                 "/api/build": app.build,
                 "/api/explain": lambda b: app.knowledge.explain_flow(_flow(b, "flow")),

@@ -259,6 +259,30 @@ class CloudBackend:
         return "".join(b.get("text", "") for b in data.get("content", []))
 
 
+def chat_completion(router, body):
+    """OpenAI-style /v1/chat/completions on the router: (http_status, response). Used by this server and by the
+    PC assistant (assistant/app.py), so One Agent Studio's Assistant can use the model as an OpenAI-compatible
+    One Model Connection."""
+    msgs = body.get("messages") if isinstance(body, dict) else None
+    if not isinstance(msgs, list) or not [m for m in msgs if isinstance(m, dict) and m.get("role") == "user"]:
+        return 400, {"error": "send at least one user message"}
+    request, system, assistant, existing, full_user = parse_messages(msgs)
+    res = router.run(request, system, assistant, existing, full_user)
+    if res["verified"]:
+        content = res["flow"]
+    elif assistant:   # Studio reads steps/notes: an empty answer with the honest reason is shown to the user
+        content = json.dumps({"variables": [], "steps": [], "notes": "No flow was returned: " + res["reason"] + ". " + " ".join(res.get("problems", [])[:2])})
+    else:
+        content = json.dumps({"error": res["reason"], "problems": res.get("problems", [])})
+    pt = sum(len(str(m.get("content", ""))) for m in msgs if isinstance(m, dict)) // 4
+    return 200, {"id": "ooa-" + str(int(time.time() * 1000)), "object": "chat.completion",
+                 "created": int(time.time()), "model": body.get("model") or "ooa-assistant",
+                 "choices": [{"index": 0, "finish_reason": "stop" if res["verified"] else "length",
+                              "message": {"role": "assistant", "content": content}}],
+                 "usage": {"prompt_tokens": pt, "completion_tokens": len(content) // 4, "total_tokens": pt + len(content) // 4},
+                 "ooa": {k: v for k, v in res.items() if k != "flow"}}
+
+
 def make_handler(router):
     class H(BaseHTTPRequestHandler):
         def _send(self, code, obj):
@@ -278,23 +302,7 @@ def make_handler(router):
             except Exception:
                 return self._send(400, {"error": "invalid JSON body"})
             if self.path == "/v1/chat/completions":
-                if not [m for m in body.get("messages", []) if m.get("role") == "user"]:
-                    return self._send(400, {"error": "send at least one user message"})
-                request, system, assistant, existing, full_user = parse_messages(body["messages"])
-                res = router.run(request, system, assistant, existing, full_user)
-                if res["verified"]:
-                    content = res["flow"]
-                elif assistant:   # Studio reads steps/notes: an empty answer with the honest reason is shown to the user
-                    content = json.dumps({"variables": [], "steps": [], "notes": "No flow was returned: " + res["reason"] + ". " + " ".join(res.get("problems", [])[:2])})
-                else:
-                    content = json.dumps({"error": res["reason"], "problems": res.get("problems", [])})
-                pt = sum(len(str(m.get("content", ""))) for m in body["messages"]) // 4
-                return self._send(200, {"id": "ooa-" + str(int(time.time() * 1000)), "object": "chat.completion",
-                                        "created": int(time.time()), "model": body.get("model") or "ooa-assistant",
-                                        "choices": [{"index": 0, "finish_reason": "stop" if res["verified"] else "length",
-                                                     "message": {"role": "assistant", "content": content}}],
-                                        "usage": {"prompt_tokens": pt, "completion_tokens": len(content) // 4, "total_tokens": pt + len(content) // 4},
-                                        "ooa": {k: v for k, v in res.items() if k != "flow"}})
+                return self._send(*chat_completion(router, body))
             if self.path == "/v1/feedback":
                 return self._send(200, router.feedback(body))
             self._send(404, {"error": "not found"})
