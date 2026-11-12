@@ -68,6 +68,57 @@ def read_rows(p):
 TEST_SETS = [("plain_requests.jsonl", "set 1 (20 everyday requests)"), ("plain_requests_2.jsonl", "set 2 (15 more, never tuned on)")]
 
 
+# Modules for focused rounds (--focus): a row belongs to a module by what its answer does.
+GROUPS = {"files": ("ooa.file/", "ooa.folder/"), "tables": ("ooa.csv/", "ooa.datatable/"), "excel": ("ooa.excel/",),
+          "word": ("ooa.word/",), "pdf": ("ooa.pdf/",), "browser": ("ooa.browser/",), "email": ("ooa.email/",)}
+MODULES = ["notask", *GROUPS, "chains", "loops", "conditions"]
+
+
+def flow_actions(answer):
+    """Every action id in a flow answer (nested too), or None when the answer is not a flow."""
+    if not answer.lstrip().startswith("{"):
+        return None
+    try:
+        flow = json.loads(answer)
+    except Exception:
+        return None
+    out = []
+    def walk(nodes):
+        for n in nodes or []:
+            if isinstance(n, dict):
+                if isinstance(n.get("action"), str):
+                    out.append(n["action"])
+                for k in ("children", "else", "finally"):
+                    walk(n.get(k) if isinstance(n.get(k), list) else [])
+                for c in n.get("catch") or []:
+                    if isinstance(c, dict):
+                        walk(c.get("children"))
+    walk(flow.get("steps") if isinstance(flow, dict) else None)
+    return out
+
+
+def module_of(row_text):
+    """The module a training row teaches, or None (catalog questions, mixed long flows ...)."""
+    try:
+        msgs = json.loads(row_text)["messages"]
+    except Exception:
+        return None
+    acts = flow_actions(msgs[-1].get("content", ""))
+    if acts is None:
+        return "notask"
+    if "core/loop" in acts:
+        return "loops"
+    if "core/if" in acts:
+        return "conditions"
+    plain = [a for a in acts if not a.startswith("core/")]
+    groups = {g for a in plain for g, pre in GROUPS.items() if a.startswith(pre)}
+    if len(groups) == 1:
+        return groups.pop()
+    if len(groups) >= 2:
+        return "chains"
+    return None
+
+
 def test_rows(rpa):
     out = []
     for i, (name, _) in enumerate(TEST_SETS, 1):
@@ -87,8 +138,9 @@ def summary(details):
     return " | ".join(parts)
 
 
-def score(rpa, model_dir, catalog, port, log):
-    """Start the assistant on model_dir and score every test request (both sets): (right, verified, details)."""
+def score(rpa, model_dir, catalog, port, log, rows=None):
+    """Start the assistant on model_dir and score every test request (both sets), or the given rows:
+    (right, verified, details). A row with notask=True is right when the model answers with text, not a flow."""
     sys.path.insert(0, str(rpa / "assistant"))
     import basic_test as B
     data = tempfile.mkdtemp(prefix="ooa_eval_")
@@ -110,14 +162,17 @@ def score(rpa, model_dir, catalog, port, log):
                 continue
         else:
             raise SystemExit(f"the assistant did not answer within 10 minutes (see {log})")
-        rows = test_rows(rpa)
+        rows = test_rows(rpa) if rows is None else rows
         right = verified = 0
         details = []
         for r in rows:
             d = B.build(port, r["prompt"])
             got = B.actions((d.get("flow") or {}).get("steps"))
             ok = bool(d.get("verified"))
-            rt = ok and B.in_order(r["must"], got)
+            if r.get("notask"):
+                rt = not ok and any("not read this as a task" in str(x) for x in d.get("problems") or [])
+            else:
+                rt = ok and B.in_order(r["must"], got)
             verified += ok
             right += rt
             details.append({"request": r["prompt"], "verified": ok, "right": rt, "set": r["set"],
@@ -145,6 +200,14 @@ def main():
     ap.add_argument("--port", type=int, default=8799, help="port for the scoring runs (not the assistant's 8765)")
     ap.add_argument("--max-forget", type=int, default=1,
                     help="install only if at most this many test requests the current model gets right become wrong")
+    ap.add_argument("--focus", choices=MODULES, default=None,
+                    help="focused round: mostly this module's examples plus a replay of everything else; some of its"
+                         " examples are held out and scored too")
+    ap.add_argument("--focus-share", type=float, default=0.6, help="share of the round's rows from the focus module")
+    ap.add_argument("--holdout", type=int, default=12, help="focus-module examples held out for scoring")
+    ap.add_argument("--auto-steps", action="store_true",
+                    help="focused round: size the round to about --passes passes over its rows (at most --steps)")
+    ap.add_argument("--passes", type=float, default=2.0)
     ap.add_argument("--check", action="store_true", help="only show what would be used")
     a = ap.parse_args()
     full = a.mode == "full"
@@ -231,13 +294,42 @@ def main():
         for need in ("train_flows.jsonl", "train_catalog.jsonl", "synth_train.jsonl", "synth_pattern.jsonl"):
             if not (ws / need).exists():
                 (ws / need).write_text("", encoding="utf-8")
+    picked, module_rows = {}, []
     for name, (src, n) in ({} if full else MIX).items():
         rows = read_rows(sft / src) if (sft / src).exists() else []
         rng.shuffle(rows)
         if name == "natural_train.jsonl" and len(rows) > 200:
             val, rows = rows[:100], rows[100:]                 # held out: watched during training, never trained on
-        rows = rows if n is None else rows[:n]
+        picked[name] = rows if (n is None or a.focus) else rows[:n]
+    if a.focus and picked:
+        focus = {k: [r for r in v if module_of(r) == a.focus][:MIX[k][1] or None] for k, v in picked.items()}
+        other = {k: [r for r in v if module_of(r) != a.focus] for k, v in picked.items()}
+        pool = [(k, r) for k, v in focus.items() for r in v]
+        rng.shuffle(pool)
+        held = pool[:a.holdout]                                # never trained on: scored to see if this module improved
+        held_set = {id(r) for _, r in held}
+        for _, r in held:
+            msgs = json.loads(r)["messages"]
+            acts = flow_actions(msgs[-1]["content"])
+            module_rows.append({"prompt": msgs[0]["content"] if msgs[0]["role"] == "user" else msgs[1]["content"],
+                                "must": [x for x in (acts or []) if x.split("/")[-1] not in ("open", "save", "close")],
+                                "notask": acts is None, "set": "module"})
+        n_focus = sum(len(v) for v in focus.values()) - len(held)
+        n_other = int(n_focus * (1 - a.focus_share) / max(a.focus_share, 0.05))
+        total_other = sum(min(len(v), MIX[k][1] or len(v)) for k, v in other.items()) or 1
+        for k in picked:
+            keep_other = other[k][:max(0, round(n_other * min(len(other[k]), MIX[k][1] or len(other[k])) / total_other))]
+            picked[k] = [r for r in focus[k] if id(r) not in held_set] + keep_other
+        print(f"  focus {a.focus}: {n_focus} rows of it + {sum(len(v) for v in picked.values()) - n_focus} replay rows,"
+              f" {len(module_rows)} held out for scoring")
+        if n_focus < 20:
+            raise SystemExit(f"too few {a.focus} examples in the data ({n_focus}); nothing changed")
+    for name, rows in picked.items():
         (ws / name).write_text("".join(rows * REPEAT.get(name, 1)), encoding="utf-8")
+    if a.focus and a.auto_steps:     # about 2 passes: enough to learn the module, not enough to memorise it
+        tokens = sum(len(r) for v in picked.values() for r in v) / 3.2        # ~3.2 characters per token in flow JSON
+        a.steps = max(10, min(a.steps, round(tokens * a.passes / 32768)))
+        print(f"  round size: {a.steps} steps (about {a.passes:g} passes over {sum(len(v) for v in picked.values())} rows)")
     if not val:
         val = read_rows(sft / "val.jsonl")[:150] if (sft / "val.jsonl").exists() else []
     if fb_rows:
@@ -298,19 +390,28 @@ def main():
         print(f"  current model: {summary(b_details)}")
     n_right, n_ver, details = score(rpa, work / "nanochat_base", catalog, a.port, log)
     print(f"  new model    : {summary(details)}")
+    b_mod = n_mod = 0
+    if module_rows:                                            # the focus module's held-out examples, both models
+        b_mod = score(rpa, base, catalog, a.port, log, module_rows)[0]
+        n_mod, _, mod_details = score(rpa, work / "nanochat_base", catalog, a.port, log, module_rows)
+        print(f"  {a.focus} (held-out examples): current model {b_mod}/{len(module_rows)} right, new model {n_mod}/{len(module_rows)}")
 
     was_right = {d["request"] for d in b_details if d.get("right")}
     forgot = [d["request"] for d in details if d["request"] in was_right and not d.get("right")]
     if forgot:
         print(f"  forgot {len(forgot)} request(s) the current model got right:", "; ".join(f[:50] for f in forgot[:5]))
-    better = (n_right, n_ver) > (b_right, b_ver) and len(forgot) <= a.max_forget
+    if module_rows:      # focused round: better on its module AND not worse on the test requests
+        gain = (n_right + n_mod, n_ver) > (b_right + b_mod, b_ver) and n_right >= b_right
+    else:
+        gain = (n_right, n_ver) > (b_right, b_ver)
+    better = gain and len(forgot) <= a.max_forget
     reason = ("new model is BETTER: installing it" if better else
               f"new model forgot {len(forgot)} request(s) it used to get right (limit {a.max_forget}): keeping the current one"
-              if (n_right, n_ver) > (b_right, b_ver) else "new model is not better: keeping the current one")
+              if gain else "new model is not better: keeping the current one")
     print("== 4/4", reason)
     rec = {"time": stamp, "trained_steps": cstep, "from_step": step, "feedback_rows": fb_rows,
            "old_score": [b_right, b_ver], "new_score": [n_right, n_ver], "installed": better, "details": details,
-           "forgot": forgot, "lr": a.lr,
+           "forgot": forgot, "lr": a.lr, "focus": a.focus, "module_score": [b_mod, n_mod, len(module_rows)],
            "tests": n_tests}
     if better:
         new_step = cstep if full else step + cstep              # the old model is moved out of d8 below in any case
