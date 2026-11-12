@@ -251,6 +251,10 @@ _core = "{DRIVE_DIR}/sft/core_train.jsonl"       # everyday requests for the mos
 if _os.path.exists(_core):
     train_tasks += [OOADialogues(_core)] * ({CORE_REPEAT} * {SFT_EPOCHS})
 print0(f"core-actions file in the mix: {{_os.path.exists(_core)}}")
+_chains = "{DRIVE_DIR}/sft/chains_train.jsonl"   # everyday multi-step chains across tools (upload to Drive sft/)
+if _os.path.exists(_chains):
+    train_tasks += [OOADialogues(_chains)] * ({CORE_REPEAT} * {SFT_EPOCHS})
+print0(f"chains file in the mix: {{_os.path.exists(_chains)}}")
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)

@@ -33,6 +33,7 @@ RPA_DEFAULT = HERE.parent.parent
 MIX = {
     "natural_train.jsonl": ("natural_train.jsonl", 3000),
     "core_train.jsonl": ("core_train.jsonl", None),
+    "chains_train.jsonl": ("chains_train.jsonl", None),        # multi-step chains across tools: all of them, every round
     "synth_train.jsonl": ("synth_train.jsonl", 2000),
     "synth_pattern.jsonl": ("synth_pattern.jsonl", 800),
     "train_flows.jsonl": ("train_flows.jsonl", None),

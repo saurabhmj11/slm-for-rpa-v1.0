@@ -216,7 +216,7 @@ else:
     raise SystemExit("no trained chat model found on Drive")
 
 # training data
-SFT = ["natural_train.jsonl", "core_train.jsonl", "synth_train.jsonl", "synth_pattern.jsonl", "train_flows.jsonl",
+SFT = ["natural_train.jsonl", "core_train.jsonl", "chains_train.jsonl", "synth_train.jsonl", "synth_pattern.jsonl", "train_flows.jsonl",
        "train_catalog.jsonl", "val.jsonl", "catalog.jsonl", "self_improved.jsonl", "hard_fixed.jsonl"]
 for name in SFT:
     fetch(f"sft/{name}", ROOT / "sft" / name, refresh=REFRESH_DATA)
