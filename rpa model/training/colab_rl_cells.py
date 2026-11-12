@@ -86,7 +86,10 @@ sft_cmd = (f"python -m scripts.chat_sft --max-seq-len={SFT_SEQ} --device-batch-s
 for r in range(SELF_IMPROVE_ROUNDS):
     print(f"\\n===== self-improvement round {r + 1}/{SELF_IMPROVE_ROUNDS} =====")
     !cd /content/nanochat && python -m scripts.ooa_self_improve --source sft --out {DRIVE_DIR}/sft --seed {100 + r} --num-prompts {SI_PROMPTS} --samples {SI_SAMPLES}
-    shutil.rmtree(os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatsft_checkpoints"), ignore_errors=True)
+    _ck = os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatsft_checkpoints")
+    if os.path.exists(_ck):                      # keep the previous model (never deleted), like cell 7
+        import time as _t
+        shutil.move(_ck, _ck + "_before_" + _t.strftime("%Y%m%d_%H%M%S"))
     !cd /content/nanochat && {sft_cmd}
 print("\\nPass rate on FRESH requests, per round (this is the progress measure):")
 for l in open(f"{DRIVE_DIR}/sft/selfimprove_log.jsonl"):
