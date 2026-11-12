@@ -28,7 +28,7 @@ HERE = Path(__file__).resolve().parent
 RPA = HERE.parent.parent                                   # "rpa model"
 REQUIRED_SFT = ["train_flows.jsonl", "train_catalog.jsonl", "synth_train.jsonl", "synth_pattern.jsonl", "val.jsonl"]
 OPTIONAL_SFT = ["self_improved.jsonl", "hard_fixed.jsonl", "feedback_train.jsonl", "natural_train.jsonl", "core_train.jsonl",
-                "chains_train.jsonl", "combos_train.jsonl", "notask_train.jsonl"]
+                "chains_train.jsonl", "combos_train.jsonl", "notask_train.jsonl", "tools_train.jsonl"]
 NANOCHAT_COMMIT = "92d63d4"
 
 
@@ -66,6 +66,10 @@ _notask = "{d}/notask_train.jsonl"   # questions / chat / pasted errors -> short
 if _os.path.exists(_notask):
     train_tasks += [OOADialogues(_notask)] * ({a.core_repeat} * {a.epochs})
 print0(f"not-a-task file in the mix: {{_os.path.exists(_notask)}}")
+_tools = "{d}/tools_train.jsonl"   # business apps (Google, Microsoft 365, Asana, GitHub, Slack ...)
+if _os.path.exists(_tools):
+    train_tasks += [OOADialogues(_tools)] * ({a.core_repeat} * {a.epochs})
+print0(f"business-apps file in the mix: {{_os.path.exists(_tools)}}")
 if {a.smoltalk} > 0:
     train_tasks.append(SmolTalk(split="train", stop={a.smoltalk}))
 train_dataset = TaskMixture(train_tasks)

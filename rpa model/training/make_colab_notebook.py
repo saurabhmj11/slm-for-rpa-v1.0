@@ -263,6 +263,10 @@ _notask = "{DRIVE_DIR}/sft/notask_train.jsonl"   # questions / chat / pasted err
 if _os.path.exists(_notask):
     train_tasks += [OOADialogues(_notask)] * ({CORE_REPEAT} * {SFT_EPOCHS})
 print0(f"not-a-task file in the mix: {{_os.path.exists(_notask)}}")
+_tools = "{DRIVE_DIR}/sft/tools_train.jsonl"   # business apps (Google, Microsoft 365, Asana, GitHub, Slack ...)
+if _os.path.exists(_tools):
+    train_tasks += [OOADialogues(_tools)] * ({CORE_REPEAT} * {SFT_EPOCHS})
+print0(f"business-apps file in the mix: {{_os.path.exists(_tools)}}")
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)

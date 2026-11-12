@@ -36,6 +36,7 @@ MIX = {
     "chains_train.jsonl": ("chains_train.jsonl", None),        # multi-step chains across tools: all of them, every round
     "combos_train.jsonl": ("combos_train.jsonl", None),        # many different combinations, loops, conditions: all
     "notask_train.jsonl": ("notask_train.jsonl", None),        # questions / chat -> a short text reply, not a flow
+    "tools_train.jsonl": ("tools_train.jsonl", None),          # business apps (Google, Microsoft 365, Asana ...): all
     "synth_train.jsonl": ("synth_train.jsonl", 2000),
     "synth_pattern.jsonl": ("synth_pattern.jsonl", 800),
     "train_flows.jsonl": ("train_flows.jsonl", None),
@@ -70,7 +71,10 @@ TEST_SETS = [("plain_requests.jsonl", "set 1 (20 everyday requests)"), ("plain_r
 
 # Modules for focused rounds (--focus): a row belongs to a module by what its answer does.
 GROUPS = {"files": ("ooa.file/", "ooa.folder/"), "tables": ("ooa.csv/", "ooa.datatable/"), "excel": ("ooa.excel/",),
-          "word": ("ooa.word/",), "pdf": ("ooa.pdf/",), "browser": ("ooa.browser/",), "email": ("ooa.email/",)}
+          "word": ("ooa.word/",), "pdf": ("ooa.pdf/",), "browser": ("ooa.browser/",), "email": ("ooa.email/",),
+          "apps": tuple(f"ooa.{t}/" for t in ("google", "microsoft365", "asana", "azure_devops", "github", "docusign",
+                                              "box", "salesforce", "slack", "snowflake", "databricks", "jira", "servicenow",
+                                              "zendesk", "okta", "workday", "exchange"))}
 MODULES = ["notask", *GROUPS, "chains", "loops", "conditions"]
 
 

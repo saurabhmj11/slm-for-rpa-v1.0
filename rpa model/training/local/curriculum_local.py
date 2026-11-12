@@ -7,7 +7,7 @@ over that module's examples (no memorising), and is scored on BOTH test sets plu
 most one request the model already got right is forgotten. Otherwise the best model so far stays.
 
 Order: easy and separate first, combined last.
-  notask -> files -> tables -> excel -> word -> pdf -> browser -> email -> chains -> loops -> conditions -> polish
+  notask -> files -> tables -> excel -> word -> pdf -> browser -> email -> apps -> chains -> loops -> conditions -> polish
 
     python curriculum_local.py                     (all stages; CPU: about 12-20 h, finished stages stay installed)
     python curriculum_local.py --stages excel,word,pdf
@@ -22,7 +22,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 RPA_DEFAULT = HERE.parent.parent
-ORDER = ["notask", "files", "tables", "excel", "word", "pdf", "browser", "email", "chains", "loops", "conditions", "polish"]
+ORDER = ["notask", "files", "tables", "excel", "word", "pdf", "browser", "email", "apps", "chains", "loops", "conditions",
+         "polish"]
 
 
 def last_round(history):

@@ -42,7 +42,7 @@ MODE = "auto"              # "auto": "full" with an NVIDIA GPU, "topup" without.
                            #             smaller learning rate each round; keeps a round only if it is better and
                            #             forgets at most 1 request the model already got right
                            #   "curriculum": small focused sessions, one module at a time (Excel, Word, PDF,
-                           #             files, browser, email, chains, loops, conditions, not-a-task), then a
+                           #             files, browser, email, business apps, chains, loops, conditions, not-a-task), then a
                            #             mixed polish; each kept only if better and nothing learned is forgotten
 REFINE_ROUNDS = 4          # refine: at most this many rounds (each about TOPUP_STEPS long)
 CURRICULUM_FROM = ""       # curriculum: continue from this stage after a stop, e.g. "loops" (empty = from the start)
@@ -234,7 +234,7 @@ else:
     raise SystemExit("no trained chat model found on Drive")
 
 # training data
-SFT = ["natural_train.jsonl", "core_train.jsonl", "chains_train.jsonl", "combos_train.jsonl", "notask_train.jsonl", "synth_train.jsonl", "synth_pattern.jsonl", "train_flows.jsonl",
+SFT = ["natural_train.jsonl", "core_train.jsonl", "chains_train.jsonl", "combos_train.jsonl", "notask_train.jsonl", "tools_train.jsonl", "synth_train.jsonl", "synth_pattern.jsonl", "train_flows.jsonl",
        "train_catalog.jsonl", "val.jsonl", "catalog.jsonl", "self_improved.jsonl", "hard_fixed.jsonl"]
 for name in SFT:
     fetch(f"sft/{name}", ROOT / "sft" / name, refresh=REFRESH_DATA)
