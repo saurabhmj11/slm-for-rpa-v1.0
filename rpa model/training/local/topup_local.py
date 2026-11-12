@@ -143,6 +143,8 @@ def main():
     ap.add_argument("--device-batch", type=int, default=2, choices=[1, 2, 4, 8, 16], help="lower = less RAM, same result (default 2)")
     ap.add_argument("--feedback-repeat", type=int, default=5, help="how often each piece of your feedback is shown")
     ap.add_argument("--port", type=int, default=8799, help="port for the scoring runs (not the assistant's 8765)")
+    ap.add_argument("--max-forget", type=int, default=1,
+                    help="install only if at most this many test requests the current model gets right become wrong")
     ap.add_argument("--check", action="store_true", help="only show what would be used")
     a = ap.parse_args()
     full = a.mode == "full"
@@ -297,10 +299,18 @@ def main():
     n_right, n_ver, details = score(rpa, work / "nanochat_base", catalog, a.port, log)
     print(f"  new model    : {summary(details)}")
 
-    better = (n_right, n_ver) > (b_right, b_ver)
-    print("== 4/4", "new model is BETTER: installing it" if better else "new model is not better: keeping the current one")
+    was_right = {d["request"] for d in b_details if d.get("right")}
+    forgot = [d["request"] for d in details if d["request"] in was_right and not d.get("right")]
+    if forgot:
+        print(f"  forgot {len(forgot)} request(s) the current model got right:", "; ".join(f[:50] for f in forgot[:5]))
+    better = (n_right, n_ver) > (b_right, b_ver) and len(forgot) <= a.max_forget
+    reason = ("new model is BETTER: installing it" if better else
+              f"new model forgot {len(forgot)} request(s) it used to get right (limit {a.max_forget}): keeping the current one"
+              if (n_right, n_ver) > (b_right, b_ver) else "new model is not better: keeping the current one")
+    print("== 4/4", reason)
     rec = {"time": stamp, "trained_steps": cstep, "from_step": step, "feedback_rows": fb_rows,
            "old_score": [b_right, b_ver], "new_score": [n_right, n_ver], "installed": better, "details": details,
+           "forgot": forgot, "lr": a.lr,
            "tests": n_tests}
     if better:
         new_step = cstep if full else step + cstep              # the old model is moved out of d8 below in any case

@@ -21,6 +21,7 @@ Run the cells from top to bottom (Shift+Enter). Works on Windows and Linux, with
 |---|---|---|
 | NVIDIA RTX 20xx / GTX 16xx or newer | **full training** from the pretrained base model (same recipe as Colab) | about 1-2 h |
 | no graphics card | **top-up**: a short round from the current model on your feedback + training data | about 2-2.5 h on 4 cores |
+| no graphics card, `MODE = "refine"` in cell 1 | **refine**: several top-up rounds in a row from the best model, smaller steps each round; keeps a round only if it is better and does not forget what the model already got right | about 3-4 h per round (up to 4 rounds) |
 | no graphics card, `MODE = "long"` in cell 1 | **long run**: the full Colab-size training in 10 saved chunks, at low priority so the PC stays usable; resumes after a restart | about 1-1.5 days on 4 cores |
 
 Either way the new model is scored on the same 20 everyday requests and **installed only if it is better** than the
@@ -36,6 +37,10 @@ DRIVE_FOLDER_ID = "{FOLDER_ID}"     # Google Drive folder ooa-nanochat (shared a
 MODE = "auto"              # "auto": "full" with an NVIDIA GPU, "topup" without. Or choose:
                            #   "long"  : Colab-size training on a CPU, day and night, in 10 saved chunks (resumable)
                            #   "full"  : Colab-size training in one go (GPU)    "topup": short round from the current model
+                           #   "refine": several top-up rounds in a row (day and night), each from the best model,
+                           #             smaller learning rate each round; keeps a round only if it is better and
+                           #             forgets at most 1 request the model already got right
+REFINE_ROUNDS = 4          # refine: at most this many rounds (each about TOPUP_STEPS long)
 TOPUP_STEPS = 200          # top-up length (CPU: about 2-2.5 h on 4 cores)
 FULL_STEPS = 2500          # full training length (same as Colab)
 REPLACE_LOCAL_MODEL = False   # True: replace this PC's model with the newest one from Drive (the old one is kept)
@@ -131,7 +136,7 @@ if t.returncode != 0:
     raise SystemExit("PyTorch does not load:\\n" + err)
 print("PyTorch", t.stdout.strip())
 CUDA = GPU and t.stdout.strip().endswith("True")
-MODE_NOW = MODE if MODE in ("full", "topup", "long") else ("full" if CUDA else "topup")
+MODE_NOW = MODE if MODE in ("full", "topup", "long", "refine") else ("full" if CUDA else "topup")
 try:
     import psutil
     RAM_GB = psutil.virtual_memory().total / 2**30
@@ -244,6 +249,9 @@ code('''
 if MODE_NOW == "long":     # 10 saved chunks; run cell 5 again after any interruption to continue
     TOPUP = [sys.executable, "-u", str(ROOT / "training" / "local" / "train_long.py"), "--rpa", str(ROOT),
              "--chunks", "10", "--chunk-steps", str(max(1, FULL_STEPS // 10)), "--device-batch", str(DEVICE_BATCH)]
+elif MODE_NOW == "refine":  # several improving rounds; finished rounds stay installed if it is stopped
+    TOPUP = [sys.executable, "-u", str(ROOT / "training" / "local" / "refine_local.py"), "--rpa", str(ROOT),
+             "--rounds", str(REFINE_ROUNDS), "--steps", str(TOPUP_STEPS), "--device-batch", str(DEVICE_BATCH)]
 else:
     TOPUP = [sys.executable, "-u", str(ROOT / "training" / "local" / "topup_local.py"), "--rpa", str(ROOT), "--mode", MODE_NOW,
              "--steps", str(FULL_STEPS if MODE_NOW == "full" else TOPUP_STEPS), "--device-batch", str(DEVICE_BATCH)]
