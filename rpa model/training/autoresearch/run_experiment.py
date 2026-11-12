@@ -111,13 +111,16 @@ new = (f"train_tasks = [{', '.join(parts)}] * {epochs}\n"
 p.write_text(s[:i] + new + s[j:])
 env = {**os.environ, "NANOCHAT_BASE_DIR": a.base_dir}
 import shutil
-_ck, _bk = Path(a.base_dir) / "chatsft_checkpoints", Path(a.base_dir) / "chatsft_checkpoints_before_autoresearch"
-if _ck.exists() and not _bk.exists():
-    shutil.move(str(_ck), str(_bk))          # keep your earlier SFT model: it is moved aside once, never deleted
+_ck = Path(a.base_dir) / "chatsft_checkpoints"
+if _ck.exists() and not (_ck / ".autoresearch").exists():
+    # a real SFT model (not an experiment's output): move it aside under a new name, never delete it
+    shutil.move(str(_ck), str(Path(a.base_dir) / ("chatsft_checkpoints_before_autoresearch_" + time.strftime("%Y%m%d_%H%M%S"))))
 else:
-    shutil.rmtree(_ck, ignore_errors=True)   # later experiments overwrite only experiment output
+    shutil.rmtree(_ck, ignore_errors=True)   # only an earlier experiment's output is ever deleted
 t0 = time.time()
 log = subprocess.run(sft_cmd, cwd=nc, env=env, capture_output=True, text=True)
+if _ck.exists():
+    (_ck / ".autoresearch").write_text("experiment output; safe to delete\n")
 (work / "sft.log").write_text(log.stdout + log.stderr)
 if log.returncode != 0:
     print((log.stdout + log.stderr)[-1500:]); sys.exit(1)
