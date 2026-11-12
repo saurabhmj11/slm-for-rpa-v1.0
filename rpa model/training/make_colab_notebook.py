@@ -255,6 +255,10 @@ _chains = "{DRIVE_DIR}/sft/chains_train.jsonl"   # everyday multi-step chains ac
 if _os.path.exists(_chains):
     train_tasks += [OOADialogues(_chains)] * ({CORE_REPEAT} * {SFT_EPOCHS})
 print0(f"chains file in the mix: {{_os.path.exists(_chains)}}")
+_combos = "{DRIVE_DIR}/sft/combos_train.jsonl"   # many different combinations, loops and conditions (upload to Drive sft/)
+if _os.path.exists(_combos):
+    train_tasks += [OOADialogues(_combos)] * ({CORE_REPEAT} * {SFT_EPOCHS})
+print0(f"combinations file in the mix: {{_os.path.exists(_combos)}}")
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)

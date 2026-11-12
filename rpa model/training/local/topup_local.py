@@ -34,6 +34,7 @@ MIX = {
     "natural_train.jsonl": ("natural_train.jsonl", 3000),
     "core_train.jsonl": ("core_train.jsonl", None),
     "chains_train.jsonl": ("chains_train.jsonl", None),        # multi-step chains across tools: all of them, every round
+    "combos_train.jsonl": ("combos_train.jsonl", None),        # many different combinations, loops, conditions: all
     "synth_train.jsonl": ("synth_train.jsonl", 2000),
     "synth_pattern.jsonl": ("synth_pattern.jsonl", 800),
     "train_flows.jsonl": ("train_flows.jsonl", None),
@@ -117,7 +118,8 @@ def score(rpa, model_dir, catalog, port, log):
             rt = ok and B.in_order(r["must"], got)
             verified += ok
             right += rt
-            details.append({"request": r["prompt"], "verified": ok, "right": rt, "set": r["set"]})
+            details.append({"request": r["prompt"], "verified": ok, "right": rt, "set": r["set"],
+                            "actions": got, "must": r["must"], "problems": (d.get("problems") or [])[:3]})
         return right, verified, details
     finally:
         p.terminate()

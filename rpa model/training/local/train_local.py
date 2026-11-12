@@ -28,7 +28,7 @@ HERE = Path(__file__).resolve().parent
 RPA = HERE.parent.parent                                   # "rpa model"
 REQUIRED_SFT = ["train_flows.jsonl", "train_catalog.jsonl", "synth_train.jsonl", "synth_pattern.jsonl", "val.jsonl"]
 OPTIONAL_SFT = ["self_improved.jsonl", "hard_fixed.jsonl", "feedback_train.jsonl", "natural_train.jsonl", "core_train.jsonl",
-                "chains_train.jsonl"]
+                "chains_train.jsonl", "combos_train.jsonl"]
 NANOCHAT_COMMIT = "92d63d4"
 
 
@@ -58,6 +58,10 @@ _chains = "{d}/chains_train.jsonl"
 if _os.path.exists(_chains):
     train_tasks += [OOADialogues(_chains)] * ({a.core_repeat} * {a.epochs})
 print0(f"chains file in the mix: {{_os.path.exists(_chains)}}")
+_combos = "{d}/combos_train.jsonl"
+if _os.path.exists(_combos):
+    train_tasks += [OOADialogues(_combos)] * ({a.core_repeat} * {a.epochs})
+print0(f"combinations file in the mix: {{_os.path.exists(_combos)}}")
 if {a.smoltalk} > 0:
     train_tasks.append(SmolTalk(split="train", stop={a.smoltalk}))
 train_dataset = TaskMixture(train_tasks)
