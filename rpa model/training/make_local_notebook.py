@@ -21,6 +21,7 @@ Run the cells from top to bottom (Shift+Enter). Works on Windows and Linux, with
 |---|---|---|
 | NVIDIA RTX 20xx / GTX 16xx or newer | **full training** from the pretrained base model (same recipe as Colab) | about 1-2 h |
 | no graphics card | **top-up**: a short round from the current model on your feedback + training data | about 2-2.5 h on 4 cores |
+| any PC, best with an NVIDIA GPU, `MODE = "big"` in cell 1 | **big**: cleans all the training data with strict filters (report in `sft_clean/filter_report.json`), then the full training from the pretrained base model on it, `BIG_PASSES` passes, saved in chunks and resumable; installed only if better | GPU: a few hours; CPU: several days |
 | no graphics card, `MODE = "curriculum"` in cell 1 | **curriculum**: small focused sessions, one module at a time (not-a-task, files, tables, Excel, Word, PDF, browser, email, chains, loops, conditions), then a mixed polish; each kept only if its module improves and nothing learned is forgotten | about 12-20 h in total; resumable with `CURRICULUM_FROM` |
 | no graphics card, `MODE = "refine"` in cell 1 | **refine**: several top-up rounds in a row from the best model, smaller steps each round; keeps a round only if it is better and does not forget what the model already got right | about 3-4 h per round (up to 4 rounds) |
 | no graphics card, `MODE = "long"` in cell 1 | **long run**: the full Colab-size training in 10 saved chunks, at low priority so the PC stays usable; resumes after a restart | about 1-1.5 days on 4 cores |
@@ -44,6 +45,10 @@ MODE = "auto"              # "auto": "full" with an NVIDIA GPU, "topup" without.
                            #   "curriculum": small focused sessions, one module at a time (Excel, Word, PDF,
                            #             files, browser, email, business apps, chains, loops, conditions, not-a-task), then a
                            #             mixed polish; each kept only if better and nothing learned is forgotten
+                           #   "big"   : clean ALL the training data with strict filters, then the full training
+                           #             from the pretrained base model on it, on this PC's GPU, as long as it
+                           #             takes (saved in chunks, resumable); installed only if better
+BIG_PASSES = 4             # big: passes over the cleaned data (1 pass = about 1,200 steps)
 REFINE_ROUNDS = 4          # refine: at most this many rounds (each about TOPUP_STEPS long)
 CURRICULUM_FROM = ""       # curriculum: continue from this stage after a stop, e.g. "loops" (empty = from the start)
 TOPUP_STEPS = 200          # top-up length (CPU: about 2-2.5 h on 4 cores)
@@ -141,7 +146,7 @@ if t.returncode != 0:
     raise SystemExit("PyTorch does not load:\\n" + err)
 print("PyTorch", t.stdout.strip())
 CUDA = GPU and t.stdout.strip().endswith("True")
-MODE_NOW = MODE if MODE in ("full", "topup", "long", "refine", "curriculum") else ("full" if CUDA else "topup")
+MODE_NOW = MODE if MODE in ("full", "topup", "long", "refine", "curriculum", "big") else ("full" if CUDA else "topup")
 try:
     import psutil
     RAM_GB = psutil.virtual_memory().total / 2**30
@@ -150,7 +155,7 @@ except Exception:
 # CPU: device batch from this PC's RAM (batch 4 needs about 7.3 GB, 2 about 4.5 GB, 1 about 2.9 GB for training alone).
 # Same tokens per step either way (the rest is gradient accumulation), so the result is the same; only slower.
 CPU_BATCH = 4 if RAM_GB >= 24 else 2 if RAM_GB >= 10 else 1
-DEVICE_BATCH = (min(2, CPU_BATCH) if MODE_NOW == "long" else CPU_BATCH) if not CUDA else (4 if GPU_MEM >= 10 else 2 if GPU_MEM >= 6 else 1)
+DEVICE_BATCH = (min(2, CPU_BATCH) if MODE_NOW in ("long", "big") else CPU_BATCH) if not CUDA else (4 if GPU_MEM >= 10 else 2 if GPU_MEM >= 6 else 1)
 print("training mode:", MODE_NOW, "| device batch:", DEVICE_BATCH, f"| RAM {RAM_GB:.0f} GB")
 
 # the desktop launcher and the nightly top-up use the same Python as this notebook
@@ -240,7 +245,7 @@ for name in SFT:
     fetch(f"sft/{name}", ROOT / "sft" / name, refresh=REFRESH_DATA)
 
 # full training starts from the pretrained base model
-if MODE_NOW in ("full", "long"):
+if MODE_NOW in ("full", "long", "big"):
     s = newest_pair("nanochat_base/base_checkpoints/d8")
     assert s, "no pretrained base model on Drive (nanochat_base/base_checkpoints/d8)"
     for name in (f"model_{s}.pt", f"meta_{s}.json", f"optim_{s}_rank0.pt"):
@@ -251,7 +256,10 @@ print("downloads done")
 
 code('''
 #@title 4. Check everything is in place
-if MODE_NOW == "long":     # 10 saved chunks; run cell 5 again after any interruption to continue
+if MODE_NOW == "big":      # filter all data, then chunked full training; run cell 5 again after any stop to continue
+    TOPUP = [sys.executable, "-u", str(ROOT / "training" / "local" / "big_local.py"), "--rpa", str(ROOT),
+             "--passes", str(BIG_PASSES), "--device-batch", str(DEVICE_BATCH)]
+elif MODE_NOW == "long":   # 10 saved chunks; run cell 5 again after any interruption to continue
     TOPUP = [sys.executable, "-u", str(ROOT / "training" / "local" / "train_long.py"), "--rpa", str(ROOT),
              "--chunks", "10", "--chunk-steps", str(max(1, FULL_STEPS // 10)), "--device-batch", str(DEVICE_BATCH)]
 elif MODE_NOW == "curriculum":  # one module at a time; finished stages stay installed if it is stopped

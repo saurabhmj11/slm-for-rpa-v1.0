@@ -229,6 +229,13 @@ def main():
     base = rpa / "nanochat_base"
     d8 = base / "chatsft_checkpoints" / "d8"
     sft = rpa / "sft"
+    clean = rpa / "sft_clean"                  # written by training/data_filter.py (MODE "big" runs it)
+    rep = clean / "filter_report.json"
+    if rep.exists() and all(f.stat().st_mtime <= rep.stat().st_mtime for f in sft.glob("*.jsonl")):
+        print("training data   : the cleaned copy in", clean, "(data_filter.py)")
+        sft = clean
+    elif rep.exists():
+        print("training data   : sft/ changed after the last cleaning; using sft/ as it is (run data_filter.py again)")
     work = rpa / f"topup_work_{time.strftime('%Y%m%d_%H%M%S')}"   # a fresh folder each round (Windows can leave files locked)
     fb = rpa / "assistant" / "assistant_data" / "feedback.jsonl"
     catalog = sft / "catalog.jsonl" if (sft / "catalog.jsonl").exists() else rpa / "data" / "catalog" / "catalog.jsonl"

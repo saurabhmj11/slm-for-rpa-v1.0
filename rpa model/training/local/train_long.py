@@ -30,6 +30,21 @@ import topup_local as T                                         # newest(), iden
 REQUIRED = ["train_flows.jsonl", "train_catalog.jsonl", "synth_train.jsonl", "synth_pattern.jsonl", "val.jsonl"]
 
 
+# how often train_local.py's mix shows each file per pass (keep in step with train_local.py's defaults)
+WEIGHT = {"train_flows.jsonl": 5, "natural_train.jsonl": 5, "core_train.jsonl": 5, "chains_train.jsonl": 5,
+          "combos_train.jsonl": 5, "notask_train.jsonl": 5, "tools_train.jsonl": 5}
+
+
+def passes_to_steps(sft, passes):
+    """Steps (32,768 tokens each) for this many passes over the training files, about 3.2 characters per token."""
+    chars = 0
+    for f in sft.glob("*.jsonl"):
+        if f.name in ("catalog.jsonl", "val.jsonl"):
+            continue
+        chars += f.stat().st_size * WEIGHT.get(f.name, 1)
+    return max(1, round(passes * chars / 3.2 / 32768))
+
+
 def keep_awake():
     if os.name == "nt":
         try:
@@ -67,11 +82,17 @@ def main():
     ap.add_argument("--feedback-repeat", type=int, default=5)
     ap.add_argument("--port", type=int, default=8799)
     ap.add_argument("--restart", action="store_true", help="start over (the saved chunks are deleted)")
+    ap.add_argument("--sft-dir", default=None, help="training data folder (default: rpa model/sft); e.g. sft_clean"
+                                                    " written by training/data_filter.py")
+    ap.add_argument("--passes", type=float, default=0,
+                    help="size the run by passes over the data (with the usual mix weights) instead of --chunks;"
+                         " it takes as long as it takes")
     ap.add_argument("--check", action="store_true")
     a = ap.parse_args()
 
     rpa = Path(a.rpa).expanduser().resolve()
-    base, sft = rpa / "nanochat_base", rpa / "sft"
+    base = rpa / "nanochat_base"
+    sft = Path(a.sft_dir).expanduser().resolve() if a.sft_dir else rpa / "sft"
     run_dir = rpa / "long_run"
     state_f = run_dir / "state.json"
     bd8 = base / "base_checkpoints" / "d8"
@@ -90,6 +111,14 @@ def main():
     if a.restart and run_dir.exists() and not a.check:
         shutil.rmtree(run_dir, ignore_errors=True)
     state = json.loads(state_f.read_text(encoding="utf-8")) if state_f.exists() else {}
+    if a.passes > 0:
+        if state and not state.get("finished"):                # a sized run in progress keeps its own size
+            a.chunks = state.get("chunks", a.chunks)
+        else:
+            steps = passes_to_steps(sft, a.passes)
+            a.chunks = max(1, -(-steps // a.chunk_steps))
+            print(f"data volume      : {a.passes:g} passes over {sft.name} = about {steps} steps "
+                  f"-> {a.chunks} chunks of {a.chunk_steps}")
     if state and (state.get("chunks") != a.chunks or state.get("chunk_steps") != a.chunk_steps):
         problems.append(f"a run with {state.get('chunks')} x {state.get('chunk_steps')} steps is in progress: use the same "
                         "--chunks/--chunk-steps to continue it, or --restart")
@@ -101,11 +130,17 @@ def main():
         state = {}
     done = state.get("done", 0)
     left = a.chunks - done
-    per_chunk_h = a.chunk_steps * 38 / 3600 * 4 / max(1, min(os.cpu_count() or 4, 16))
+    try:
+        import torch
+        gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    except Exception:
+        gpu = None
+    per_chunk_h = a.chunk_steps * (1.5 if gpu else 38 * 4 / max(1, min(os.cpu_count() or 4, 16))) / 3600
     print("assistant folder :", rpa)
     print("base model       :", f"{bd8} step {bstep}" if bstep is not None else "-")
     print(f"plan             : {a.chunks} chunks x {a.chunk_steps} steps ({done} done, {left} to go)")
-    print(f"time estimate    : about {per_chunk_h:.1f} h per chunk on this PC's {os.cpu_count()} CPU threads, "
+    print(f"time estimate    : about {per_chunk_h:.1f} h per chunk on this PC's "
+          f"{('GPU ' + gpu) if gpu else str(os.cpu_count()) + ' CPU threads'}, "
           f"about {per_chunk_h * left:.0f} h in total (rough: real speed depends on the CPU)")
     for p_ in problems:
         print("  !", p_)
