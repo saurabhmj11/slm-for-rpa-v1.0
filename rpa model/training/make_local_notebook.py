@@ -234,10 +234,10 @@ print("downloads done")
 code('''
 #@title 4. Check everything is in place
 if MODE_NOW == "long":     # 10 saved chunks; run cell 5 again after any interruption to continue
-    TOPUP = [sys.executable, str(ROOT / "training" / "local" / "train_long.py"), "--rpa", str(ROOT),
+    TOPUP = [sys.executable, "-u", str(ROOT / "training" / "local" / "train_long.py"), "--rpa", str(ROOT),
              "--chunks", "10", "--chunk-steps", str(max(1, FULL_STEPS // 10)), "--device-batch", str(DEVICE_BATCH)]
 else:
-    TOPUP = [sys.executable, str(ROOT / "training" / "local" / "topup_local.py"), "--rpa", str(ROOT), "--mode", MODE_NOW,
+    TOPUP = [sys.executable, "-u", str(ROOT / "training" / "local" / "topup_local.py"), "--rpa", str(ROOT), "--mode", MODE_NOW,
              "--steps", str(FULL_STEPS if MODE_NOW == "full" else TOPUP_STEPS), "--device-batch", str(DEVICE_BATCH)]
 r = subprocess.run(TOPUP + ["--check"])
 print("\\nOK: run cell 5" if r.returncode == 0 else "\\nfix the lines marked ! above, then run this cell again")
@@ -248,7 +248,8 @@ code('''
 # Keep the PC on and plugged in. The current model is only replaced at the very end, after scoring.
 # MODE "long": each finished chunk is saved; after a stop, restart or crash just run this cell again to continue.
 # It runs at low priority with one CPU core left free, so you can keep using the PC (slower, but smooth).
-p = subprocess.Popen(TOPUP, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+p = subprocess.Popen(TOPUP, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                     env=dict(os.environ, PYTHONUNBUFFERED="1"))   # show progress as it happens
 try:
     for line in p.stdout:
         print(line, end="")

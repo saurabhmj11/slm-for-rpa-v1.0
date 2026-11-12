@@ -125,7 +125,7 @@ def main():
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")   # a Windows/company proxy must not catch the local scoring calls
     try:
-        sys.stdout.reconfigure(errors="replace")
+        sys.stdout.reconfigure(errors="replace", line_buffering=True)
     except Exception:
         pass
 
@@ -235,8 +235,18 @@ def main():
                "--steps", str(a.steps), "--device-batch", str(a.device_batch), "--epochs", "1", "--flow-repeat", "1",
                "--natural-repeat", "1", "--core-repeat", "1", "--smoltalk", "0", "--init-lr-frac", str(a.lr),
                "--eval-every", str(max(50, a.steps // 2)), "--allow-cpu"]
-    with open(log, "a", encoding="utf-8") as lf:
-        r = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
+    with open(log, "a", encoding="utf-8") as lf:      # full output to the log, a progress line every 10 steps here
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+        for line in p.stdout:
+            lf.write(line)
+            lf.flush()
+            m = re.match(r"step (\d+) \(([\d.]+)%\) \| loss: ([\d.]+).*?dt: ([\d.]+)ms", line)
+            if m and (int(m.group(1)) % 10 == 0 or int(m.group(1)) == 1):
+                left = (a.steps - int(m.group(1))) * float(m.group(4)) / 60000
+                print(f"   step {int(m.group(1))}/{a.steps} | loss {m.group(3)} | {float(m.group(4)) / 1000:.0f} s per step"
+                      f" | about {left:.0f} min to go ({time.strftime('%H:%M')})")
+        r = p
+        r.returncode = p.wait()
     if r.returncode != 0:
         raise SystemExit(f"training failed (see the end of {log}); the assistant's model was not touched")
     cd8 = work / "nanochat_base" / "chatsft_checkpoints" / "d8"

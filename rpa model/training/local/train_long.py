@@ -169,9 +169,12 @@ def main():
                                  encoding="utf-8", errors="replace")
             for line in p.stdout:
                 lf.write(line)
-                m = re.match(r"step (\d+) \(([\d.]+)%\) \| loss: ([\d.]+)", line)
-                if m and int(m.group(1)) % 25 == 0:                # a progress line every 25 steps
-                    print(f"   step {int(m.group(1))}/{a.chunk_steps} ({m.group(2)}%) loss {m.group(3)} | {time.strftime('%H:%M')}")
+                lf.flush()
+                m = re.match(r"step (\d+) \(([\d.]+)%\) \| loss: ([\d.]+).*?dt: ([\d.]+)ms", line)
+                if m and (int(m.group(1)) % 10 == 0 or int(m.group(1)) == 1):   # a progress line every 10 steps
+                    left = (a.chunk_steps - int(m.group(1))) * float(m.group(4)) / 60000
+                    print(f"   step {int(m.group(1))}/{a.chunk_steps} | loss {m.group(3)} | {float(m.group(4)) / 1000:.0f} s per step"
+                          f" | chunk done in about {left:.0f} min ({time.strftime('%H:%M')})")
             rc = p.wait()
         if rc != 0:
             raise SystemExit(f"chunk {k + 1} failed (see the end of {log}). Run again to retry this chunk; "
