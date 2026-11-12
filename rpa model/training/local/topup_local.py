@@ -136,7 +136,7 @@ def main():
                          "pretrained base model (needs nanochat_base/base_checkpoints; GPU, or about a day on a CPU)")
     ap.add_argument("--steps", type=int, default=None, help="training steps (32,768 tokens each); default 200 topup, 2500 full")
     ap.add_argument("--lr", type=float, default=None, help="learning rate fraction; default 0.3 topup (it only adjusts), 0.8 full")
-    ap.add_argument("--device-batch", type=int, default=4, choices=[1, 2, 4, 8, 16])
+    ap.add_argument("--device-batch", type=int, default=2, choices=[1, 2, 4, 8, 16], help="lower = less RAM, same result (default 2)")
     ap.add_argument("--feedback-repeat", type=int, default=5, help="how often each piece of your feedback is shown")
     ap.add_argument("--port", type=int, default=8799, help="port for the scoring runs (not the assistant's 8765)")
     ap.add_argument("--check", action="store_true", help="only show what would be used")

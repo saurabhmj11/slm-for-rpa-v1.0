@@ -132,8 +132,16 @@ if t.returncode != 0:
 print("PyTorch", t.stdout.strip())
 CUDA = GPU and t.stdout.strip().endswith("True")
 MODE_NOW = MODE if MODE in ("full", "topup", "long") else ("full" if CUDA else "topup")
-DEVICE_BATCH = (2 if MODE_NOW == "long" else 4) if not CUDA else (4 if GPU_MEM >= 10 else 2 if GPU_MEM >= 6 else 1)
-print("training mode:", MODE_NOW, "| device batch:", DEVICE_BATCH)
+try:
+    import psutil
+    RAM_GB = psutil.virtual_memory().total / 2**30
+except Exception:
+    RAM_GB = 8.0
+# CPU: device batch from this PC's RAM (batch 4 needs about 7.3 GB, 2 about 4.5 GB, 1 about 2.9 GB for training alone).
+# Same tokens per step either way (the rest is gradient accumulation), so the result is the same; only slower.
+CPU_BATCH = 4 if RAM_GB >= 24 else 2 if RAM_GB >= 10 else 1
+DEVICE_BATCH = (min(2, CPU_BATCH) if MODE_NOW == "long" else CPU_BATCH) if not CUDA else (4 if GPU_MEM >= 10 else 2 if GPU_MEM >= 6 else 1)
+print("training mode:", MODE_NOW, "| device batch:", DEVICE_BATCH, f"| RAM {RAM_GB:.0f} GB")
 
 # the desktop launcher and the nightly top-up use the same Python as this notebook
 bat = ROOT / "assistant" / "start_assistant.bat"
