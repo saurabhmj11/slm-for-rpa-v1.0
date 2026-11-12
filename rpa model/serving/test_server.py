@@ -78,6 +78,13 @@ res = ask(port, long)
 assert loc.calls == 0 and res["ooa"]["source"] == "cloud"
 print("5 ok: complex request went straight to the cloud model")
 
+# 5b. same complex request with no cloud fallback (local-only setup): the local model must still try
+loc = Local([GOOD])
+r, srv, port = start(S.Policy(allow_escalation=False), loc, None)
+res = ask(port, long)
+assert loc.calls == 1 and res["ooa"]["source"] == "local" and res["ooa"]["verified"]
+print("5b ok: no cloud -> complex request still answered by the local model")
+
 # 6. repair: a near-miss typo is fixed without escalating
 bad = json.loads(GOOD); a = bad["steps"][0]["action"]; bad["steps"][0]["action"] = a[:-1]
 cl = Cloud([GOOD]); r, srv, port = start(S.Policy(allow_escalation=True), Local([json.dumps(bad)]), cl)

@@ -164,6 +164,8 @@ class Router:
         t0, tried, errors = time.time(), [], []
         p = self.policy
         simple = clauses(request) <= p.max_clauses_local and len(request) <= 500
+        if self.cloud is None or not p.allow_escalation:
+            simple = True      # no cloud fallback: always let the local model try instead of failing unseen
         if self.local is not None and simple:
             for attempt in range(1 + p.local_retries):
                 try:
