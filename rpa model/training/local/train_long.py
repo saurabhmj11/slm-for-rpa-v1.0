@@ -206,12 +206,12 @@ def main():
     shutil.copytree(base / "tokenizer", ev / "tokenizer")
     d8 = base / "chatsft_checkpoints" / "d8"
     cur = T.newest(d8) if d8.exists() else None
-    print("\n== scoring on the 20 everyday requests")
+    print(f"\n== scoring on the {len(T.test_rows(rpa))} test requests")
     n_right, n_ver, details = T.score(rpa, ev, catalog, a.port, log)
-    print(f"  new model    : right {n_right}/20, verified {n_ver}/20")
+    print(f"  new model    : {T.summary(details)}")
     if cur is not None:
-        b_right, b_ver, _ = T.score(rpa, base, catalog, a.port, log)
-        print(f"  current model: right {b_right}/20, verified {b_ver}/20")
+        b_right, b_ver, b_details = T.score(rpa, base, catalog, a.port, log)
+        print(f"  current model: {T.summary(b_details)}")
     else:
         b_right, b_ver = -1, -1
     better = (n_right, n_ver) > (b_right, b_ver)
@@ -233,7 +233,8 @@ def main():
         m["step"] = total
         m["ooa_topup"] = {"time": stamp, "mode": "long", "from_step": bstep, "steps": total, "score": [n_right, n_ver]}
         (d8 / f"meta_{total:06d}.json").write_text(json.dumps(m, indent=2), encoding="utf-8")
-        rec.update(kept=f"model_{total:06d}.pt", kept_score=[n_right, n_ver], kept_id=T.ident(d8 / f"model_{total:06d}.pt"))
+        rec.update(kept=f"model_{total:06d}.pt", kept_score=[n_right, n_ver], kept_id=T.ident(d8 / f"model_{total:06d}.pt"),
+                   kept_details=details, tests=len(T.test_rows(rpa)))
         print(f"  BETTER: installed model_{total:06d}.pt; restart the assistant to use it")
     else:
         print("  not better than the current model: the current one stays. The trained model is kept in", final_dir)

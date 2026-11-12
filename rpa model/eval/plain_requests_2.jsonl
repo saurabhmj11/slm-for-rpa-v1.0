@@ -1,0 +1,15 @@
+{"prompt": "Make a new folder called Reports", "must": ["ooa.folder/create"]}
+{"prompt": "Delete all the files in the temp folder", "must": ["ooa.file/delete"]}
+{"prompt": "Unzip the invoices zip into a folder", "must": ["ooa.file/unzip"]}
+{"prompt": "Split a PDF into separate files", "must": ["ooa.pdf/split"]}
+{"prompt": "take a screenshot of a website", "must": ["ooa.browser/open", "ooa.browser/screenshot"]}
+{"prompt": "Read a CSV, remove the duplicate rows and save it as a new CSV", "must": ["ooa.csv/read", "ooa.datatable/remove_duplicates", "ooa.csv/write"]}
+{"prompt": "Open an Excel file, read the whole sheet, then close it", "must": ["ooa.excel/open", "ooa.excel/get_all_cells", "ooa.excel/close"]}
+{"prompt": "Read a CSV of sales and add up the amount column", "must": ["ooa.csv/read", "ooa.datatable/sum_column"]}
+{"prompt": "Zip a folder and email the zip to my manager", "must": ["ooa.file/zip", "ooa.email/send"]}
+{"prompt": "Create a new Excel workbook, write a table into it and save it", "must": ["ooa.excel/create_workbook", "ooa.excel/write_table", "ooa.excel/save"]}
+{"prompt": "pls copy all pdf files from downloads to the archive folder", "must": ["ooa.file/copy"]}
+{"prompt": "For each file in a folder, count the pages if it is a PDF", "must": ["ooa.file/list", "core/loop", "ooa.pdf/page_count"]}
+{"prompt": "Open the vendor portal, type the username and password, click login, then download the statement", "must": ["ooa.browser/open", "ooa.browser/type_text", "ooa.browser/type_text", "ooa.browser/click", "ooa.browser/download"]}
+{"prompt": "excel file padh ke sirf unpaid orders filter karo aur nayi csv me save karo", "must": ["ooa.excel/open", "ooa.excel/get_all_cells", "ooa.datatable/filter", "ooa.csv/write"]}
+{"prompt": "Read the text of a PDF, and if it mentions overdue, send an email", "must": ["ooa.pdf/extract_text", "core/if", "ooa.email/send"]}

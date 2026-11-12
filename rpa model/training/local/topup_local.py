@@ -61,8 +61,30 @@ def read_rows(p):
         return [l for l in f if l.strip()]
 
 
+TEST_SETS = [("plain_requests.jsonl", "set 1 (20 everyday requests)"), ("plain_requests_2.jsonl", "set 2 (15 more, never tuned on)")]
+
+
+def test_rows(rpa):
+    out = []
+    for i, (name, _) in enumerate(TEST_SETS, 1):
+        p = rpa / "eval" / name
+        if p.exists():
+            out += [dict(json.loads(l), set=i) for l in read_rows(p)]
+    return out
+
+
+def summary(details):
+    """'set 1: right 8/20, verified 17/20 | set 2: ...' and the totals."""
+    parts = []
+    for i, (_, label) in enumerate(TEST_SETS, 1):
+        d = [x for x in details if x.get("set", 1) == i]
+        if d:
+            parts.append(f"set {i}: right {sum(x['right'] for x in d)}/{len(d)}, verified {sum(x['verified'] for x in d)}/{len(d)}")
+    return " | ".join(parts)
+
+
 def score(rpa, model_dir, catalog, port, log):
-    """Start the assistant on model_dir and score the 20 everyday requests: (right, verified, details)."""
+    """Start the assistant on model_dir and score every test request (both sets): (right, verified, details)."""
     sys.path.insert(0, str(rpa / "assistant"))
     import basic_test as B
     data = tempfile.mkdtemp(prefix="ooa_eval_")
@@ -84,7 +106,7 @@ def score(rpa, model_dir, catalog, port, log):
                 continue
         else:
             raise SystemExit(f"the assistant did not answer within 10 minutes (see {log})")
-        rows = [json.loads(l) for l in read_rows(rpa / "eval" / "plain_requests.jsonl")]
+        rows = test_rows(rpa)
         right = verified = 0
         details = []
         for r in rows:
@@ -94,7 +116,7 @@ def score(rpa, model_dir, catalog, port, log):
             rt = ok and B.in_order(r["must"], got)
             verified += ok
             right += rt
-            details.append({"request": r["prompt"], "verified": ok, "right": rt})
+            details.append({"request": r["prompt"], "verified": ok, "right": rt, "set": r["set"]})
         return right, verified, details
     finally:
         p.terminate()
@@ -254,23 +276,27 @@ def main():
     if cstep is None:
         raise SystemExit(f"training produced no model (see {log}); nothing changed")
 
-    print("== 3/4 scoring old and new model on the 20 everyday requests")
+    n_tests = len(test_rows(rpa))
+    print(f"== 3/4 scoring old and new model on the {n_tests} test requests")
     hist = [json.loads(l) for l in read_rows(history)] if history.exists() else []
     cur_id = ident(model)
-    cached = next((h for h in reversed(hist) if h.get("kept_id") == cur_id), None)
+    cached = next((h for h in reversed(hist) if h.get("kept_id") == cur_id and h.get("tests") == n_tests
+                   and h.get("kept_details")), None)
     if cached:
         b_right, b_ver = cached["kept_score"]
-        print(f"  current model: right {b_right}/20, verified {b_ver}/20 (from the last round)")
+        b_details = cached["kept_details"]
+        print(f"  current model: {summary(b_details)}  (from the last round)")
     else:
-        b_right, b_ver, _ = score(rpa, base, catalog, a.port, log)
-        print(f"  current model: right {b_right}/20, verified {b_ver}/20")
+        b_right, b_ver, b_details = score(rpa, base, catalog, a.port, log)
+        print(f"  current model: {summary(b_details)}")
     n_right, n_ver, details = score(rpa, work / "nanochat_base", catalog, a.port, log)
-    print(f"  new model    : right {n_right}/20, verified {n_ver}/20")
+    print(f"  new model    : {summary(details)}")
 
     better = (n_right, n_ver) > (b_right, b_ver)
     print("== 4/4", "new model is BETTER: installing it" if better else "new model is not better: keeping the current one")
     rec = {"time": stamp, "trained_steps": cstep, "from_step": step, "feedback_rows": fb_rows,
-           "old_score": [b_right, b_ver], "new_score": [n_right, n_ver], "installed": better, "details": details}
+           "old_score": [b_right, b_ver], "new_score": [n_right, n_ver], "installed": better, "details": details,
+           "tests": n_tests}
     if better:
         new_step = cstep if full else step + cstep              # the old model is moved out of d8 below in any case
         keep = base / f"old_model_{stamp}"
@@ -284,12 +310,12 @@ def main():
         m["ooa_topup"] = {"time": stamp, "mode": a.mode, "from_step": bstep if full else step, "steps": cstep,
                           "lr": a.lr, "score": [n_right, n_ver]}
         (d8 / f"meta_{new_step:06d}.json").write_text(json.dumps(m, indent=2), encoding="utf-8")
-        rec.update(kept=f"model_{new_step:06d}.pt", kept_score=[n_right, n_ver], old_kept_in=str(keep))
+        rec.update(kept=f"model_{new_step:06d}.pt", kept_score=[n_right, n_ver], old_kept_in=str(keep), kept_details=details)
         rec["kept_id"] = ident(d8 / f"model_{new_step:06d}.pt")
         print(f"  installed model_{new_step:06d}.pt; the previous model is kept in {keep}")
         print("  restart the assistant (close its window, start it again) to use the new model")
     else:
-        rec.update(kept=model.name, kept_score=[b_right, b_ver], kept_id=cur_id)
+        rec.update(kept=model.name, kept_score=[b_right, b_ver], kept_id=cur_id, kept_details=b_details)
     with open(history, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     shutil.rmtree(work, ignore_errors=True)

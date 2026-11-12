@@ -15,7 +15,8 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-EVAL = HERE.parent / "eval" / "plain_requests.jsonl"
+EVALS = [HERE.parent / "eval" / "plain_requests.jsonl",      # set 1: the 20 everyday requests
+         HERE.parent / "eval" / "plain_requests_2.jsonl"]    # set 2: 15 more, never used to pick a model by hand
 
 
 def actions(steps):
@@ -49,7 +50,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     a = ap.parse_args()
-    rows = [json.loads(l) for l in EVAL.read_text(encoding="utf-8").splitlines() if l.strip()]
+    rows = [dict(json.loads(l), set=i) for i, p in enumerate(EVALS, 1) if p.exists()
+            for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
     try:
         model = json.load(urllib.request.urlopen(urllib.request.Request(
             f"http://127.0.0.1:{a.port}/api/status", headers={"X-OOA-Assistant": "1"}), timeout=10)).get("model")
@@ -62,12 +64,16 @@ def main():
         got = actions((d.get("flow") or {}).get("steps"))
         ok = bool(d.get("verified"))
         right = ok and in_order(r["must"], got)
-        results.append({"request": r["prompt"], "verified": ok, "right": right, "actions": got,
+        results.append({"request": r["prompt"], "set": r["set"], "verified": ok, "right": right, "actions": got,
                         "problems": d.get("problems", [])[:3], "seconds": d.get("seconds")})
         mark = "RIGHT   " if right else "verified" if ok else "failed  "
         print(f"{i:2}. {mark} {d.get('seconds', 0):6.1f}s  {r['prompt'][:60]}")
+    for i in sorted({x["set"] for x in results}):
+        d = [x for x in results if x["set"] == i]
+        print(f"\nset {i}: verified {sum(x['verified'] for x in d)}/{len(d)} | right (needed actions in order) "
+              f"{sum(x['right'] for x in d)}/{len(d)}", end="")
     v, ok = sum(x["verified"] for x in results), sum(x["right"] for x in results)
-    print(f"\nverified {v}/{len(rows)} | right (needed actions in order) {ok}/{len(rows)} | {time.time() - t0:.0f} s")
+    print(f"\nall   : verified {v}/{len(rows)} | right {ok}/{len(rows)} | {time.time() - t0:.0f} s")
     (HERE / "basic_test_results.json").write_text(json.dumps({"model": model, "results": results}, indent=1),
                                                   encoding="utf-8")
     print("details saved to", HERE / "basic_test_results.json")
