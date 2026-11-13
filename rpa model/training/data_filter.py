@@ -37,7 +37,8 @@ import ooa_reward as R
 import repair as RP
 
 MAX_CHARS = 6500
-NOT_TRAINING = {"train.jsonl"}
+NOT_TRAINING = {"train.jsonl", "hard_queue.jsonl", "selfimprove_log.jsonl"}
+DRIVE_COPY = re.compile(r" \(\d+\)\.jsonl$")
 LEAK = re.compile(r"\$\{?[A-Za-z_]|\booa\.[a-z_]+/|\bcore/[a-z_]+|[{}]|\bpath_\d\b|\bs\d+\b(?= step)")
 APPS = {"slack": "ooa.slack/", "asana": "ooa.asana/", "github": "ooa.github/", "docusign": "ooa.docusign/",
         "salesforce": "ooa.salesforce/", "snowflake": "ooa.snowflake/", "databricks": "ooa.databricks/",
@@ -93,7 +94,9 @@ def main():
     by_request = defaultdict(Counter)             # normalised request -> Counter(flow text) over all files
     staged = []                                   # (file, row_text, request_norm, answer, seq) after per-row filters
     for f in sorted(sft.glob("*.jsonl")):
-        if f.name == "catalog.jsonl" or f.name in NOT_TRAINING or f.name.startswith("eval"):
+        if (f.name == "catalog.jsonl" or f.name in NOT_TRAINING or f.name.startswith("eval")
+                or DRIVE_COPY.search(f.name)):     # "synth_train (1).jsonl": a second upload Google Drive renamed;
+                                                   # read first, it would take the rows and leave the real file empty
             continue          # not training data: train.jsonl repeats train_flows + train_catalog (it would make them
                               # "duplicates" and empty them); eval*.jsonl are tests
         why = Counter()
