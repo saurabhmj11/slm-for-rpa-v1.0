@@ -21,6 +21,9 @@ files = {
     "autoresearch/ooa_eval_frozen.py": (H / "autoresearch/ooa_eval_frozen.py").read_text(encoding="utf-8"),
     "retrieval.py": (H / "retrieval.py").read_text(encoding="utf-8"),
     "repair.py": (H / "repair.py").read_text(encoding="utf-8"),
+    "data_filter.py": (H / "data_filter.py").read_text(encoding="utf-8"),
+    "model_backend.py": (H.parent / "assistant/model_backend.py").read_text(encoding="utf-8"),
+    "constrained.py": (H.parent / "assistant/constrained.py").read_text(encoding="utf-8"),
     "serving/ooa_server.py": (H.parent / "serving/ooa_server.py").read_text(encoding="utf-8"),
     "serving/backends.py": (H.parent / "serving/backends.py").read_text(encoding="utf-8"),
     "flow_check.py": (H.parent / "eval/flow_check.py").read_text(encoding="utf-8"),
@@ -86,11 +89,14 @@ SELF_IMPROVE_ROUNDS = 2
 SI_PROMPTS = 20 if PROFILE == "smoke" else 100     # fresh requests per self-improvement round
 SI_SAMPLES = 8
 EVAL_SOURCE = "sft"        # which model the test cell loads: "sft" or "rl"
-SFT_ITERS = 400 if PROFILE == "smoke" else 10000           # counted in MICRO-batches (4 per optimizer step): 10000 = 2500 steps, about 45 min on a T4 (was 8000)
+SFT_ITERS = 400 if PROFILE == "smoke" else 16000           # counted in MICRO-batches (4 per optimizer step): 16000 = 4000 steps, about 75 min on a T4 (was 10000: too short for long flows)
+CLEAN_DATA = True          # cell 6 runs the strict data filter (sft/ -> sft_clean/) and cell 7 trains on the cleaned data
+SCEN_REPEAT = 15           # whole business processes are long and few: weight them 3x the other files (CORE_REPEAT)
+ASSISTANT_EVAL = True      # cell 8 also scores the full assistant (real action names only, repair, loop guard), as users get it
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
 MAX_FLOW_CHARS = 9000      # skip training flows longer than this (about SFT_SEQ tokens)
 print(PROFILE, P, "iterations:", NUM_ITERS)
-print("SFT settings -> SYNTH_TRAIN:", SYNTH_TRAIN, "| SFT_EPOCHS:", SFT_EPOCHS, "| SFT_ITERS cap:", SFT_ITERS)
+print("SFT settings -> SYNTH_TRAIN:", SYNTH_TRAIN, "| SFT_EPOCHS:", SFT_EPOCHS, "| SFT_ITERS cap:", SFT_ITERS, "| CLEAN_DATA:", CLEAN_DATA)
 ''')
 
 code('''
@@ -223,12 +229,20 @@ for l in open("/content/pattern_eval_raw.jsonl"):
 open(f"{DRIVE_DIR}/sft/eval_pattern.jsonl", "w").write("\\n".join(json.dumps(x) for x in _pev))
 print("real-pattern eval prompts (not in train):", len(_pev))
 !cp /content/ooa/ooa_task.py /content/nanochat/tasks/ooa.py
-!head -c 700 {DRIVE_DIR}/sft/train.jsonl
+# the catalog was just rebuilt from the platform downloaded in cell 2, so data and checks match the current platform
+print("actions in the catalog:", sum(1 for _ in open(f"{DRIVE_DIR}/sft/catalog.jsonl")))
+if CLEAN_DATA:
+    # strict filter: structure, length, leaked variable names, repeated clauses, platform rules (after adding missing
+    # open/save steps), stale actions, wrong app, closeness to a test request, duplicates, conflicts, over-represented
+    # action sequences. Report: sft_clean/filter_report.json
+    !python /content/ooa/data_filter.py {DRIVE_DIR}/sft {DRIVE_DIR}/sft_clean /content/platform /content/ooa --cap 60
 ''' % json.dumps(files))
 
 code('''
 #@title 7. Patch nanochat SFT to use our data, then train
 import re, shutil
+SFT_DIR = f"{DRIVE_DIR}/sft_clean" if CLEAN_DATA and os.path.exists(f"{DRIVE_DIR}/sft_clean/filter_report.json") else f"{DRIVE_DIR}/sft"
+print("training data:", SFT_DIR)
 # always start from the pinned nanochat scripts, so an earlier patch can never hide the current data mix
 !cd /content/nanochat && git checkout -q -- scripts/chat_sft.py scripts/chat_cli.py
 p = "/content/nanochat/scripts/chat_sft.py"
@@ -237,47 +251,47 @@ if "OOADialogues" not in s:
     s = s.replace("from tasks.smoltalk import SmolTalk", "from tasks.smoltalk import SmolTalk\\nfrom tasks.ooa import OOADialogues")
     a = s.index("train_tasks = [")
     b = s.index("\\n", s.index("# total: 24K"))
-    new = f"""train_tasks = ([OOADialogues("{DRIVE_DIR}/sft/train_flows.jsonl") for _ in range({FLOW_REPEAT})]
-               + [OOADialogues("{DRIVE_DIR}/sft/train_catalog.jsonl"), OOADialogues("{DRIVE_DIR}/sft/synth_train.jsonl"),
-                  OOADialogues("{DRIVE_DIR}/sft/synth_pattern.jsonl")]) * {SFT_EPOCHS}
+    new = f"""train_tasks = ([OOADialogues("{SFT_DIR}/train_flows.jsonl") for _ in range({FLOW_REPEAT})]
+               + [OOADialogues("{SFT_DIR}/train_catalog.jsonl"), OOADialogues("{SFT_DIR}/synth_train.jsonl"),
+                  OOADialogues("{SFT_DIR}/synth_pattern.jsonl")]) * {SFT_EPOCHS}
 import os as _os
-_extra = [OOADialogues("{DRIVE_DIR}/sft/" + _f) for _f in ("self_improved.jsonl", "hard_fixed.jsonl", "feedback_train.jsonl")
-          if _os.path.exists("{DRIVE_DIR}/sft/" + _f)]
+_extra = [OOADialogues("{SFT_DIR}/" + _f) for _f in ("self_improved.jsonl", "hard_fixed.jsonl", "feedback_train.jsonl")
+          if _os.path.exists("{SFT_DIR}/" + _f)]
 train_tasks += _extra * {SFT_EPOCHS}
 print0(f"extra self-learning files in the mix: {{len(_extra)}}")
-_nat = "{DRIVE_DIR}/sft/natural_train.jsonl"     # everyday-wording requests for generated flows (upload to Drive sft/)
+_nat = "{SFT_DIR}/natural_train.jsonl"     # everyday-wording requests for generated flows (upload to Drive sft/)
 if _os.path.exists(_nat):
     train_tasks += [OOADialogues(_nat)] * ({NATURAL_REPEAT} * {SFT_EPOCHS})
 print0(f"natural-wording file in the mix: {{_os.path.exists(_nat)}}")
-_core = "{DRIVE_DIR}/sft/core_train.jsonl"       # everyday requests for the most used actions (upload to Drive sft/)
+_core = "{SFT_DIR}/core_train.jsonl"       # everyday requests for the most used actions (upload to Drive sft/)
 if _os.path.exists(_core):
     train_tasks += [OOADialogues(_core)] * ({CORE_REPEAT} * {SFT_EPOCHS})
 print0(f"core-actions file in the mix: {{_os.path.exists(_core)}}")
-_chains = "{DRIVE_DIR}/sft/chains_train.jsonl"   # everyday multi-step chains across tools (upload to Drive sft/)
+_chains = "{SFT_DIR}/chains_train.jsonl"   # everyday multi-step chains across tools (upload to Drive sft/)
 if _os.path.exists(_chains):
     train_tasks += [OOADialogues(_chains)] * ({CORE_REPEAT} * {SFT_EPOCHS})
 print0(f"chains file in the mix: {{_os.path.exists(_chains)}}")
-_combos = "{DRIVE_DIR}/sft/combos_train.jsonl"   # many different combinations, loops and conditions (upload to Drive sft/)
+_combos = "{SFT_DIR}/combos_train.jsonl"   # many different combinations, loops and conditions (upload to Drive sft/)
 if _os.path.exists(_combos):
     train_tasks += [OOADialogues(_combos)] * ({CORE_REPEAT} * {SFT_EPOCHS})
 print0(f"combinations file in the mix: {{_os.path.exists(_combos)}}")
-_notask = "{DRIVE_DIR}/sft/notask_train.jsonl"   # questions / chat / pasted errors -> short text reply, not a flow
+_notask = "{SFT_DIR}/notask_train.jsonl"   # questions / chat / pasted errors -> short text reply, not a flow
 if _os.path.exists(_notask):
     train_tasks += [OOADialogues(_notask)] * ({CORE_REPEAT} * {SFT_EPOCHS})
 print0(f"not-a-task file in the mix: {{_os.path.exists(_notask)}}")
-_tools = "{DRIVE_DIR}/sft/tools_train.jsonl"   # business apps (Google, Microsoft 365, Asana, GitHub, Slack ...)
+_tools = "{SFT_DIR}/tools_train.jsonl"   # business apps (Google, Microsoft 365, Asana, GitHub, Slack ...)
 if _os.path.exists(_tools):
     train_tasks += [OOADialogues(_tools)] * ({CORE_REPEAT} * {SFT_EPOCHS})
 print0(f"business-apps file in the mix: {{_os.path.exists(_tools)}}")
-_scen = "{DRIVE_DIR}/sft/scenarios_train.jsonl"   # whole business processes (3-8 steps, loops, conditions)
+_scen = "{SFT_DIR}/scenarios_train.jsonl"   # whole business processes (3-8 steps, loops, conditions)
 if _os.path.exists(_scen):
-    train_tasks += [OOADialogues(_scen)] * ({CORE_REPEAT} * {SFT_EPOCHS})
+    train_tasks += [OOADialogues(_scen)] * ({SCEN_REPEAT} * {SFT_EPOCHS})
 print0(f"business-processes file in the mix: {{_os.path.exists(_scen)}}")
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)
 print0(f"OOA training mixture: {{len(train_dataset):,}} rows")
-val_dataset = TaskMixture([OOADialogues("{DRIVE_DIR}/sft/val.jsonl")])"""
+val_dataset = TaskMixture([OOADialogues("{SFT_DIR}/val.jsonl")])"""
     s = s[:a] + new + s[b:]
     # never train on a cut-off flow: nanochat truncates conversations to 2048 tokens; skip ones longer than a row instead
     old_r = "            ids, mask = tokenizer.render_conversation(conversation)\\n            conv_buffer.append((ids, mask))"
@@ -409,7 +423,34 @@ for _f, _label in _sets:
         pl.append((sc["valid"], sc["valid"] and _in_order(row["must"], got)))
         print(("OK  " if pl[-1][1] else ("VALID" if pl[-1][0] else "FAIL ")), row["prompt"][:70], "->", got[:6])
     _summary.append(f"{_label.split(':')[0]}: {sum(o for _, o in pl)}/{len(pl)} right ({sum(v for v, _ in pl)} pass every rule)")
-print("\\nplain-wording eval | " + " | ".join(_summary))
+print("\\nplain-wording eval (bare model) | " + " | ".join(_summary))
+if ASSISTANT_EVAL:
+    # the same pipeline as the PC app and Studio: the model can only write real action / input names (catalog lock),
+    # a loop guard stops repetition, typo-level repair is applied, the platform rules verify, up to 2 retries
+    print("\\n=== Full assistant: catalog lock + repair + verify (what users get) ===")
+    sys.path[:0] = ["/content/ooa/serving"]
+    import ooa_server as _S
+    from model_backend import NanochatLocal as _Local
+    _local = _Local(os.environ["NANOCHAT_BASE_DIR"], "/content/nanochat", source=EVAL_SOURCE, device="cuda",
+                    catalog=f"{DRIVE_DIR}/sft/catalog.jsonl")
+    _router = _S.Router(f"{DRIVE_DIR}/sft/catalog.jsonl", "/content/platform",
+                        _S.Policy(allow_escalation=False, local_retries=2), _local, None)
+    _asum = []
+    for _f, _label in _sets:
+        if not os.path.exists(f"/content/ooa/{_f}"):
+            continue
+        print(f"--- {_label}")
+        ok = ver = 0; n = 0
+        for row in map(json.loads, open(f"/content/ooa/{_f}")):
+            n += 1
+            res = _router.run(row["prompt"])
+            got = RW.actions_of(json.loads(res["flow"])) if res.get("verified") else []
+            right = bool(res.get("verified")) and _in_order(row["must"], got)
+            ver += bool(res.get("verified")); ok += right
+            print(("OK   " if right else ("VALID" if res.get("verified") else "FAIL ")), f"{res.get('seconds', 0):>5}s", row["prompt"][:60], "->", got[:6])
+        _asum.append(f"{_label.split(':')[0]}: {ok}/{n} right ({ver} verified)")
+    print("\\nplain-wording eval (full assistant) | " + " | ".join(_asum))
+    del _local, _router
 del _engine, _model                    # free the GPU for later cells (RL, self-improvement)
 torch.cuda.empty_cache()
 print("\\nTry it yourself:")

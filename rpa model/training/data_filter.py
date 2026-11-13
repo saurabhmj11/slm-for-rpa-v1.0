@@ -1,7 +1,8 @@
 """Clean the training data before a big training run: every row passes a series of filters, the rest are dropped.
 
 Usage: python data_filter.py SFT_DIR OUT_DIR PLATFORM_REPO [EVAL_DIR] [--cap 60]
-Reads every *.jsonl in SFT_DIR (catalog.jsonl is copied as it is), writes the kept rows to OUT_DIR with the same
+Reads every *.jsonl in SFT_DIR (catalog.jsonl is copied as it is; train.jsonl, a combined copy of train_flows and
+train_catalog, and the eval*.jsonl test files are skipped), writes the kept rows to OUT_DIR with the same
 file names, and OUT_DIR/filter_report.json with what each filter removed per file.
 
 Filters, in order (a row is dropped by the first one it fails):
@@ -36,6 +37,7 @@ import ooa_reward as R
 import repair as RP
 
 MAX_CHARS = 6500
+NOT_TRAINING = {"train.jsonl"}
 LEAK = re.compile(r"\$\{?[A-Za-z_]|\booa\.[a-z_]+/|\bcore/[a-z_]+|[{}]|\bpath_\d\b|\bs\d+\b(?= step)")
 APPS = {"slack": "ooa.slack/", "asana": "ooa.asana/", "github": "ooa.github/", "docusign": "ooa.docusign/",
         "salesforce": "ooa.salesforce/", "snowflake": "ooa.snowflake/", "databricks": "ooa.databricks/",
@@ -91,8 +93,9 @@ def main():
     by_request = defaultdict(Counter)             # normalised request -> Counter(flow text) over all files
     staged = []                                   # (file, row_text, request_norm, answer, seq) after per-row filters
     for f in sorted(sft.glob("*.jsonl")):
-        if f.name == "catalog.jsonl":
-            continue
+        if f.name == "catalog.jsonl" or f.name in NOT_TRAINING or f.name.startswith("eval"):
+            continue          # not training data: train.jsonl repeats train_flows + train_catalog (it would make them
+                              # "duplicates" and empty them); eval*.jsonl are tests
         why = Counter()
         n = 0
         for line in open(f, encoding="utf-8"):
