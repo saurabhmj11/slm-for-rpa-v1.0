@@ -37,6 +37,7 @@ MIX = {
     "combos_train.jsonl": ("combos_train.jsonl", None),        # many different combinations, loops, conditions: all
     "notask_train.jsonl": ("notask_train.jsonl", None),        # questions / chat -> a short text reply, not a flow
     "tools_train.jsonl": ("tools_train.jsonl", None),          # business apps (Google, Microsoft 365, Asana ...): all
+    "scenarios_train.jsonl": ("scenarios_train.jsonl", None),  # whole business processes (3-8 steps, loops, ifs): all
     "synth_train.jsonl": ("synth_train.jsonl", 2000),
     "synth_pattern.jsonl": ("synth_pattern.jsonl", 800),
     "train_flows.jsonl": ("train_flows.jsonl", None),
@@ -66,7 +67,8 @@ def read_rows(p):
         return [l for l in f if l.strip()]
 
 
-TEST_SETS = [("plain_requests.jsonl", "set 1 (20 everyday requests)"), ("plain_requests_2.jsonl", "set 2 (15 more, never tuned on)")]
+TEST_SETS = [("plain_requests.jsonl", "set 1 (20 everyday requests)"), ("plain_requests_2.jsonl", "set 2 (15 more, never tuned on)"),
+             ("plain_requests_3.jsonl", "set 3 (whole business processes, held out from the use-case data)")]
 
 
 # Modules for focused rounds (--focus): a row belongs to a module by what its answer does.

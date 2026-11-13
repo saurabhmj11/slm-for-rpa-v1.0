@@ -32,7 +32,8 @@ REQUIRED = ["train_flows.jsonl", "train_catalog.jsonl", "synth_train.jsonl", "sy
 
 # how often train_local.py's mix shows each file per pass (keep in step with train_local.py's defaults)
 WEIGHT = {"train_flows.jsonl": 5, "natural_train.jsonl": 5, "core_train.jsonl": 5, "chains_train.jsonl": 5,
-          "combos_train.jsonl": 5, "notask_train.jsonl": 5, "tools_train.jsonl": 5}
+          "combos_train.jsonl": 5, "notask_train.jsonl": 5, "tools_train.jsonl": 5,
+          "scenarios_train.jsonl": 5}
 
 
 def passes_to_steps(sft, passes):

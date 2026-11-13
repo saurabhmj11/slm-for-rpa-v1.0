@@ -16,7 +16,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 EVALS = [HERE.parent / "eval" / "plain_requests.jsonl",      # set 1: the 20 everyday requests
-         HERE.parent / "eval" / "plain_requests_2.jsonl"]    # set 2: 15 more, never used to pick a model by hand
+         HERE.parent / "eval" / "plain_requests_2.jsonl",    # set 2: 15 more, never used to pick a model by hand
+         HERE.parent / "eval" / "plain_requests_3.jsonl"]    # set 3: whole business processes, held out from training
 
 
 def actions(steps):

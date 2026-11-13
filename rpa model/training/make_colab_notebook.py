@@ -267,6 +267,10 @@ _tools = "{DRIVE_DIR}/sft/tools_train.jsonl"   # business apps (Google, Microsof
 if _os.path.exists(_tools):
     train_tasks += [OOADialogues(_tools)] * ({CORE_REPEAT} * {SFT_EPOCHS})
 print0(f"business-apps file in the mix: {{_os.path.exists(_tools)}}")
+_scen = "{DRIVE_DIR}/sft/scenarios_train.jsonl"   # whole business processes (3-8 steps, loops, conditions)
+if _os.path.exists(_scen):
+    train_tasks += [OOADialogues(_scen)] * ({CORE_REPEAT} * {SFT_EPOCHS})
+print0(f"business-processes file in the mix: {{_os.path.exists(_scen)}}")
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)
