@@ -25,6 +25,8 @@ files = {
     "serving/backends.py": (H.parent / "serving/backends.py").read_text(encoding="utf-8"),
     "flow_check.py": (H.parent / "eval/flow_check.py").read_text(encoding="utf-8"),
     "plain_requests.jsonl": (H.parent / "eval/plain_requests.jsonl").read_text(encoding="utf-8"),
+    "plain_requests_2.jsonl": (H.parent / "eval/plain_requests_2.jsonl").read_text(encoding="utf-8"),
+    "plain_requests_3.jsonl": (H.parent / "eval/plain_requests_3.jsonl").read_text(encoding="utf-8"),
 }
 
 cells = []
@@ -387,19 +389,27 @@ for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval_pattern.jsonl")):
     sc = RW.score(out.split("Assistant:", 1)[-1], RW.gold_actions(row["gold_flow"]))
     pr.append(sc)
 print(f"real-pattern eval: {len(pr)} | valid (passes every rule) {sum(x['valid'] for x in pr)} | exact action sequence {sum(x['solved'] for x in pr)} | mean score {sum(x['total'] for x in pr)/max(1,len(pr)):.3f}")
-print("\\n=== Plain-wording eval: 20 short requests written the way people talk (hand-written, never generated) ===")
 def _in_order(need, got):
     it = iter(got)
     return all(any(a == g for g in it) for a in need)
-pl = []
-for row in map(json.loads, open("/content/ooa/plain_requests.jsonl")):
-    out = run_cli(row["prompt"])
-    sc = RW.score(out.split("Assistant:", 1)[-1])
-    try: got = RW.actions_of(json.loads(RW.clean(out.split("Assistant:", 1)[-1])))
-    except Exception: got = []
-    pl.append((sc["valid"], sc["valid"] and _in_order(row["must"], got)))
-    print(("OK  " if pl[-1][1] else ("VALID" if pl[-1][0] else "FAIL ")), row["prompt"][:70], "->", got[:6])
-print(f"plain-wording eval: {len(pl)} | valid (passes every rule) {sum(v for v, _ in pl)} | has the needed actions in order {sum(o for _, o in pl)}")
+_sets = [("plain_requests.jsonl", "set 1: 20 everyday requests (hand-written)"),
+         ("plain_requests_2.jsonl", "set 2: 15 more, never tuned on"),
+         ("plain_requests_3.jsonl", "set 3: whole business processes, held out from training")]
+_summary = []
+for _f, _label in _sets:
+    if not os.path.exists(f"/content/ooa/{_f}"):
+        continue
+    print(f"\\n=== Plain-wording eval, {_label} ===")
+    pl = []
+    for row in map(json.loads, open(f"/content/ooa/{_f}")):
+        out = run_cli(row["prompt"])
+        sc = RW.score(out.split("Assistant:", 1)[-1])
+        try: got = RW.actions_of(json.loads(RW.clean(out.split("Assistant:", 1)[-1])))
+        except Exception: got = []
+        pl.append((sc["valid"], sc["valid"] and _in_order(row["must"], got)))
+        print(("OK  " if pl[-1][1] else ("VALID" if pl[-1][0] else "FAIL ")), row["prompt"][:70], "->", got[:6])
+    _summary.append(f"{_label.split(':')[0]}: {sum(o for _, o in pl)}/{len(pl)} right ({sum(v for v, _ in pl)} pass every rule)")
+print("\\nplain-wording eval | " + " | ".join(_summary))
 del _engine, _model                    # free the GPU for later cells (RL, self-improvement)
 torch.cuda.empty_cache()
 print("\\nTry it yourself:")
