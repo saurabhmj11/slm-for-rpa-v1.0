@@ -8,7 +8,8 @@ llm.c-master/
 minbpe-master/
 nanochat-master/
 nanoGPT-master/
-.claude/
+.claude/*
+!.claude/skills/
 rpa model/local_check_report.txt
 rpa model/assistant/tests/screens/
 rpa model/assistant/assistant_data/
