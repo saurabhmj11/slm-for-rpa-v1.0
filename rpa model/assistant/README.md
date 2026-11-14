@@ -67,8 +67,9 @@ Command line, if you prefer:
 ```
 python app.py --model-dir ..\nanochat_base --nanochat ..\nanochat --platform ..\platform [--catalog FILE] [--port 8765] [--data-dir DIR] [--fake-model]
 ```
-More options: `--host` / `--token` / `--allowed-hosts` (serving other machines, see DEPLOY.md), `--max-waiting N`
-(requests that may wait for the model, default 4; more get HTTP 429) and `--time-budget SECONDS` (no retry starts after
+More options: `--host` / `--token` / `--allowed-hosts` (serving other machines, see DEPLOY.md; with a token the
+browser page is off), `--max-waiting N` (requests that may wait for the model, default 4; more get HTTP 429; 0 means
+no queue) and `--time-budget SECONDS` (no retry starts after
 this, default 120). `GET /health` answers while the model loads; `GET /ready` answers 200 once it is loaded.
 
 ## What the model is good and weak at today
@@ -143,7 +144,8 @@ says how to install them), then starts the platform (http://localhost:8720) and 
 The assistant answers OpenAI-style requests at `http://127.0.0.1:8765/v1/chat/completions` (only from this
 computer), so Studio's **Assistant** can use your trained model. Once, in Studio: sun icon > **One Model
 Connections...** > **+ Connection**: name `ooa`, provider **OpenAI-compatible**, model `ooa-assistant`,
-**No key (local model)**, endpoint `http://127.0.0.1:8765/v1`, leave **Default** unticked, **Save**. (Do not make it
+**No key (local model)**, endpoint `http://127.0.0.1:8765/v1`, untick **Use it by default when an agent names no
+connection** (it starts ticked when no default connection exists yet), **Save**. (Do not make it
 the default connection: every GenAI step without a connection of its own goes to the default one, and this model only
 writes flows.) Then **Assistant > Build from a description**, pick **ooa** as the Model Connection, describe the job,
 **Generate steps**, review, **Insert into the agent**. Answers are

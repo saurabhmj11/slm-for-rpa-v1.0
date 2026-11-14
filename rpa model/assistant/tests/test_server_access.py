@@ -139,13 +139,16 @@ def test_token_required_on_model_routes(serve):
     assert st == 200
     st, r, _ = call(port, "POST", "/v1/chat/completions", CHAT, headers={**bearer(), "Content-Type": "text/plain"})
     assert st == 400
-    # the browser page keeps its own protection and needs no token on this machine
-    st, _, _ = call(port, "GET", "/api/status")
-    assert st == 200
-    st, _, _ = call(port, "GET", "/api/status", headers={"Host": "evil.example"})
+    # the browser page has no login: with a token it is off, even for this machine (a proxy here looks local too)
+    st, r, _ = call(port, "GET", "/api/status")
+    assert st == 403 and "token" in r["error"], r
+    st, _, _ = call(port, "GET", "/")
     assert st == 403
-    st, _, _ = call(port, "POST", "/api/build", {"request": GOOD}, headers={A.CSRF_HEADER: "1"})
-    assert st == 200
+    flow = {"kind": "TaskBot", "id": "t", "name": "t", "steps": []}
+    for path, body in (("/api/build", {"request": GOOD}), ("/api/run", {"flow": flow, "allow_risky": True})):
+        for h in ({A.CSRF_HEADER: "1"}, {A.CSRF_HEADER: "1", **bearer()}):
+            st, r, _ = call(port, "POST", path, body, headers=h)
+            assert st == 403, (path, h, st, r)
 
 
 def test_allowed_hosts(serve):
@@ -178,18 +181,31 @@ def _lan_address():
     return None if A.is_loopback(ip) else ip
 
 
-def test_bound_beyond_loopback_page_only_for_this_machine(serve):
+def test_bound_beyond_loopback_page_is_off(serve):
     _, port = serve(host="0.0.0.0", token=TOKEN)
-    assert call(port, "GET", "/api/status")[0] == 200                       # from this machine
+    assert call(port, "GET", "/api/status")[0] == 403                       # not even from this machine
     assert call(port, "GET", "/health")[0] == 200
+    assert call(port, "GET", "/v1/models", headers=bearer())[0] == 200
     lan = _lan_address()
     if lan is None:
         pytest.skip("no non-loopback address to call from")
     st, r, _ = call(port, "GET", "/api/status", addr=lan, headers={"Host": "127.0.0.1:%d" % port})
-    assert st == 403 and "this machine" in r["error"], r
+    assert st == 403, r
     assert call(port, "GET", "/health", addr=lan)[0] == 200
     assert call(port, "GET", "/v1/models", addr=lan)[0] == 401
     assert call(port, "GET", "/v1/models", addr=lan, headers=bearer())[0] == 200
+
+
+def test_page_refuses_proxied_requests(serve):
+    _, port = serve()
+    assert call(port, "GET", "/api/status")[0] == 200
+    for h in ({"X-Forwarded-For": "203.0.113.9"}, {"Forwarded": "for=203.0.113.9"}, {"X-Real-IP": "203.0.113.9"},
+              {"X-Forwarded-Host": "assistant.example"}):
+        st, r, _ = call(port, "GET", "/api/status", headers=h)
+        assert st == 403 and "proxy" in r["error"], (h, r)
+        st, _, _ = call(port, "POST", "/api/build", {"request": GOOD}, headers={**h, A.CSRF_HEADER: "1"})
+        assert st == 403, h
+    assert call(port, "GET", "/health", headers={"X-Forwarded-For": "203.0.113.9"})[0] == 200
 
 
 # ---------------------------------------------------------------------- health / ready / version
@@ -247,6 +263,26 @@ def test_queue_full_gets_429(serve):
     t2.join(30)
     assert sorted(res) == [200, 200]
     assert app.waiting == 0
+
+
+def test_max_waiting_zero_means_no_queue(serve):
+    m = SlowModel()
+    app, port = serve(model=m, max_waiting=0)
+    st, r, _ = call(port, "POST", "/v1/chat/completions", CHAT)        # the model is free: answered
+    assert st == 200, r
+    st, r, _ = call(port, "POST", "/api/build", {"request": GOOD}, headers={A.CSRF_HEADER: "1"})
+    assert st == 200, r
+    m.go.clear()
+    m.started.clear()
+    res = []
+    t1 = threading.Thread(target=lambda: res.append(call(port, "POST", "/v1/chat/completions", CHAT)[0]))
+    t1.start()
+    assert m.started.wait(10)                                   # the model is busy: no one may wait
+    st, r, resp = call(port, "POST", "/v1/chat/completions", CHAT)
+    assert st == 429 and resp.getheader("Retry-After") == str(A.RETRY_AFTER), r
+    m.go.set()
+    t1.join(30)
+    assert res == [200] and app.waiting == 0
 
 
 def test_time_budget_stops_retries(serve):

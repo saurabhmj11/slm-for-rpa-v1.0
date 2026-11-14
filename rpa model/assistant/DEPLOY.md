@@ -21,8 +21,8 @@ Other behaviour worth knowing:
 - The connection check messages ("Reply with the single word OK.", "Answer with the single word OK.") are answered
   with `OK` at once, without the model.
 - Requests with `tools` are refused with `400`: the model writes flows only.
-- The browser page of the assistant (Build / Learn / Run tabs, `/api/*`) is only served to the container itself, not
-  over the network.
+- The browser page of the assistant (Build / Learn / Run tabs, `/api/*`) is off while a token is set, which is always
+  the case in the container. It has no login of its own, so it is not served to anyone, not even the machine itself.
 
 ## 1. Build the image
 
@@ -99,6 +99,11 @@ The container's health check calls `/health`. Use `/ready` for a load balancer o
 Put it on a private network or behind a TLS proxy: the token travels in a header, so plain HTTP is only safe on a
 network you trust.
 
+Always set the token, also when the server listens on 127.0.0.1 and a proxy on the same machine forwards to it. A
+proxy connects from 127.0.0.1, so without a token every client of the proxy can use the model routes. With a token
+the model routes need it and the browser page is off. The page also refuses any request that carries `Forwarded`,
+`X-Forwarded-For`, `X-Forwarded-Host` or `X-Real-IP`.
+
 ## 4. Point Studio at it
 
 On the machine where the platform runs, set an environment variable that holds the token (for example
@@ -112,7 +117,7 @@ On the machine where the platform runs, set an environment variable that holds t
 | Model | `ooa-assistant` |
 | Endpoint (base URL) | `http://<host>:8765/v1` |
 | API key | the environment variable holding the token (`api_key_env`), or the credential |
-| Default | **leave unticked** |
+| Use it by default when an agent names no connection | **untick it** (it starts ticked when the workspace has no default connection yet) |
 
 Do not make it the default connection. Every GenAI step that has no connection of its own is sent to the default
 connection, and this model only writes flows; it cannot answer general prompts.
@@ -161,5 +166,6 @@ OOA_ASSISTANT_TOKEN=<the token> python assistant/app.py --host 0.0.0.0 \
   --model-dir /srv/ooa-models/2026-11-14/nanochat_base --nanochat /path/to/nanochat --platform /path/to/platform
 ```
 
-`--allowed-hosts NAME ...` adds Host header names the browser page accepts (for example when you open it through a
-local proxy). The model routes do not check the Host header when a token is set: the token protects them.
+`--allowed-hosts NAME ...` adds Host header names the browser page accepts when no token is set (for example another
+name for this machine). The model routes do not check the Host header when a token is set: the token protects them.
+With a token the browser page is off; to use it, start a second copy on this machine without `--host` and `--token`.

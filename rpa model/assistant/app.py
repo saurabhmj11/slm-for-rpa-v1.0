@@ -5,7 +5,9 @@
 
 Binds 127.0.0.1 by default (nothing is reachable from other machines). Another --host (a server, a container) needs a
 bearer token: the model routes (/v1/*, /api/assistant/v1/*) then require "Authorization: Bearer <token>", and the
-browser page and its /api/* routes answer only requests from the machine itself. See DEPLOY.md.
+browser page and its /api/* routes are off (403): they have no login, and behind a proxy every caller would look like
+this machine. The page also refuses requests that came through a proxy (Forwarded / X-Forwarded-For / X-Real-IP).
+See DEPLOY.md.
 Loads the model once at start; one generation at a time, with a bounded queue (429 when it is full).
 Tabs in the page (static/index.html): Build, Learn, Practice, Run, Progress. See README.md and SPEC.md.
 
@@ -47,6 +49,7 @@ TIME_BUDGET = 120.0        # seconds per request: no retry attempt starts after 
 RETRY_AFTER = 10           # seconds, sent with 429
 OPEN_PATHS = ("/health", "/ready")                         # no checks at all: process and readiness probes
 API_PREFIXES = ("/v1/", "/api/assistant/v1/")              # model routes for programs (Studio): bearer token when set
+PROXY_HEADERS = ("Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP")   # the page refuses proxied requests
 
 GOOD_AT = ["Step-by-step requests worded like the catalog's action descriptions, with the inputs and outputs named, "
            "e.g. 'Read a text file, then parse JSON text into a Dictionary or List. The flow takes path as input. "
@@ -166,21 +169,24 @@ class Assistant:
     @contextmanager
     def generation(self):
         """Wait for the model (one generation at a time). At most max_waiting requests wait; one more, or a wait
-        longer than the time budget, gets 429. Yields the deadline after which no retry attempt starts."""
+        longer than the time budget, gets 429. A request that finds the model free never counts as waiting, so
+        max_waiting 0 means: no queue, one request at a time. Yields the deadline after which no retry attempt starts."""
         if self.model is None:
             raise ApiError(503, "the model is still loading" if not self.model_error else
                            "the model failed to load: " + self.model_error)
         deadline = time.time() + self.time_budget
-        with self.wait_lock:
-            if self.waiting >= self.max_waiting:
-                raise ApiError(429, f"busy: {self.waiting} requests are already waiting for the model; try again "
-                                    "shortly", {"Retry-After": str(RETRY_AFTER)})
-            self.waiting += 1
-        try:
-            got = self.model_lock.acquire(timeout=self.time_budget)
-        finally:
+        got = self.model_lock.acquire(blocking=False)       # the model is free: no waiting, whatever max_waiting is
+        if not got:
             with self.wait_lock:
-                self.waiting -= 1
+                if self.waiting >= self.max_waiting:
+                    raise ApiError(429, f"busy: {self.waiting} requests are already waiting for the model; try "
+                                        "again shortly", {"Retry-After": str(RETRY_AFTER)})
+                self.waiting += 1
+            try:
+                got = self.model_lock.acquire(timeout=self.time_budget)
+            finally:
+                with self.wait_lock:
+                    self.waiting -= 1
         if not got:
             raise ApiError(429, "busy: the model did not become free in time; try again shortly",
                            {"Retry-After": str(RETRY_AFTER)})
@@ -369,10 +375,10 @@ def _flow(body, key):
 
 
 # ---------------------------------------------------------------------- HTTP
-def make_handler(app: Assistant, token: str | None = None, allowed_hosts=(), local_only_ui: bool = False):
-    """token: when set, the model routes (API_PREFIXES) need "Authorization: Bearer <token>".
-    allowed_hosts: extra Host header values accepted ("name" or "name:port"; a bare name matches any port).
-    local_only_ui: the page and its /api/* routes answer only clients on this machine (set when bound beyond loopback)."""
+def make_handler(app: Assistant, token: str | None = None, allowed_hosts=()):
+    """token: when set, the model routes (API_PREFIXES) need "Authorization: Bearer <token>", and the browser page and
+    its other /api/* routes (which have no login: /api/run runs a posted flow) are off.
+    allowed_hosts: extra Host header values accepted ("name" or "name:port"; a bare name matches any port)."""
     extra_hosts = {h.strip().lower() for h in allowed_hosts if h and h.strip()}
 
     class Handler(BaseHTTPRequestHandler):
@@ -431,8 +437,12 @@ def make_handler(app: Assistant, token: str | None = None, allowed_hosts=(), loc
                     if ctype != "application/json":
                         raise ApiError(400, "POST needs Content-Type application/json")
                 return
-            if not api and local_only_ui and not is_loopback(self.client_address[0]):
-                raise ApiError(403, "forbidden: the assistant page is only served to this machine")
+            if not api and token:
+                raise ApiError(403, "forbidden: the assistant page is off while a token is set; start another copy "
+                                    "without --token and --host to use it on this machine")
+            if not api and any(self.headers.get(h) is not None for h in PROXY_HEADERS):
+                raise ApiError(403, "forbidden: the assistant page is not served through a proxy; open it on this "
+                                    "machine at http://127.0.0.1:%d/" % self.server.server_address[1])
             self._check_origin(method)
 
         def _check_origin(self, method):
@@ -579,7 +589,7 @@ class _Server6(ThreadingHTTPServer):
 
 def make_server(app: Assistant, port: int = 8765, host: str = "127.0.0.1", token: str | None = None,
                 allowed_hosts=()) -> ThreadingHTTPServer:
-    """Binding beyond loopback needs a token (SystemExit otherwise); the page is then only served to this machine."""
+    """Binding beyond loopback needs a token (SystemExit otherwise). With a token the browser page is off."""
     if token is not None and len(token) < MIN_TOKEN:
         raise SystemExit(f"the token must be at least {MIN_TOKEN} characters long")
     local = is_loopback(host)
@@ -587,7 +597,7 @@ def make_server(app: Assistant, port: int = 8765, host: str = "127.0.0.1", token
         raise SystemExit(f"--host {host} makes the assistant reachable from other machines: set a token first "
                          f"(--token or the environment variable {TOKEN_ENV})")
     cls = _Server6 if ":" in host else ThreadingHTTPServer
-    srv = cls((host, port), make_handler(app, token, allowed_hosts, local_only_ui=not local))
+    srv = cls((host, port), make_handler(app, token, allowed_hosts))
     srv.daemon_threads = True
     return srv
 
@@ -604,10 +614,12 @@ def parse_args(argv=None):
     ap.add_argument("--allowed-hosts", nargs="*", default=[], metavar="HOST",
                     help="extra Host header values accepted (name or name:port), e.g. the server's DNS name")
     ap.add_argument("--token", default=None,
-                    help=f"bearer token the model routes require (default: environment variable {TOKEN_ENV}); "
+                    help=f"bearer token the model routes require (default: environment variable {TOKEN_ENV}); the browser "
+                         "page is then off; "
                          "prefer the environment variable, a command line is visible to other users")
     ap.add_argument("--max-waiting", type=int, default=MAX_WAITING,
-                    help=f"requests that may wait for the model while one runs; more get 429 (default {MAX_WAITING})")
+                    help=f"requests that may wait for the model while one runs; more get 429 (default {MAX_WAITING}; "
+                         "0: no queue, a request that finds the model busy gets 429 at once)")
     ap.add_argument("--time-budget", type=float, default=TIME_BUDGET,
                     help=f"seconds per request after which no retry attempt starts (default {TIME_BUDGET:g})")
     ap.add_argument("--data-dir", default="assistant_data", help="feedback, sandbox and exports go here")
@@ -632,8 +644,9 @@ def main(argv=None):
     def load():          # the server answers /health (and says "loading" on /ready) while the model loads
         try:
             app.set_model(load_model(args, catalog))
-            print(f"OOA Assistant is running: open http://127.0.0.1:{srv.server_address[1]}/ in your browser on this "
-                  f"machine (Ctrl+C to stop). Data folder: {app.data}", flush=True)
+            where = ("the browser page is off while a token is set" if token else
+                     f"open http://127.0.0.1:{srv.server_address[1]}/ in your browser on this machine")
+            print(f"OOA Assistant is running: {where} (Ctrl+C to stop). Data folder: {app.data}", flush=True)
         except BaseException as e:  # noqa: BLE001 - report it and stop: a server without its model is no use
             app.model_error = f"{type(e).__name__}: {e}"
             print("The model failed to load: " + app.model_error, file=sys.stderr, flush=True)
@@ -644,7 +657,7 @@ def main(argv=None):
           flush=True)
     threading.Thread(target=load, daemon=True).start()
     if token:
-        print("Model routes (/v1/*, /api/assistant/v1/*) need the bearer token.", flush=True)
+        print("Model routes (/v1/*, /api/assistant/v1/*) need the bearer token; the browser page is off.", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
