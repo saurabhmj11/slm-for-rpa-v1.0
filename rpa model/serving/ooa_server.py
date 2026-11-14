@@ -1,15 +1,22 @@
 """OOA assistant server: one OpenAI-compatible endpoint, a router, a verifier, and client data-policy switches.
 
    request -> [mask PII for cloud] -> router
-        simple?  -> LOCAL model (our own) -> repair -> verify -> ok? return
-        else / failed -> CLOUD model (Claude) if the client policy allows -> repair -> verify (one retry with the errors)
+        simple?  -> LOCAL model (our own): context (actions, similar examples, variables) -> plan + flow
+                    -> question? return it -> repair -> verify + plan coverage -> ok? return
+                    -> self-correction (previous flow + problems) -> long plan: build it in parts and merge
+        else / failed -> escalation model if the client policy allows (Anthropic API, or any OpenAI-compatible
+                    endpoint: escalate_url) -> repair -> verify (one retry with the errors)
+        verified -> safety warnings for destructive steps (notes, "warnings", the ooa field)
         nothing verified -> honest error (never returns an unchecked flow as if it were fine)
    POST /v1/chat/completions   OpenAI-style; the last user message is the request; the answer is the flow JSON
-   POST /v1/feedback           {"prompt","flow","accepted","edited_flow"}  -> feedback.jsonl (only if the policy allows)
+   POST /v1/feedback           {"request","flow","verdict": inserted|discarded|edited,"edited_flow"} (or the older
+                               {"prompt","flow","accepted"}) -> feedback.jsonl (only if the policy allows)
    GET  /health
 
-Run:  python ooa_server.py --catalog catalog.jsonl --platform PLATFORM_REPO --policy policy.json [--local nanochat] [--port 8080]
-Local backend: any object with generate(request, attempt) -> str (see backends.py). Cloud: Anthropic Messages API (env ANTHROPIC_API_KEY).
+Run:  python ooa_server.py --catalog catalog.jsonl --platform PLATFORM_REPO --policy policy.json [--local nanochat]
+                           [--examples examples.jsonl] [--prompt-format auto|plain|context] [--port 8080]
+Local backend: any object with generate(prompt, attempt) -> str (see backends.py). Escalation: Anthropic Messages API
+(env ANTHROPIC_API_KEY) or an OpenAI-compatible endpoint (policy escalate_url / escalate_model / escalate_key_env).
 Default policy is LOCAL-ONLY and stores nothing.
 """
 import argparse, json, os, re, sys, time, threading
@@ -20,8 +27,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "training"))
 import ooa_reward as R
+import ooa_format as F
 import retrieval
 import repair as RP
+import safety
 
 
 @dataclass
@@ -31,10 +40,21 @@ class Policy:
     store_logs: bool = False             # keep a log of requests and results (masked)
     allow_training_on_data: bool = False  # may logged data / feedback be used to train models
     local_retries: int = 2
-    max_clauses_local: int = 6           # longer / more complex requests go to the cloud straight away
+    max_clauses_local: int = 6           # longer / more complex requests go to the cloud straight away ...
+    local_first: bool = False            # ... unless this is on: our own model tries every request first
     cloud_model: str = "claude-sonnet-5-5"
     cloud_max_tokens: int = 6000
     log_dir: str = "ooa_logs"
+    # escalation to any OpenAI-compatible endpoint instead of the Anthropic API (off unless allow_escalation is on)
+    escalate_url: str = ""               # e.g. https://gateway.example/v1 ; empty: the Anthropic API (cloud_model)
+    escalate_model: str = ""
+    escalate_key_env: str = "OOA_ESCALATE_API_KEY"   # environment variable that holds its API key
+    escalate_plan_lines: int = 12        # a failed local flow whose plan is longer goes to that model straight away
+    # the local model's layers (see Router)
+    prompt_format: str = "auto"          # "plain" | "context" | "auto" (context when the model pack has examples.jsonl)
+    context_k: int = 12                  # BM25 candidate actions in the context
+    decompose_lines: int = 6             # a plan longer than this is built in parts after one failed whole attempt
+    part_attempts: int = 2               # attempts per part (the second sees the first one's problems)
 
     @classmethod
     def load(cls, path=None):
@@ -97,8 +117,19 @@ NOT_A_TASK = ("The model did not read this as a task to automate, so it answered
 OUT_OF_TIME = "The time for this request ran out, so no further attempt was made."
 
 
+STUDIO_NOTE = "Written by the OOA assistant and checked against the platform's rules."
+ASKED = "the model asked a question instead of guessing: the request does not say enough to automate"
+
+
 class Router:
-    def __init__(self, catalog, platform, policy, local=None, cloud=None):
+    """Layers, in order: retrieval context (actions, similar examples, the open agent's variables) -> plan-first answer
+    -> clarify (a question comes back as the answer) -> repair + verify + plan coverage -> self-correction (the next
+    attempt sees its previous flow and the problems) -> decomposition (a long plan is built in parts and merged) ->
+    escalation (a bigger model through the Anthropic API or any OpenAI-compatible endpoint, when the policy allows)
+    -> safety warnings on the verified flow. A model trained before context and plans (prompt_format "plain") gets
+    the request only and answers with flow JSON; that path works as before."""
+
+    def __init__(self, catalog, platform, policy, local=None, cloud=None, examples=None, prompt_format=None):
         os.environ["OOA_CATALOG"] = catalog
         os.environ["OOA_SCHEMA"] = str(Path(platform) / "contracts/flow-schema/flow.v1.json")
         R.configure()
@@ -110,11 +141,39 @@ class Router:
         rules = Path(platform) / "docs/llms.txt"
         self.rules = rules.read_text(encoding="utf-8") if rules.exists() else "Write an OOA Flow v1 JSON document."
         self.policy, self.local, self.cloud = policy, local, cloud
+        self.examples = F.ExampleIndex.load(examples) if examples and Path(examples).is_file() else None
+        self.prompt_format = prompt_format or policy.prompt_format
         self.lock = threading.Lock()
 
-    # -- one attempt: parse -> repair -> verify ---------------------------------------------------
-    def check(self, raw, existing=None, assistant=False):
-        text = extract_json(raw)
+    # -- prompt format ------------------------------------------------------------------------------
+    def format(self):
+        """"context" (training/ooa_format.build_user) or "plain" (the request only). auto: what the local backend
+        says in info["prompt_format"], else context when the model pack came with its example index."""
+        if self.prompt_format in ("plain", "context"):
+            return self.prompt_format
+        info = getattr(self.local, "info", None)
+        said = info.get("prompt_format") if isinstance(info, dict) else None
+        if said in ("plain", "context"):
+            return said
+        return "context" if self.examples is not None else "plain"
+
+    def prompt(self, request, existing=None, previous=None, problems=None, required=()):
+        """The user turn for the local model: the request + retrieval context (+ previous flow and problems)."""
+        actions, keep = F.context_actions(request, (), self.cat, self.index, self.policy.context_k)
+        have = {e["id"] for e in actions}
+        actions = [self.cat[a] for a in required if a in self.cat and a not in have] + actions
+        examples = self.examples.search(request, F.MAX_EXAMPLES) if self.examples is not None else []
+        variables = [v for v in existing or [] if isinstance(v, dict)]
+        return F.build_user(request, actions, examples, variables, previous, problems,
+                            required=list(dict.fromkeys(list(required) + keep)))
+
+    # -- one answer: parse -> repair -> verify -------------------------------------------------------
+    def verify(self, text, existing=None, plan=None):
+        """Flow text -> (flow dict, repair notes) when it passes, else (None, problems). plan: the answer's plan
+        lines; an action the plan names that no step uses is a problem too."""
+        if text is None:
+            return None, ["The answer has a plan but no flow after 'Flow:'."]
+        text = extract_json(text)
         try:
             obj = json.loads(text)
         except Exception:
@@ -129,16 +188,40 @@ class Router:
         if extra:
             flow = {**flow, "variables": list(flow.get("variables", [])) + extra}   # variables already in the user's open agent
         flow, notes = RP.repair(flow, self.cat)
-        mini = json.dumps(flow, separators=(",", ":"), ensure_ascii=False)
-        problems = R.problems(mini)
+        problems = R.problems(json.dumps(flow, separators=(",", ":"), ensure_ascii=False))
+        problems += [f"The plan names {a} but no step of the flow uses it." for a in F.plan_coverage(plan, flow)]
         if problems:
             return None, problems
+        return flow, notes
+
+    def answer_text(self, flow, existing=None, assistant=False, warnings=()):
+        """The verified flow as the client reads it: Studio's {variables, steps, notes, warnings}, or the flow JSON."""
         if assistant:
             have = {v.get("name") for v in (existing or []) if isinstance(v, dict)}
+            notes = " ".join([STUDIO_NOTE] + list(warnings))
             out = {"variables": [v for v in flow.get("variables", []) if v.get("name") not in have], "steps": flow["steps"],
-                   "notes": "Written by the OOA assistant and checked against the platform's rules."}
-            return json.dumps(out, separators=(",", ":"), ensure_ascii=False), notes
-        return mini, notes
+                   "notes": notes, "warnings": list(warnings)}
+            return json.dumps(out, separators=(",", ":"), ensure_ascii=False)
+        return json.dumps(flow, separators=(",", ":"), ensure_ascii=False)
+
+    def check(self, raw, existing=None, assistant=False):
+        """One raw answer -> (answer text, repair notes) or (None, problems). Reads plan-first and JSON-only answers."""
+        ans = F.parse_answer(raw)
+        flow, info = self.verify(ans["flow_text"] if ans["kind"] == "flow" else raw, existing, ans["plan"])
+        if flow is None:
+            return None, info
+        return self.answer_text(flow, existing, assistant, safety.warnings(flow, self.cat)), info
+
+    @staticmethod
+    def _previous(text):
+        """The previous answer's flow for a self-correction prompt (dict), or None when it was not JSON."""
+        if not text:
+            return None
+        try:
+            obj = json.loads(extract_json(text))
+        except Exception:
+            return None
+        return obj if isinstance(obj, dict) else None
 
     def cloud_prompt(self, request, errors):
         cands = self.index.search(request, 40)
@@ -163,40 +246,117 @@ class Router:
         user = request if not errors else request + "\n\nYour previous answer had these problems, fix them:\n- " + "\n- ".join(errors)
         return system, user
 
+    # -- the local model's layers ------------------------------------------------------------------------
+    def _local(self, request, existing, tried, late, can_escalate):
+        """Attempts of the local model. Returns {"flow", "notes", "plan", "parts"} on success, {"question"} when it
+        asks, else {"errors", "plan"}."""
+        p, fmt = self.policy, self.format()
+        prev = probs = None
+        plan, errors = [], []
+        for attempt in range(1 + p.local_retries):
+            if late():
+                return {"errors": list(errors) + [OUT_OF_TIME], "plan": plan}
+            prompt = self.prompt(request, existing, prev, probs) if fmt == "context" else request
+            try:
+                raw = self.local.generate(prompt, attempt)
+            except Exception as ex:
+                return {"errors": [f"local model error: {ex}"], "plan": plan}
+            ans = F.parse_answer(raw)
+            if ans["kind"] == "question":
+                tried.append({"source": "local", "ok": True, "kind": "question"})
+                return {"question": ans["question"], "plan": []}
+            flow, info = self.verify(ans["flow_text"] if ans["kind"] == "flow" else raw, existing, ans["plan"])
+            tried.append({"source": "local", "ok": flow is not None})
+            if ans["plan"]:
+                plan = ans["plan"]
+                tried[-1]["plan_lines"] = len(plan)
+            if flow is not None:
+                return {"flow": flow, "notes": info, "plan": ans["plan"]}
+            tried[-1]["preview"] = (raw or "")[:300]      # what the model wrote, so a failure can be read
+            errors = info
+            if ans["kind"] == "reply":
+                # Text instead of a flow: the request was not read as a task (a question, an error message pasted
+                # in, chat). A retry only loops on the same text, and forcing JSON makes up an unrelated flow, so
+                # stop here and say so.
+                return {"errors": [NOT_A_TASK], "plan": plan}
+            if fmt == "context":
+                # self-correction: the next attempt sees the flow it wrote and what the checker found
+                prev, probs = self._previous(ans["flow_text"]), info
+            if plan and can_escalate and len(plan) > p.escalate_plan_lines:
+                return {"errors": errors, "plan": plan}      # a long process: the bigger model takes it
+            if len(plan) > p.decompose_lines:
+                break                                        # a long plan: build it in parts instead of retrying
+        if plan and not late():
+            flow, info = self._decompose(request, plan, existing, tried, late)
+            if flow is not None:
+                return {"flow": flow, "notes": info, "plan": plan, "parts": True}
+            errors = list(errors) + info
+        elif plan:
+            errors = list(errors) + [OUT_OF_TIME]
+        return {"errors": errors, "plan": plan}
+
+    def _decompose(self, request, plan, existing, tried, late):
+        """Build a flow whose whole-flow attempts failed from its plan, in parts (ooa_format.chunk_plan: 2-4
+        consecutive top-level plan items each). Each part is its own request with the variables made so far; the
+        parts are merged (unique step ids, variables united) and the merged flow must pass the checker and cover the
+        plan. Returns (flow, notes) or (None, problems)."""
+        chunks = F.chunk_plan(plan)
+        if len(chunks) < 2:
+            return None, []
+        fmt, have, parts = self.format(), [dict(v) for v in existing or [] if isinstance(v, dict)], []
+        info = []
+        for n, chunk in enumerate(chunks, 1):
+            creq, need = F.chunk_request(chunk), F.chunk_actions(chunk)
+            part, prev, probs = None, None, None
+            for attempt in range(max(1, self.policy.part_attempts)):
+                if late():
+                    return None, [OUT_OF_TIME]
+                prompt = self.prompt(creq, have, prev, probs, required=need) if fmt == "context" else creq
+                try:
+                    raw = self.local.generate(prompt, attempt)
+                except Exception as ex:
+                    return None, [f"local model error: {ex}"]
+                ans = F.parse_answer(raw)
+                text = ans["flow_text"] if ans["kind"] == "flow" else raw
+                part, info = self.verify(text, have, ans["plan"])
+                tried.append({"source": "local", "part": n, "of": len(chunks), "ok": part is not None})
+                if part is not None:
+                    break
+                prev, probs = self._previous(text), info
+            if part is None:
+                return None, [f"Part {n} of {len(chunks)} ('{creq[:80]}') did not pass the checker: "
+                              + "; ".join(info[:2])]
+            parts.append(part)
+            names = {v.get("name") for v in have}
+            have += [v for v in part.get("variables", []) if isinstance(v, dict) and v.get("name") not in names]
+        merged = F.merge_flows(parts, request)
+        flow, info = self.verify(F.compact(merged), existing, plan)
+        tried.append({"source": "local", "merged_parts": len(parts), "ok": flow is not None})
+        if flow is None:
+            return None, ["The flow built in parts did not pass the checker: " + "; ".join(info[:2])]
+        return flow, info + [f"built in {len(parts)} parts from the plan"]
+
     def run(self, request, system=None, assistant=False, existing=None, full_user=None, deadline=None):
         """deadline: time.time() value after which no further attempt (retry or cloud call) starts."""
-        t0, tried, errors = time.time(), [], []
+        t0, tried, errors, plan = time.time(), [], [], []
         late = lambda: deadline is not None and tried and time.time() >= deadline
         p = self.policy
-        simple = clauses(request) <= p.max_clauses_local and len(request) <= 500
-        if self.cloud is None or not p.allow_escalation:
+        can_escalate = self.cloud is not None and p.allow_escalation
+        simple = p.local_first or (clauses(request) <= p.max_clauses_local and len(request) <= 500)
+        if not can_escalate:
             simple = True      # no cloud fallback: always let the local model try instead of failing unseen
         if self.local is not None and simple:
-            for attempt in range(1 + p.local_retries):
-                if late():
-                    errors = list(errors) + [OUT_OF_TIME]
-                    break
-                try:
-                    raw = self.local.generate(request, attempt)
-                except Exception as ex:
-                    errors = [f"local model error: {ex}"]
-                    break
-                flow, info = self.check(raw, existing, assistant)
-                tried.append({"source": "local", "ok": flow is not None})
-                if flow is None:
-                    tried[-1]["preview"] = (raw or "")[:300]      # what the model wrote, so a failure can be read
-                if flow:
-                    return self.done(request, flow, "local", tried, info, t0)
-                errors = info
-                if not (raw or "").lstrip().startswith("{"):
-                    # Text instead of a flow: the request was not read as a task (a question, an error message
-                    # pasted in, chat). A retry only loops on the same text, and forcing JSON makes up an unrelated
-                    # flow, so stop here and say so.
-                    errors = [NOT_A_TASK]
-                    break
+            out = self._local(request, existing, tried, late, can_escalate)
+            if out.get("flow") is not None:
+                return self.done(request, out["flow"], "local", tried, out["notes"], t0, assistant, existing,
+                                 plan=out["plan"], parts=out.get("parts", False))
+            if out.get("question"):
+                return self.done(request, None, "local", tried, [], t0, assistant, existing, reason=ASKED,
+                                 question=out["question"])
+            errors, plan = out["errors"], out["plan"]
         elif self.local is not None:
             errors = ["request looks complex; skipped the local model"]
-        if self.cloud is not None and p.allow_escalation:
+        if can_escalate:
             req = mask(request) if p.mask_pii else request
             err = [mask(e) if p.mask_pii else e for e in errors if not e.startswith("request looks")]
             for attempt in range(2):
@@ -214,25 +374,35 @@ class Router:
                     err = [f"cloud call failed: {ex}"]
                     tried.append({"source": "cloud", "ok": False, "error": str(ex)[:120]})
                     break
-                flow, info = self.check(raw, existing, assistant)
+                flow, info = self.verify(raw, existing)
                 tried.append({"source": "cloud", "ok": flow is not None})
-                if flow:
-                    return self.done(request, flow, "cloud", tried, info, t0)
+                if flow is not None:
+                    return self.done(request, flow, "cloud", tried, info, t0, assistant, existing, plan=plan)
                 err = info
             errors = err
-        reason = ("no model produced a flow that passed verification" if (self.cloud and p.allow_escalation)
+        reason = ("no model produced a flow that passed verification" if can_escalate
                   else "the local model could not produce a verified flow, and cloud escalation is disabled by this client's policy")
-        return self.done(request, None, "none", tried, errors or [reason], t0, reason=reason)
+        return self.done(request, None, "none", tried, errors or [reason], t0, assistant, existing, reason=reason,
+                         plan=plan)
 
-    def done(self, request, flow, source, tried, info, t0, reason=None):
-        res = {"flow": flow, "source": source, "verified": flow is not None, "attempts": tried,
-               "repairs" if flow else "problems": info, "seconds": round(time.time() - t0, 3)}
+    def done(self, request, flow, source, tried, info, t0, assistant=False, existing=None, reason=None, plan=None,
+             question=None, parts=False):
+        """flow: the verified flow dict or None. The result's "flow" is the text the client gets (answer_text)."""
+        warnings = safety.warnings(flow, self.cat) if flow is not None else []
+        text = self.answer_text(flow, existing, assistant, warnings) if flow is not None else None
+        res = {"flow": text, "source": source, "verified": flow is not None, "attempts": tried,
+               "repairs" if flow is not None else "problems": info, "seconds": round(time.time() - t0, 3),
+               "plan": list(plan or []), "warnings": warnings}
+        if parts:
+            res["built_in_parts"] = True
+        if question:
+            res["question"] = question
         if reason:
             res["reason"] = reason
         if self.policy.store_logs:
             self.log("requests.jsonl", {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "request": mask(request),
-                                        "source": source, "verified": res["verified"], "flow": flow,
-                                        "training_ok": self.policy.allow_training_on_data})
+                                        "source": source, "verified": res["verified"], "flow": text,
+                                        "question": question, "training_ok": self.policy.allow_training_on_data})
         return res
 
     def log(self, name, row):
@@ -241,13 +411,62 @@ class Router:
         with self.lock, open(d / name, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    def feedback(self, row):
+    def feedback(self, body):
+        """POST /v1/feedback. Stored only when the policy allows logs; the request text is masked."""
         if not self.policy.store_logs:
             return {"stored": False, "reason": "policy: store_logs is off"}
-        row = {**row, "prompt": mask(row.get("prompt", "")), "training_ok": self.policy.allow_training_on_data,
-               "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        try:
+            row = feedback_row(body)
+        except ValueError as ex:
+            return {"stored": False, "error": str(ex)}
+        row = {**row, "prompt": mask(row["prompt"]), "training_ok": self.policy.allow_training_on_data}
         self.log("feedback.jsonl", row)
         return {"stored": True, "usable_for_training": self.policy.allow_training_on_data}
+
+
+# Studio's verdicts on a suggested flow (inserted / discarded / edited) and the assistant page's (accept / reject /
+# edit) -> the stored verdict. training/ingest_feedback.py turns the stored rows into training records.
+VERDICTS = {"inserted": "accept", "discarded": "reject", "edited": "edit",
+            "accept": "accept", "reject": "reject", "edit": "edit"}
+
+
+def _flow_arg(v, key):
+    if v is None:
+        return None
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError as e:
+            raise ValueError(f"{key} is not valid JSON: {e}")
+    if not isinstance(v, dict):
+        raise ValueError(f"{key} must be a flow JSON object")
+    return v
+
+
+def feedback_row(body):
+    """A feedback body -> the row stored in feedback.jsonl, or ValueError with a plain message.
+    Accepts {request, flow, verdict: inserted|discarded|edited, edited_flow?} (Studio) and the older
+    {prompt, flow, accepted, edited_flow?}."""
+    if not isinstance(body, dict):
+        raise ValueError("the body must be a JSON object")
+    request = body.get("request", body.get("prompt"))
+    if not isinstance(request, str) or not request.strip():
+        raise ValueError("request is required (text)")
+    if len(request) > 5000:
+        raise ValueError("request is too long (max 5000 characters)")
+    verdict = body.get("verdict")
+    if verdict is None and "accepted" in body:
+        verdict = "accept" if body.get("accepted") is True else ("edit" if body.get("edited_flow") else "reject")
+    if verdict not in VERDICTS:
+        raise ValueError("verdict must be one of inserted, discarded, edited")
+    v = VERDICTS[verdict]
+    flow, edited = _flow_arg(body.get("flow"), "flow"), _flow_arg(body.get("edited_flow"), "edited_flow")
+    if v == "accept" and flow is None:
+        raise ValueError("an inserted flow needs the flow")
+    if v == "edit" and edited is None:
+        raise ValueError("an edited flow needs edited_flow")
+    return {"prompt": request.strip(), "flow": flow, "accepted": v == "accept", "edited_flow": edited if v == "edit" else None,
+            "verdict": v, "client_verdict": verdict, "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
 
 class CloudBackend:
@@ -268,6 +487,44 @@ class CloudBackend:
         with urllib.request.urlopen(req, timeout=120) as r:
             data = json.loads(r.read())
         return "".join(b.get("text", "") for b in data.get("content", []))
+
+
+class OpenAICompatBackend:
+    """Any OpenAI-compatible chat completions endpoint (a hosted model, a gateway, a model server on the network).
+    url: the base URL ("https://host/v1") or the full ".../chat/completions" URL. The API key is read from the
+    environment variable key_env when it is set; endpoints without auth need none."""
+    def __init__(self, url, model, key_env="OOA_ESCALATE_API_KEY", max_tokens=6000, timeout=120, api_key=None):
+        u = url.rstrip("/")
+        self.url = u if u.endswith("/chat/completions") else u + "/chat/completions"
+        self.model, self.max_tokens, self.timeout = model, max_tokens, timeout
+        self.key = api_key or (os.environ.get(key_env) if key_env else None)
+
+    def generate(self, system, user):
+        import urllib.request
+        body = json.dumps({"model": self.model, "max_tokens": self.max_tokens, "temperature": 0,
+                           "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}).encode()
+        headers = {"content-type": "application/json"}
+        if self.key:
+            headers["authorization"] = "Bearer " + self.key
+        with urllib.request.urlopen(urllib.request.Request(self.url, body, headers), timeout=self.timeout) as r:
+            data = json.loads(r.read())
+        content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
+        if isinstance(content, list):            # some servers return content parts
+            content = "".join(c.get("text", "") for c in content if isinstance(c, dict))
+        if not isinstance(content, str):
+            raise RuntimeError("the escalation endpoint returned no message content")
+        return content
+
+
+def make_cloud(policy):
+    """The escalation backend the policy names, or None when escalation is off: an OpenAI-compatible endpoint when
+    escalate_url is set, else the Anthropic API."""
+    if not policy.allow_escalation:
+        return None
+    if policy.escalate_url:
+        return OpenAICompatBackend(policy.escalate_url, policy.escalate_model or "default", policy.escalate_key_env,
+                                   policy.cloud_max_tokens)
+    return CloudBackend(policy.cloud_model, policy.cloud_max_tokens)
 
 
 MODEL_ID = "ooa-assistant"
@@ -320,6 +577,9 @@ def chat_completion(router, body, count_tokens=None, version=None, deadline=None
     res = router.run(request, system, assistant, existing, full_user, deadline=deadline)
     if res["verified"]:
         content = res["flow"]
+    elif res.get("question"):     # the model asks before it guesses: Studio shows notes
+        content = (json.dumps({"variables": [], "steps": [], "notes": res["question"], "warnings": []})
+                   if assistant else res["question"])
     elif assistant:   # Studio reads steps/notes: an empty answer with the honest reason is shown to the user
         content = json.dumps({"variables": [], "steps": [], "notes": "No flow was returned: " + res["reason"] + ". " + " ".join(res.get("problems", [])[:2])})
     else:
@@ -367,7 +627,8 @@ def make_handler(router):
             if self.path == "/v1/chat/completions":
                 return self._send(*chat_completion(router, body))
             if self.path == "/v1/feedback":
-                return self._send(200, router.feedback(body))
+                out = router.feedback(body)
+                return self._send(400 if out.get("error") else 200, out)
             self._send(404, {"error": "not found"})
     return H
 
@@ -384,6 +645,10 @@ if __name__ == "__main__":
     ap.add_argument("--policy", default=None)
     ap.add_argument("--local", default=None, help="'nanochat' to load the trained model (needs GPU/CPU + nanochat)")
     ap.add_argument("--source", default="sft")
+    ap.add_argument("--examples", default=None, help="example index from render_dataset.py (default: examples.jsonl "
+                                                       "next to the catalog when it exists)")
+    ap.add_argument("--prompt-format", default=None, choices=["auto", "plain", "context"],
+                    help="what the local model is given (default: the policy's prompt_format)")
     ap.add_argument("--port", type=int, default=8080)
     a = ap.parse_args()
     pol = Policy.load(a.policy)
@@ -391,7 +656,9 @@ if __name__ == "__main__":
     if a.local == "nanochat":
         from backends import NanochatBackend
         local = NanochatBackend(a.source)
-    cloud = CloudBackend(pol.cloud_model, pol.cloud_max_tokens) if pol.allow_escalation else None
-    r = Router(a.catalog, a.platform, pol, local, cloud)
-    print(f"OOA assistant on http://127.0.0.1:{a.port}  | local model: {bool(local)} | cloud escalation: {pol.allow_escalation}")
+    cloud = make_cloud(pol)
+    examples = a.examples or str(Path(a.catalog).resolve().parent / "examples.jsonl")
+    r = Router(a.catalog, a.platform, pol, local, cloud, examples, a.prompt_format)
+    print(f"OOA assistant on http://127.0.0.1:{a.port}  | local model: {bool(local)} ({r.format()} prompts) | "
+          f"escalation: {pol.allow_escalation}")
     serve(r, a.port).serve_forever()

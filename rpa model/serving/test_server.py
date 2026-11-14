@@ -123,9 +123,9 @@ r, srv, port = start(S.Policy(), Spy([GOOD]), None)
 res = studio(port, "read a csv file into a table")
 ans = json.loads(res["choices"][0]["message"]["content"])
 assert seen == ["read a csv file into a table"], "the local model must see only the request, not Studio's wrapper: " + str(seen)
-assert set(ans) == {"variables", "steps", "notes"} and ans["steps"] and "kind" not in ans, ans.keys()
+assert set(ans) == {"variables", "steps", "notes", "warnings"} and ans["steps"] and "kind" not in ans, ans.keys()
 assert res["usage"]["prompt_tokens"] > 0 and res["ooa"]["verified"]
-print("9 ok: Studio request -> local model sees only the request; answer has variables/steps/notes; usage reported")
+print("9 ok: Studio request -> local model sees only the request; answer has variables/steps/notes/warnings; usage reported")
 
 # 10. Studio + escalation: the cloud model gets the platform's own system prompt and answers in Studio's shape; existing variables are respected
 CLOUD_STUDIO = json.dumps({"variables": [{"name": "report_path", "type": "String", "direction": "input"}, {"name": "tbl", "type": "Table"}],

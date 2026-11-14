@@ -87,7 +87,7 @@ def test_studio_request_with_a_flow(S, router):
         "Read a CSV file into a table, then write the table to an Excel sheet"))
     assert code == 200 and out["choices"][0]["finish_reason"] == "stop"
     ans = studio_parse(out["choices"][0]["message"]["content"])
-    assert set(ans) == {"variables", "steps", "notes"}
+    assert set(ans) == {"variables", "steps", "notes", "warnings"} and ans["warnings"] == []
     assert [s["action"] for s in ans["steps"]][:2] == ["ooa.csv/read", "ooa.excel/open"]
     assert all(v["name"] != "x" for v in ans["variables"])     # Studio's existing variables are not repeated
     assert out["ooa"]["verified"] is True
