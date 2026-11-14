@@ -8,6 +8,7 @@ Everything else (descriptions, values, structure) is left exactly as the model w
 Pieces:
   JsonTracker      incremental JSON state over the generated text (which container, which key, inside a string?)
   NameConstraint   catalog names + "which tokens are allowed right now?" (prefix check with bisect)
+  FlowGate         finds where the flow JSON starts (at once, or after "Flow:" when the reply opens with a plan)
   generate()       nanochat decode loop (same sampling as nanochat's Engine) that applies the mask when a name is
                    being written. When no name is being written the logits are untouched.
 Pure Python + torch; no change to nanochat itself.
@@ -168,18 +169,50 @@ def token_strings(tok, vocab_size):
     return out
 
 
+# A reply may open with the flow JSON (the format before plans), with a plan ("Plan:" ... "Flow:" + JSON) or with a
+# clarifying question; anything else is chat (see training/ooa_format.py).
+REPLY_STARTS = ("{", "Plan:", "Question:", "Flow:")
+
+
 def not_a_flow(out, decode):
-    """True once the reply's first non-space character is known and is not '{'."""
+    """True once the reply's start is known to be none of REPLY_STARTS (a chat reply, not a flow or a question)."""
     head = "".join(decode(t) for t in out[:8]).lstrip()
-    return bool(head) and not head.startswith("{")
+    if not head:
+        return False
+    return not any(p.startswith(head) or head.startswith(p) for p in REPLY_STARTS)
+
+
+class FlowGate:
+    """Which part of the reply is flow JSON, so the catalog lock applies there only: all of it when the reply opens
+    with '{' (old format), else the text after a line starting with 'Flow:' (plan-first format). The plan before it
+    is free text in plain words and is never constrained; a question never reaches the JSON."""
+
+    def __init__(self):
+        self.text, self.open = "", False
+
+    def feed(self, piece):
+        """Add decoded text; return the part of it that belongs to the flow JSON ('' before the JSON starts)."""
+        if self.open:
+            return piece
+        self.text += piece
+        head = self.text.lstrip()
+        if head.startswith("{"):
+            self.open = True
+            return head          # only white space came before, and nothing of it was returned
+        i = self.text.find("Flow:")
+        if i >= 0 and (i == 0 or self.text[i - 1] == "\n") and len(self.text) > i + len("Flow:"):
+            self.open = True
+            return self.text[i + len("Flow:"):]
+        return ""
 
 
 def generate(model, prompt_ids, constraint, max_tokens, temperature, top_k, seed, stop_ids, decode, guard=None,
              first_k=256, flow=False):
     """Decode one reply with the catalog lock. Returns (ids, stop_reason, n_constrained_steps, n_changed).
     decode(token_id) -> text (used to keep the JSON tracker in step). Sampling matches nanochat's Engine.
-    flow=True: stop at once (reason "not a flow") when the reply does not open with '{' (a request it read as chat).
-    The first token is NOT forced to '{': that makes the model invent an unrelated flow for a non-task."""
+    flow=True: stop at once (reason "not a flow") when the reply opens with none of REPLY_STARTS (a request it read as
+    chat). The first token is NOT forced to '{': that makes the model invent an unrelated flow for a non-task.
+    The lock applies inside the flow JSON only (FlowGate): a plan before "Flow:" is written freely."""
     import torch
     from nanochat.engine import KVCache, sample_next_token
     from nanochat.common import COMPUTE_DTYPE
@@ -189,7 +222,7 @@ def generate(model, prompt_ids, constraint, max_tokens, temperature, top_k, seed
                     num_heads=m.n_kv_head, head_dim=m.n_embd // m.n_head, num_layers=m.n_layer)
     rng = torch.Generator(device=device)
     rng.manual_seed(seed)
-    tracker = JsonTracker()
+    tracker, gate = JsonTracker(), FlowGate()
     out, reason, n_con, n_changed = [], "max_tokens", 0, 0
     with torch.inference_mode():
         logits = model.forward(torch.tensor([prompt_ids], dtype=torch.long, device=device), kv_cache=cache)[:, -1, :]
@@ -213,7 +246,7 @@ def generate(model, prompt_ids, constraint, max_tokens, temperature, top_k, seed
                 reason = "end"
                 break
             out.append(nxt)
-            tracker.feed(decode(nxt))
+            tracker.feed(gate.feed(decode(nxt)))
             if flow and not_a_flow(out, decode):
                 reason = "not a flow"
                 break

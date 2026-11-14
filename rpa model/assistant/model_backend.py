@@ -4,7 +4,8 @@ NanochatLocal runs our trained nanochat checkpoint on this PC (CPU is enough). I
 Engine.generate so it can stop early: at <|assistant_end|> / bos, at max_tokens, or when the RepetitionGuard sees the
 output looping (the main failure today; a loop used to run all the way to max_tokens).
 
-FakeModel is a tiny stand-in for tests: canned valid flows for known prompts, garbage otherwise.
+FakeModel is a tiny stand-in for tests: canned valid flows for known prompts (as flow JSON only, or plan + flow, or
+a clarifying question), garbage otherwise.
 
 Both expose generate(request, attempt=0) -> str, which is what serving/ooa_server.Router calls.
 """
@@ -171,8 +172,21 @@ class NanochatLocal:
         return self._run(question, 300, 0.2, 1000).strip()
 
 
+def _training_module(name):
+    """Import a module from training/ (ooa_format) next to this folder."""
+    d = str(Path(__file__).resolve().parent.parent / "training")
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    return __import__(name)
+
+
 class FakeModel:
-    """Test double: valid canned flows for known prompts, garbage (not JSON) otherwise."""
+    """Test double: valid canned flows for known prompts, garbage (not JSON) otherwise.
+
+    style "json": answers with the flow JSON only (the format before plans); "plan": plan + flow, and a clarifying
+    question for the QUESTIONS prompts (training/ooa_format.py). The prompt may be a plain request or a user turn with
+    context (request + "### Context ..."): the request part picks the answer. script: answers returned in order
+    (the last one repeats) whatever the prompt, for tests of the retry layers."""
 
     FLOWS = {
         "read a csv file into a table, then write the table to an excel sheet": {
@@ -209,16 +223,33 @@ class FakeModel:
         "steps": [{"id": "s1", "action": "ooa.file/read_text", "description": "Read a text file",
                    "args": {"path": "$path"}, "out": {"text": "text"}}]}
     ANSWERS = {"ooa.csv/read": "Use `ooa.csv/read` (CSV/TXT: Read to table)."}
+    QUESTIONS = {"automate my work": "Which application should the bot work in, and what should it do there?",
+                 "do the usual thing": "What is the usual thing: which files or emails, and what should happen to them?"}
 
-    def __init__(self, *a, **kw):
+    def __init__(self, *a, style="json", script=None, catalog=None, **kw):
         self.info = {"device": "fake", "params_M": 0.0, "step": 0, "source": "fake"}
         self.calls = []
         self.last_stats = {}
+        self.style, self.script, self.catalog = style, list(script or []), catalog
+
+    def answer_for(self, request):
+        F = _training_module("ooa_format")
+        key = " ".join(F.request_of(request).lower().split()).rstrip(".")
+        if self.style == "plan" and key in self.QUESTIONS:
+            return F.QUESTION_HEAD + " " + self.QUESTIONS[key]
+        flow = self.FLOWS.get(key)
+        if not flow:
+            return "garbage garbage garbage {not json"
+        if self.style == "plan":
+            return F.render_flow_answer(flow, self.catalog)
+        return json.dumps(flow, separators=(",", ":"))
 
     def generate(self, request, attempt=0, max_tokens=2500):
         self.calls.append((request, attempt))
-        flow = self.FLOWS.get(" ".join(str(request).lower().split()).rstrip("."))
-        text = json.dumps(flow, separators=(",", ":")) if flow else "garbage garbage garbage {not json"
+        if self.script:
+            text = self.script[min(len(self.calls), len(self.script)) - 1]
+        else:
+            text = self.answer_for(request)
         self.last_stats = {"tokens": len(text) // 3, "stop": "end", "seconds": 0.0}
         return text
 

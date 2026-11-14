@@ -71,6 +71,40 @@ def test_not_a_flow():
     assert C.not_a_flow([4], dec) and C.not_a_flow([1, 4, 5], dec)
 
 
+
+def _slots_while_writing(text, step=3):
+    """Feed text in small pieces through FlowGate + JsonTracker (as generate() does); the name slots seen."""
+    gate, tracker, slots = C.FlowGate(), C.JsonTracker(), []
+    for i in range(0, len(text), step):
+        tracker.feed(gate.feed(text[i:i + step]))
+        s = tracker.name_slot()
+        if s is not None:
+            slots.append((s[0], s[3]))
+    return slots
+
+
+def test_lock_skips_the_plan():
+    plan = ('Plan:\n1. Copy "the" file to {target} (ooa.file/copy)\n  2. List "action": "x" (ooa.file/list)\n'
+            'Flow:\n{"steps":[{"id":"s1","action":"ooa.file/copy","args":{"source":"$a"}}]}')
+    slots = _slots_while_writing(plan)
+    assert slots, slots
+    for kind, prefix in slots:                     # only names inside the flow JSON; nothing in the plan was locked
+        assert (kind, "ooa.file/copy".startswith(prefix)) == ("action", True) or \
+               (kind, "source".startswith(prefix)) == ("args", True), slots
+    # old format: the lock starts at once
+    old = '{"steps":[{"id":"s1","action":"ooa.file/list"}]}'
+    assert _slots_while_writing(old)[0][0] == "action"
+    # a question never reaches a flow
+    assert _slots_while_writing('Question: which "action" should "args" be?') == []
+
+
+def test_reply_starts():
+    d = lambda t: t
+    for ok in (["Plan:\n1."], ["Question: x"], ["{"], ["Pl"], ["Q"], ["Flow:"]):
+        assert not C.not_a_flow(ok, d), ok
+    for chat in (["Please"], ["Hello"], ["The answer"]):
+        assert C.not_a_flow(chat, d), chat
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

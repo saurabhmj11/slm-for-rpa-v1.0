@@ -84,6 +84,17 @@ def test_fake_model():
     assert set(m.info) == {"device", "params_M", "step", "source"}
 
 
+
+def test_fake_model_formats():
+    req = "Read a CSV file into a table, then write the table to an Excel sheet"
+    m = FakeModel(style="plan")
+    text = m.generate(req + "\n### Context\nActions:\n- ooa.csv/read: Read to table | in: path*")   # request + context
+    assert text.startswith("Plan:\n1. ") and "(ooa.csv/read)" in text and "\nFlow:\n{" in text
+    assert m.generate("automate my work").startswith("Question: ")
+    assert FakeModel().generate("automate my work").startswith("garbage")              # the JSON style never asks
+    s = FakeModel(script=["a", "b"])
+    assert [s.generate("x"), s.generate("y"), s.generate("z")] == ["a", "b", "b"]
+
 def test_fake_flows_pass_verifier():
     cat = os.environ.get("OOA_CATALOG")
     schema = os.environ.get("OOA_SCHEMA")
@@ -107,7 +118,8 @@ def test_fake_model_with_router():
     assert ok["verified"] and ok["source"] == "local", ok
     bad = router.run("make me a sandwich")
     assert not bad["verified"] and bad["problems"], bad
-    assert m.calls[-2:] == [("make me a sandwich", 0), ("make me a sandwich", 1)], m.calls
+    # a text answer (not a flow) is not retried: the request was read as chat, a retry only repeats it
+    assert m.calls[-1] == ("make me a sandwich", 0) and len(m.calls) == 2, m.calls
 
 
 # ---------------------------------------------------------------- real model
