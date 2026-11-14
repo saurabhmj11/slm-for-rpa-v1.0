@@ -294,3 +294,52 @@ def test_time_budget_stops_retries(serve):
     _, port2 = serve(model=m2)
     st, r, _ = call(port2, "POST", "/api/build", {"request": "read a csv file"}, headers={A.CSRF_HEADER: "1"})
     assert st == 200 and len(m2.calls) == 2                       # without the budget running out: one retry
+
+
+# ---------------------------------------------------------------------- model layers through the app
+def test_feedback_route_for_programs(serve):
+    flow = json.loads(FakeModel().generate(GOOD))
+    app, port = serve(token=TOKEN)
+    body = {"request": GOOD, "flow": flow, "verdict": "inserted"}
+    assert call(port, "POST", "/v1/feedback", body)[0] == 401                       # the token rules apply
+    st, r, _ = call(port, "POST", "/v1/feedback", body, headers=bearer())
+    assert st == 200 and r["stored"] and r["counts"]["accept"] == 1, r
+    st, r, _ = call(port, "POST", "/v1/feedback", {"request": GOOD, "flow": flow, "verdict": "edited",
+                                                   "edited_flow": flow}, headers=bearer())
+    assert st == 200 and r["counts"]["edit"] == 1
+    st, r, _ = call(port, "POST", "/v1/feedback", {"request": GOOD, "verdict": "discarded"}, headers=bearer())
+    assert st == 200 and r["counts"]["reject"] == 1
+    st, r, _ = call(port, "POST", "/v1/feedback", {"request": GOOD, "verdict": "maybe"}, headers=bearer())
+    assert st == 400 and r["error"]["type"] == "invalid_request_error"
+    rows = [json.loads(l) for l in open(app.feedback_path, encoding="utf-8")]
+    assert [x["client_verdict"] for x in rows] == ["inserted", "edited", "discarded"]
+    # export: the records file for render_dataset.py --extra has a flow record per kept flow and a fix per edit
+    out = app.export()
+    recs = [json.loads(l) for l in open(out["records_file"], encoding="utf-8")]
+    assert [x["kind"] for x in recs] == ["flow", "flow", "fix"] and out["usable"] == 2 and out["rejected"] == 1
+    # without a token: programs on this computer post JSON without the page's header, other sites cannot
+    _, port2 = serve()
+    assert call(port2, "POST", "/v1/feedback", body)[0] == 200
+    assert call(port2, "POST", "/v1/feedback", body, headers={"Origin": "https://evil.example"})[0] == 403
+
+
+def test_build_with_plan_question_and_warnings(serve):
+    app, port = serve(model=FakeModel(style="plan"), prompt_format="context")
+    st, r, _ = call(port, "POST", "/api/build", {"request": "Automate my work"}, headers={A.CSRF_HEADER: "1"})
+    assert st == 200 and r["verified"] is False and r["question"] == FakeModel.QUESTIONS["automate my work"], r
+    st, r, _ = call(port, "POST", "/api/build", {"request": GOOD}, headers={A.CSRF_HEADER: "1"})
+    assert st == 200 and r["verified"] and r["plan"] and r["plan"][0].endswith("(ooa.file/list)") and r["warnings"] == []
+    assert app.model.calls[-1][0].startswith(GOOD + "\n### Context\n")               # the model got the context
+
+
+def test_escalation_flags():
+    a = A.parse_args(["--platform", "p"])
+    p = A.policy_from_args(a)
+    assert p.allow_escalation is False and p.local_first and a.prompt_format == "auto"
+    a = A.parse_args(["--platform", "p", "--escalate-url", "http://127.0.0.1:9/v1", "--escalate-model", "m",
+                      "--escalate-key-env", "MY_KEY", "--escalate-plan-lines", "9"])
+    p = A.policy_from_args(a)
+    assert (p.allow_escalation, p.escalate_url, p.escalate_model, p.escalate_key_env, p.escalate_plan_lines) == \
+        (True, "http://127.0.0.1:9/v1", "m", "MY_KEY", 9)
+    cloud = A.make_cloud(p)
+    assert cloud.url == "http://127.0.0.1:9/v1/chat/completions" and cloud.model == "m"

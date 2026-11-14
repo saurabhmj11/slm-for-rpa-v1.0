@@ -11,7 +11,13 @@ See DEPLOY.md.
 Loads the model once at start; one generation at a time, with a bounded queue (429 when it is full).
 Tabs in the page (static/index.html): Build, Learn, Practice, Run, Progress. See README.md and SPEC.md.
 
-Self-learning: Accept / Edit / Reject on a built flow is appended to DATA_DIR/feedback.jsonl. "Export training data"
+Model layers (serving/ooa_server.Router): retrieval context, plan-first answers, clarifying questions, self-correction,
+building a long plan in parts, safety warnings, and optional escalation to an OpenAI-compatible endpoint
+(--escalate-url, off by default; our own model always tries first). A model trained before context and plans keeps
+working (--prompt-format auto picks "plain" when no examples.jsonl came with the model pack).
+
+Self-learning: Accept / Edit / Reject on a built flow is appended to DATA_DIR/feedback.jsonl, and so is Studio's
+inserted / discarded / edited verdict posted to /v1/feedback (a model route: bearer token when set). "Export training data"
 runs training/ingest_feedback.py on it and writes DATA_DIR/exports/<timestamp>/feedback_train.jsonl (only flows that pass
 the verifier). The model does NOT change live: it improves at the next training run that mixes this file in.
 """
@@ -31,7 +37,8 @@ sys.path.insert(0, str(ROOT / "training"))
 
 from knowledge import Knowledge              # noqa: E402
 from runner_bridge import RunnerBridge       # noqa: E402
-from ooa_server import Router, Policy, chat_completion, quick_reply, openai_error, MODEL_ID        # noqa: E402
+from ooa_server import (Router, Policy, chat_completion, quick_reply, openai_error, feedback_row, make_cloud,  # noqa: E402
+                        MODEL_ID)
 import ooa_reward                            # noqa: E402
 
 STATIC = HERE / "static"
@@ -49,6 +56,7 @@ TIME_BUDGET = 120.0        # seconds per request: no retry attempt starts after 
 RETRY_AFTER = 10           # seconds, sent with 429
 OPEN_PATHS = ("/health", "/ready")                         # no checks at all: process and readiness probes
 API_PREFIXES = ("/v1/", "/api/assistant/v1/")              # model routes for programs (Studio): bearer token when set
+PROGRAM_POSTS = ("/v1/chat/completions", "/v1/feedback")   # POSTs programs on this computer send without our header
 PROXY_HEADERS = ("Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP")   # the page refuses proxied requests
 
 GOOD_AT = ["Step-by-step requests worded like the catalog's action descriptions, with the inputs and outputs named, "
@@ -117,6 +125,10 @@ class _StatsRecorder:
     def __init__(self, model):
         self.model, self.stats = model, []
 
+    @property
+    def info(self):
+        return getattr(self.model, "info", None)
+
     def generate(self, request, attempt=0):
         t0 = time.time()
         try:
@@ -132,9 +144,12 @@ class Assistant:
     """Everything the routes need, wired once."""
 
     def __init__(self, catalog: str, platform: str, data_dir: str, model, max_waiting: int = MAX_WAITING,
-                 time_budget: float = TIME_BUDGET):
+                 time_budget: float = TIME_BUDGET, policy: Policy | None = None, cloud=None, examples: str | None = None,
+                 prompt_format: str = "auto"):
         """model may be None while it loads (main() loads it after the server is up): /ready says so and the
-        model routes answer 503 until set_model() is called."""
+        model routes answer 503 until set_model() is called.
+        policy / cloud: escalation (off by default: Policy(allow_escalation=False)); examples: the example index of
+        the model pack (default: examples.jsonl next to the catalog); prompt_format: auto | plain | context."""
         self.catalog = str(Path(catalog).resolve())
         self.platform = str(Path(platform).resolve())
         self.schema = str(Path(self.platform) / "contracts" / "flow-schema" / "flow.v1.json")
@@ -151,8 +166,11 @@ class Assistant:
         self.knowledge = Knowledge(self.catalog)
         self.runner = RunnerBridge(self.platform, str(self.data / "sandbox"))
         self.recorder = _StatsRecorder(model)
-        self.router = Router(self.catalog, self.platform, Policy(allow_escalation=False, local_retries=1),
-                             local=self.recorder)
+        if examples is None:
+            found = Path(self.catalog).parent / "examples.jsonl"
+            examples = str(found) if found.is_file() else None
+        self.router = Router(self.catalog, self.platform, policy or Policy(allow_escalation=False, local_retries=1),
+                             local=self.recorder, cloud=cloud, examples=examples, prompt_format=prompt_format)
         self.catalog_sha256, self.schema_sha256 = _sha256(self.catalog), _sha256(self.schema)
         self.model_lock = threading.Lock()      # one generation at a time
         self.wait_lock = threading.Lock()
@@ -254,7 +272,9 @@ class Assistant:
         flow = json.loads(res["flow"]) if res.get("verified") and res.get("flow") else None
         out = {"verified": flow is not None, "flow": flow, "problems": res.get("problems", []) if flow is None else [],
                "repairs": res.get("repairs", []) if flow is not None else [], "seconds": res.get("seconds"),
-               "attempts": attempts, "model_tried": True, "reason": res.get("reason"), "explanation": None, "can_run": None}
+               "attempts": attempts, "model_tried": True, "reason": res.get("reason"), "explanation": None, "can_run": None,
+               "plan": res.get("plan", []), "warnings": res.get("warnings", []), "question": res.get("question"),
+               "source": res.get("source")}
         if flow is not None:
             out["explanation"] = self.knowledge.explain_flow(flow)
             out["can_run"] = self.runner.can_run(flow)
@@ -297,6 +317,21 @@ class Assistant:
         with self.fb_lock, open(self.feedback_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
         return {"stored": True, "counts": self._counts(self._feedback_rows()), "learning": LEARNING_NOTE}
+
+    def program_feedback(self, body):
+        """POST /v1/feedback from a program (Studio): {request, flow, verdict: inserted|discarded|edited, edited_flow?}.
+        Stored in the same feedback.jsonl as the page's Accept / Edit / Reject."""
+        try:
+            row = feedback_row(body)
+        except ValueError as e:
+            raise ApiError(400, str(e))
+        note = body.get("note")
+        if isinstance(note, str) and note:
+            row["note"] = note[:2000]
+        row["source"] = "api"
+        with self.fb_lock, open(self.feedback_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return {"stored": True, "counts": self._counts(self._feedback_rows())}
 
     def _feedback_rows(self):
         if not self.feedback_path.exists():
@@ -348,7 +383,8 @@ class Assistant:
             raise ApiError(500, "unexpected ingest_feedback output: " + p.stdout.strip()[:200])
         usable, dropped, rejected = map(int, m.groups())
         return {"usable": usable, "dropped": dropped, "rejected": rejected, "path": str(out),
-                "train_file": str(out / "feedback_train.jsonl"), "instructions": EXPORT_STEPS,
+                "train_file": str(out / "feedback_train.jsonl"), "records_file": str(out / "feedback_records.jsonl"),
+                "instructions": EXPORT_STEPS,
                 "note": "Dropped rows failed the verifier and are never trained on."}
 
 
@@ -456,10 +492,10 @@ def make_handler(app: Assistant, token: str | None = None, allowed_hosts=()):
                 raise ApiError(403, "forbidden: requests from other web sites are refused")
             if method == "POST":
                 ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-                # /v1/chat/completions is for programs on this computer (One Agent Studio's model connection), which
+                # /v1/chat/completions and /v1/feedback are for programs on this computer (One Agent Studio), which
                 # do not send our header. Still safe: only JSON from this computer, and a web page cannot send JSON
                 # to it without the browser asking first (we never say yes), so other sites cannot reach it.
-                openai = urlparse(self.path).path == "/v1/chat/completions" and origin is None
+                openai = urlparse(self.path).path in PROGRAM_POSTS and origin is None
                 if ctype != "application/json" or (self.headers.get(CSRF_HEADER) != "1" and not openai):
                     raise ApiError(403, f"forbidden: POST needs Content-Type application/json and {CSRF_HEADER}: 1")
 
@@ -528,6 +564,8 @@ def make_handler(app: Assistant, token: str | None = None, allowed_hosts=()):
                 raise ApiError(400, "the body must be a JSON object")
             if path == "/v1/chat/completions":
                 return self._send(*app.chat(body))    # one generation at a time, like the Build tab
+            if path == "/v1/feedback":
+                return self._send(200, app.program_feedback(body))
             routes = {
                 "/api/build": app.build,
                 "/api/explain": lambda b: app.knowledge.explain_flow(_flow(b, "flow")),
@@ -624,9 +662,30 @@ def parse_args(argv=None):
                     help=f"seconds per request after which no retry attempt starts (default {TIME_BUDGET:g})")
     ap.add_argument("--data-dir", default="assistant_data", help="feedback, sandbox and exports go here")
     ap.add_argument("--fake-model", action="store_true", help="use a canned fake model (for trying the app / tests)")
+    ap.add_argument("--examples", default=None,
+                    help="example index (examples.jsonl from training/render_dataset.py; default: next to the catalog)")
+    ap.add_argument("--prompt-format", default="auto", choices=["auto", "plain", "context"],
+                    help="plain: the model gets the request only (models trained before context and plans); context: "
+                         "request + actions + similar examples; auto (default): context when an example index is found")
+    ap.add_argument("--escalate-url", default=None,
+                    help="OpenAI-compatible endpoint (e.g. https://host/v1) that gets a request when our model's "
+                         "attempts all fail or its plan is long; off by default. PII is masked before it leaves")
+    ap.add_argument("--escalate-model", default="", help="model name to send to --escalate-url")
+    ap.add_argument("--escalate-key-env", default="OOA_ESCALATE_API_KEY",
+                    help="environment variable holding the API key for --escalate-url (default OOA_ESCALATE_API_KEY)")
+    ap.add_argument("--escalate-plan-lines", type=int, default=12,
+                    help="a failed flow whose plan has more lines goes to --escalate-url at once (default 12)")
     ap.add_argument("--no-catalog-lock", action="store_true",
                     help="let the model write any action / input name (default: only real catalog names, see constrained.py)")
     return ap.parse_args(argv)
+
+
+def policy_from_args(args) -> Policy:
+    """Local only unless --escalate-url is given; our own model always tries first."""
+    esc = bool(args.escalate_url)
+    return Policy(allow_escalation=esc, local_retries=1, local_first=True, escalate_url=args.escalate_url or "",
+                  escalate_model=args.escalate_model, escalate_key_env=args.escalate_key_env,
+                  escalate_plan_lines=args.escalate_plan_lines, prompt_format=args.prompt_format)
 
 
 def main(argv=None):
@@ -637,7 +696,9 @@ def main(argv=None):
     if not args.fake_model and (not args.model_dir or not args.nanochat):
         raise SystemExit("--model-dir and --nanochat are required (or use --fake-model to try the app without the model)")
     catalog = args.catalog or default_catalog(args.model_dir)
-    app = Assistant(catalog, args.platform, args.data_dir, None, args.max_waiting, args.time_budget)
+    policy = policy_from_args(args)
+    app = Assistant(catalog, args.platform, args.data_dir, None, args.max_waiting, args.time_budget, policy,
+                    make_cloud(policy), args.examples, args.prompt_format)
     srv = make_server(app, args.port, args.host, token, args.allowed_hosts)
     failed = []
 
