@@ -159,10 +159,10 @@ class Router:
 
     def prompt(self, request, existing=None, previous=None, problems=None, required=()):
         """The user turn for the local model: the request + retrieval context (+ previous flow and problems)."""
-        actions, keep = F.context_actions(request, (), self.cat, self.index, self.policy.context_k)
+        examples = self.examples.search(request, F.MAX_EXAMPLES) if self.examples is not None else []
+        actions, keep = F.context_actions(request, (), self.cat, self.index, self.policy.context_k, examples=examples)
         have = {e["id"] for e in actions}
         actions = [self.cat[a] for a in required if a in self.cat and a not in have] + actions
-        examples = self.examples.search(request, F.MAX_EXAMPLES) if self.examples is not None else []
         variables = [v for v in existing or [] if isinstance(v, dict)]
         return F.build_user(request, actions, examples, variables, previous, problems,
                             required=list(dict.fromkeys(list(required) + keep)))

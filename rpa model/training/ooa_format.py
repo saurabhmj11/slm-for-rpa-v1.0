@@ -19,7 +19,8 @@ Assistant turn, one of:
     reply:    plain text (not a task)
 parse_answer() also reads old answers that are only the flow JSON, so models trained before this format keep working.
 
-The rendered user + assistant text must fit the model's 2048-token window (about 6,500 characters): the context
+The rendered user + assistant text must fit the model's 2048-token window (row_fits: at most 6,500 characters and
+an estimated MAX_ROW_TOKENS tokens, see approx_tokens): the context
 is trimmed to MAX_CONTEXT_CHARS in a fixed order (see build_user) and a previous flow longer than MAX_PREVIOUS_CHARS
 is shown as its outline. Pure standard library + retrieval.py.
 """
@@ -40,11 +41,14 @@ PLAN_HEAD, FLOW_HEAD, QUESTION_HEAD = "Plan:", "Flow:", "Question:"
 DEFAULT_K = 12                # BM25 candidates per request
 CORE_ALWAYS = ("core/loop", "core/if")   # "for each" / "if" words are stop words for BM25: always offer these two
 MAX_EXAMPLES = 2
-MAX_CONTEXT_CHARS = 2200      # variables + actions + similar lines
+MAX_CONTEXT_CHARS = 2600      # variables + actions + similar lines
+EXAMPLE_ACTIONS = 6           # actions of the similar examples added to the candidates (measured: recall of the
+                              # needed actions on the plain-request sets 0.77 -> 0.86 and 0.65 -> 0.82)
 MAX_PREVIOUS_CHARS = 2400     # a longer previous flow is shown as its outline
 MAX_PROBLEMS = 6
 MAX_PROBLEM_CHARS = 200
-MAX_ROW_CHARS = 6200          # user + assistant: about 2,000 tokens (measured 2.8-3.1 characters per token)
+MAX_ROW_CHARS = 6500          # user + assistant: about 2,100 tokens at the measured 2.8-3.1 characters per token
+MAX_ROW_TOKENS = 1950         # approx_tokens(user + assistant): the row fits the 2048-token window
 MAX_OUTLINE_CHARS = 160
 MAX_EXAMPLE_REQUEST_CHARS = 140
 MAX_VARIABLES = 12
@@ -518,25 +522,31 @@ def parse_answer(text):
 
 
 # ---------------------------------------------------------------------------------------------- retrieval context
-def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng=None):
+def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng=None, examples=()):
     """Action entries for the context and the ids trimming must keep.
-    Serving (no gold): BM25 top-k for the request, then CORE_ALWAYS. Training: the gold flow's actions are always in
-    (they are required), plus CORE_ALWAYS, filled up with BM25 candidates to k + 2 lines, shuffled with rng so the
-    position of an action says nothing."""
+    examples: the similar examples shown (dicts with "actions"); up to EXAMPLE_ACTIONS of their actions are added.
+    Serving (no gold): the examples' actions, BM25 top-k for the request, then CORE_ALWAYS. Training: the gold flow's
+    actions are always in (they are required), plus CORE_ALWAYS and the examples' actions, filled up with BM25
+    candidates to the same size, shuffled with rng so the position of an action says nothing."""
     cat = _as_dict(catalog) or (index.by_id if index is not None else {})
     gold = [a for a in dict.fromkeys(gold) if a in cat]
     found = [e["id"] for e in index.search(request, k)] if index is not None else []
     core = [c for c in CORE_ALWAYS if c in cat]
+    shown = []
+    for x in examples or []:
+        for a in x.get("actions") or [] if isinstance(x, dict) else []:
+            if a in cat and a not in shown and a not in gold and a not in core and len(shown) < EXAMPLE_ACTIONS:
+                shown.append(a)
     if gold:
-        ids = list(dict.fromkeys(gold + core))
-        cap = max(k + 2, len(ids))
+        ids = list(dict.fromkeys(gold + core + shown))
+        cap = max(k + 2 + len(shown), len(ids))
         for a in found:
             if len(ids) >= cap:
                 break
             if a not in ids:
                 ids.append(a)
     else:
-        ids = list(dict.fromkeys(found + core))
+        ids = list(dict.fromkeys(shown + found + core))
     if rng is not None:
         rng.shuffle(ids)
     required = list(dict.fromkeys(gold + core))
@@ -594,7 +604,7 @@ class ExampleIndex:
         return len(self.rows)
 
     def search(self, query, n=MAX_EXAMPLES, exclude_request=None, exclude_sig=None):
-        """Up to n {"request", "outline"} rows, best first, never the excluded request or flow signature, and never
+        """Up to n {"request", "outline", "actions"} rows, best first, never the excluded request or flow signature, and never
         two with the same outline."""
         if n <= 0 or not self.rows:
             return []
@@ -617,7 +627,7 @@ class ExampleIndex:
             if r["outline"] in outlines:
                 continue
             outlines.add(r["outline"])
-            out.append({"request": r["request"], "outline": r["outline"]})
+            out.append({"request": r["request"], "outline": r["outline"], "actions": r["actions"]})
             if len(out) >= n:
                 break
         return out
@@ -630,12 +640,13 @@ def input_variables(flow):
 
 
 def render_chat(record, catalog, action_index, example_index=None, rng=None, k=DEFAULT_K, variables_rate=0.3,
-                max_chars=MAX_ROW_CHARS):
+                max_chars=MAX_ROW_CHARS, max_tokens=MAX_ROW_TOKENS):
     """A neutral record -> {"messages": [user, assistant]} in this format (None when the record is unusable).
     record: {"kind": "flow", "request", "flow"} | {"kind": "fix", "request", "previous", "problems", "flow"} |
             {"kind": "clarify", "request", "question"}.
-    The draws from rng are made in a fixed order (examples, variables, shuffle), so a seed reproduces a dataset.
-    A row longer than max_chars is rendered again with a smaller context (down to the required actions only); the
+    The draws from rng are made in a fixed order (number of examples, variables, shuffle), so a seed reproduces a
+    dataset.
+    A row that does not fit (row_fits) is rendered again with a smaller context (down to the required actions only); the
     caller still checks the final length."""
     import random
     rng = rng or random.Random(0)
@@ -650,17 +661,16 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
         q = str(record.get("question") or "").strip()
         if not q:
             return None
-        actions, required = context_actions(request, (), cat, action_index, k, rng)
         examples = example_index.search(request, n_ex, exclude_request=request) if example_index else []
+        actions, required = context_actions(request, (), cat, action_index, k, rng, examples)
         user = build_user(request, actions, examples, (), required=required)
         return {"messages": [{"role": "user", "content": user}, {"role": "assistant", "content": QUESTION_HEAD + " " + q}]}
     flow = record.get("flow")
     if not isinstance(flow, dict) or not isinstance(flow.get("steps"), list) or not flow["steps"]:
         return None
-    gold = actions_of(flow)
-    actions, required = context_actions(request, gold, cat, action_index, k, rng)
     examples = (example_index.search(request, n_ex, exclude_request=request, exclude_sig=flow_signature(flow))
                 if example_index else [])
+    actions, required = context_actions(request, actions_of(flow), cat, action_index, k, rng, examples)
     # variables the request came with (Studio's open agent) always; else the flow's inputs for some rows
     variables = record.get("variables") or (input_variables(flow) if use_vars else ())
     previous = problems = None
@@ -671,10 +681,43 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
     answer = render_flow_answer(flow, cat)
     for limit in (MAX_CONTEXT_CHARS, MAX_CONTEXT_CHARS // 2, 0):
         user = build_user(request, actions, examples, variables, previous, problems, required, limit)
-        if len(user) + len(answer) <= max_chars:
+        row = {"messages": [{"role": "user", "content": user}, {"role": "assistant", "content": answer}]}
+        if row_fits(row, max_chars, max_tokens):
             break
-    return {"messages": [{"role": "user", "content": user}, {"role": "assistant", "content": answer}]}
+    return row
 
 
 def row_chars(row):
     return sum(len(m.get("content") or "") for m in row.get("messages", []) if isinstance(m, dict))
+
+
+_PIECES = re.compile(r"[A-Za-z]+|[0-9]{1,3}|\n\s*|[ \t]+|[\x21-\x7e]|[^\x00-\x7f]")
+
+
+def approx_tokens(text):
+    """Token count estimate for the model's tokenizer (16k BPE) without loading it: one per punctuation mark, digit
+    group, line break and word, plus one per 3 letters beyond 4, plus the bytes of non-ASCII characters. Fitted on
+    rendered rows over 1,500 tokens: true / estimate averages 0.91 and stays below 1.04, so a row estimated at
+    MAX_ROW_TOKENS fits 2048."""
+    n = 0
+    for p in _PIECES.findall(str(text)):
+        c = p[0]
+        if c in " \t":
+            continue
+        if ord(c) > 127:
+            n += len(p.encode("utf-8"))
+        elif p.isalpha():
+            n += 1 + max(0, len(p) - 4) // 3
+        else:
+            n += 1
+    return n
+
+
+def row_tokens(row):
+    """approx_tokens over every message, plus the turn markers."""
+    msgs = [m for m in row.get("messages", []) if isinstance(m, dict)]
+    return sum(approx_tokens(m.get("content") or "") for m in msgs) + 2 * len(msgs) + 1
+
+
+def row_fits(row, max_chars=MAX_ROW_CHARS, max_tokens=MAX_ROW_TOKENS):
+    return row_chars(row) <= max_chars and row_tokens(row) <= max_tokens

@@ -1,7 +1,8 @@
 """Render training data into the plan-first format with retrieval context (see ooa_format.py).
 
     python render_dataset.py SRC_DIR OUT_DIR --catalog CATALOG.jsonl [--k 12] [--seed 7] [--extra FILE ...]
-                             [--variables-rate 0.3] [--reply-context 0.5] [--max-chars 6200]
+                             [--variables-rate 0.3] [--reply-context 0.5] [--max-chars 6500] [--max-tokens 1950]
+                             [--no-parts]
 
 Reads every chat file SRC_DIR/*.jsonl ({"messages": [...]} rows, e.g. sft_clean/) and every neutral-record file given
 with --extra ({"kind": "flow"|"fix"|"clarify", ...}), and writes OUT_DIR/<same name>.jsonl in chat format:
@@ -10,10 +11,13 @@ with --extra ({"kind": "flow"|"fix"|"clarify", ...}), and writes OUT_DIR/<same n
     never the row itself or a row with the same flow; the flow's input variables for --variables-rate of the rows,
     because Studio sends the open agent's variables) and the answer becomes plan + flow. The flow first gets
     repair.session_fix (the missing open / save step), so the plan matches the flow that is trained on.
+  - flow records from --extra files (flow / fix / clarify) are rendered the same way.
   - other rows (chat replies, catalog questions) are kept; --reply-context of the single-turn ones also get the
     context block, because at serving every request carries one and a chat request must still get a chat reply.
-  - a flow row that would not fit gets a smaller context (down to its own actions only); rows still longer than
-    --max-chars (user + assistant, about the 2048-token window at ~3 characters per token) are skipped and counted.
+  - a flow row that would not fit the 2048-token window (user + assistant over --max-chars, or over --max-tokens by
+    ooa_format.approx_tokens) gets a smaller context, down to its own actions only; if it still does not fit it is
+    written as its parts (ooa_format.split_flow: the part requests the server writes when it builds a long flow in
+    parts). What still does not fit is skipped and counted.
 Files named val*.jsonl / eval*.jsonl are held out: rendered the same way, never used as examples.
 Also writes OUT_DIR/examples.jsonl (the example index the server loads), OUT_DIR/catalog.jsonl and
 OUT_DIR/render_report.json. Standard library only; one pass to load, one to render (about 60k rows in a few minutes).
@@ -107,7 +111,7 @@ def load_items(path, extra, cat, fixes):
 
 
 def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.3, reply_context=0.5,
-           max_chars=F.MAX_ROW_CHARS, parts=True, log=print):
+           max_chars=F.MAX_ROW_CHARS, parts=True, log=print, max_tokens=F.MAX_ROW_TOKENS):
     t0 = time.time()
     src, out = Path(src), Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -148,7 +152,7 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
     log(f"example index: {len(ex_index)} requests ({time.time() - t0:.0f}s)")
 
     report = {"settings": {"k": k, "seed": seed, "variables_rate": variables_rate, "reply_context": reply_context,
-                           "max_chars": max_chars, "format": F.FORMAT_VERSION, "max_context_chars": F.MAX_CONTEXT_CHARS},
+                           "max_chars": max_chars, "max_tokens": max_tokens, "format": F.FORMAT_VERSION, "max_context_chars": F.MAX_CONTEXT_CHARS},
               "files": {}, "examples": len(ex_index), "session_fixes": fixes[0]}
     for name, items, bad in loaded:
         rng = random.Random(f"{seed}:{name}")
@@ -160,7 +164,7 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
                 row = None
                 if it["type"] == "record":
                     rec = it["record"]
-                    row = F.render_chat(rec, cat, index, ex_index, rng, k, variables_rate, max_chars)
+                    row = F.render_chat(rec, cat, index, ex_index, rng, k, variables_rate, max_chars, max_tokens)
                     if row is None:
                         c["skipped_unusable"] += 1
                         continue
@@ -173,26 +177,27 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
                         msgs = [dict(m) for m in row["messages"]]
                         u = next(m for m in msgs if m.get("role") == "user")
                         if F.CONTEXT_HEADER not in str(u.get("content")):
-                            acts, required = F.context_actions(it["request"], (), cat, index, k, rng)
-                            u["content"] = F.build_user(it["request"], acts, [], (), required=required)
+                            exs = ex_index.search(it["request"], rng.choice((0, 1, 2)))     # as at serving
+                            acts, required = F.context_actions(it["request"], (), cat, index, k, rng, exs)
+                            u["content"] = F.build_user(it["request"], acts, exs, (), required=required)
                             row, kind = {**row, "messages": msgs}, "reply_with_context"
                 else:
                     c["skipped_unusable"] += 1
                     continue
                 rows = [(row, kind)]
-                if F.row_chars(row) > max_chars and kind == "flow" and parts:
+                if not F.row_fits(row, max_chars, max_tokens) and kind == "flow" and parts:
                     # too long for the window: teach it in parts, the way the server builds a long flow
                     rows = []
                     for req, part, carried in F.split_flow(rec["flow"], cat):
                         prow = F.render_chat({"kind": "flow", "request": req, "flow": part, "variables": carried},
-                                             cat, index, ex_index, rng, k, variables_rate, max_chars)
+                                             cat, index, ex_index, rng, k, variables_rate, max_chars, max_tokens)
                         if prow is not None:
                             rows.append((prow, "part"))
                     c["split_long"] += 1 if rows else 0
                     rows = rows or [(row, kind)]
                 for row, kind in rows:
                     n = F.row_chars(row)
-                    if n > max_chars:
+                    if not F.row_fits(row, max_chars, max_tokens):
                         c["skipped_too_long"] += 1
                         continue
                     c[kind] += 1
@@ -232,9 +237,11 @@ def main(argv=None):
     ap.add_argument("--variables-rate", type=float, default=0.3)
     ap.add_argument("--reply-context", type=float, default=0.5)
     ap.add_argument("--max-chars", type=int, default=F.MAX_ROW_CHARS)
+    ap.add_argument("--max-tokens", type=int, default=F.MAX_ROW_TOKENS, help="estimated tokens (ooa_format.approx_tokens)")
     ap.add_argument("--no-parts", action="store_true", help="skip flows that do not fit instead of training their parts")
     a = ap.parse_args(argv)
-    render(a.src, a.out, a.catalog, a.k, a.seed, a.extra, a.variables_rate, a.reply_context, a.max_chars, not a.no_parts)
+    render(a.src, a.out, a.catalog, a.k, a.seed, a.extra, a.variables_rate, a.reply_context, a.max_chars, not a.no_parts,
+           max_tokens=a.max_tokens)
 
 
 if __name__ == "__main__":

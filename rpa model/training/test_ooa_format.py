@@ -146,6 +146,11 @@ def test_context_actions_gold_and_core():
     assert set(req) == {"ooa.csv/read", "ooa.pdf/merge", "core/loop", "core/if"}
     serve, _ = F.context_actions("read invoices from csv", (), CAT, INDEX, 12)
     assert [e["id"] for e in serve][-2:] == ["core/loop", "core/if"] and len(serve) <= 14
+    shown = [{"request": "r", "outline": "o", "actions": ["ooa.email/send", "ooa.csv/read", "nope/x"]}]
+    serve, _ = F.context_actions("read invoices from csv", (), CAT, INDEX, 12, examples=shown)
+    assert serve[0]["id"] == "ooa.email/send" and len({e["id"] for e in serve}) == len(serve)     # examples' actions
+    train, _ = F.context_actions("read invoices", ["ooa.pdf/merge"], CAT, INDEX, 12, random.Random(1), shown)
+    assert {"ooa.email/send", "ooa.csv/read", "ooa.pdf/merge"} <= {e["id"] for e in train} and len(train) == 16
 
 
 def test_render_chat_rows():
@@ -167,6 +172,14 @@ def test_render_chat_rows():
     assert q["messages"][1]["content"] == "Question: Which app?" and F.CONTEXT_HEADER in q["messages"][0]["content"]
     assert F.render_chat({"kind": "fix", "request": "r", "flow": flows[0][1]}, CAT, INDEX) is None   # no problems
 
+
+
+def test_approx_tokens():
+    assert F.approx_tokens("") == 0 and F.approx_tokens("read the file") == 3
+    assert F.approx_tokens('{"a":1}') == 7 and F.approx_tokens("°") == 2
+    assert F.approx_tokens("internationalization") > 3                         # long words count as several
+    row = {"messages": [{"role": "user", "content": "x " * 3000}, {"role": "assistant", "content": "y"}]}
+    assert not F.row_fits(row) and F.row_fits({"messages": [{"role": "user", "content": "hi"}]})
 
 # ---------------------------------------------------------------------------------------------- render_dataset
 def _fixture(d):
@@ -211,7 +224,7 @@ def test_render_dataset_fixture():
                 assert f"- {act}:" in user, (act, user)                                   # gold always present
             req = F.request_of(user)
             assert f"Similar: {req} =>" not in user                                       # never itself
-            assert F.row_chars(r) <= 4500                                                 # length cap
+            assert F.row_chars(r) <= 4500 and F.row_fits(r, 4500)                         # length cap
         assert any("Paris" in r["messages"][1]["content"] for r in train)                 # chat row kept
         f = rep["files"]["train.jsonl"]
         assert f["skipped_too_long"] + f["split_long"] >= 1 and f["rows"] == 9, f
