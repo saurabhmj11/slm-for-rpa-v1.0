@@ -1,0 +1,14 @@
+# build context is the "rpa model" folder; only what the Dockerfile copies is needed
+**/__pycache__
+**/*.pyc
+**/*.pt
+**/*.ipynb
+assistant/tests
+assistant/assistant_data
+nanochat
+nanochat_base
+sft
+platform
+eval
+notes
+docs

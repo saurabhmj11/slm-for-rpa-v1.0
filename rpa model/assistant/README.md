@@ -67,6 +67,9 @@ Command line, if you prefer:
 ```
 python app.py --model-dir ..\nanochat_base --nanochat ..\nanochat --platform ..\platform [--catalog FILE] [--port 8765] [--data-dir DIR] [--fake-model]
 ```
+More options: `--host` / `--token` / `--allowed-hosts` (serving other machines, see DEPLOY.md), `--max-waiting N`
+(requests that may wait for the model, default 4; more get HTTP 429) and `--time-budget SECONDS` (no retry starts after
+this, default 120). `GET /health` answers while the model loads; `GET /ready` answers 200 once it is loaded.
 
 ## What the model is good and weak at today
 
@@ -123,7 +126,9 @@ these are set:
 
 `tests/test_ui.py` needs Playwright (`pip install playwright` and `playwright install chromium`); without it it is skipped.
 
-**Security notes.** The server only listens on 127.0.0.1. It also refuses requests whose `Host` is not
+To run it as a server for other machines (a container, with a bearer token), see [DEPLOY.md](DEPLOY.md).
+
+**Security notes.** By default the server only listens on 127.0.0.1. It also refuses requests whose `Host` is not
 `127.0.0.1:PORT` / `localhost:PORT`, requests from other web sites (`Origin`), and any POST without
 `Content-Type: application/json` and the header `X-OOA-Assistant: 1` (the page sends it), so a web site you visit cannot
 make it run flows. During a run every file path an action opens must be inside the sandbox folder, even paths built
@@ -138,6 +143,8 @@ says how to install them), then starts the platform (http://localhost:8720) and 
 The assistant answers OpenAI-style requests at `http://127.0.0.1:8765/v1/chat/completions` (only from this
 computer), so Studio's **Assistant** can use your trained model. Once, in Studio: sun icon > **One Model
 Connections...** > **+ Connection**: name `ooa`, provider **OpenAI-compatible**, model `ooa-assistant`,
-**No key (local model)**, endpoint `http://127.0.0.1:8765/v1`, tick **Default**, **Save**. Then **Assistant >
-Build from a description**, describe the job, **Generate steps**, review, **Insert into the agent**. Answers are
+**No key (local model)**, endpoint `http://127.0.0.1:8765/v1`, leave **Default** unticked, **Save**. (Do not make it
+the default connection: every GenAI step without a connection of its own goes to the default one, and this model only
+writes flows.) Then **Assistant > Build from a description**, pick **ooa** as the Model Connection, describe the job,
+**Generate steps**, review, **Insert into the agent**. Answers are
 repaired (missing open / save steps) and checked before Studio shows them; Studio checks them again.

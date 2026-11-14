@@ -66,8 +66,10 @@ echo.
 echo  To let Studio's Assistant use YOUR trained model (once):
 echo    Studio top bar: sun icon ^> One Model Connections... ^> + Connection
 echo      Name: ooa     Provider: OpenAI-compatible     Model: ooa-assistant
-echo      API key from: No key (local model)   Endpoint: http://127.0.0.1:8765/v1    tick Default, Save
-echo    Then: Assistant ^> Build from a description ^> describe the job ^> Generate steps ^> Insert into the agent
+echo      API key from: No key (local model)   Endpoint: http://127.0.0.1:8765/v1    leave Default unticked, Save
+echo      (it only writes flows: as the default, every GenAI step without its own connection would be sent to it)
+echo    Then: Assistant ^> Build from a description ^> Model Connection: ooa ^> describe the job ^> Generate steps
+echo          ^> Insert into the agent
 echo  Close the two windows to stop everything.
 echo ============================================================================================
 pause
