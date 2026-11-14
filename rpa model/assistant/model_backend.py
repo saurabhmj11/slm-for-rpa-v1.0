@@ -68,6 +68,18 @@ class RepetitionGuard:
         return False
 
 
+def pack_version(model_dir):
+    """The model pack's version: the first line of VERSION in the model folder or the folder above it (the pack
+    folder, see DEPLOY.md), else None."""
+    for d in (Path(model_dir), Path(model_dir).parent):
+        f = d / "VERSION"
+        if f.is_file():
+            line = f.read_text(encoding="utf-8").strip().splitlines()
+            if line and line[0].strip():
+                return line[0].strip()[:100]
+    return None
+
+
 class NanochatLocal:
     def __init__(self, model_dir, nanochat_dir, source="sft", device=None, guard=True, catalog=None):
         os.environ["NANOCHAT_BASE_DIR"] = str(Path(model_dir).resolve())
@@ -94,7 +106,7 @@ class NanochatLocal:
         self.assistant_start, self.assistant_end = enc("<|assistant_start|>"), enc("<|assistant_end|>")
         params = sum(p.numel() for p in self.model.parameters())
         self.info = {"device": dev_type, "params_M": round(params / 1e6, 1), "step": meta.get("step"), "source": source,
-                     "catalog_lock": False}
+                     "catalog_lock": False, "version": pack_version(model_dir)}
         self.last_stats = {}
         # catalog lock (constrained.py): action ids and input/output names can only be real catalog names
         self.constraint = None
@@ -147,6 +159,10 @@ class NanochatLocal:
         stream.close()
         self.last_stats = {"tokens": len(out), "stop": reason, "seconds": round(time.time() - t0, 2), "ids": out}
         return self.tok.decode(out)
+
+    def count_tokens(self, text):
+        """Tokens in text with the model's own tokenizer (for the usage numbers of the OpenAI-style answer)."""
+        return len(self.tok.encode(text))
 
     def generate(self, request, attempt=0, max_tokens=2500):
         return self._run(request, max_tokens, 0.2 + 0.3 * attempt, 1000 + attempt, attempt=attempt, flow=True)

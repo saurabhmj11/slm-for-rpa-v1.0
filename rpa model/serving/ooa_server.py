@@ -94,6 +94,9 @@ NOT_A_TASK = ("The model did not read this as a task to automate, so it answered
               "Excel sheet'. Questions about actions go in the Learn tab.")
 
 
+OUT_OF_TIME = "The time for this request ran out, so no further attempt was made."
+
+
 class Router:
     def __init__(self, catalog, platform, policy, local=None, cloud=None):
         os.environ["OOA_CATALOG"] = catalog
@@ -160,14 +163,19 @@ class Router:
         user = request if not errors else request + "\n\nYour previous answer had these problems, fix them:\n- " + "\n- ".join(errors)
         return system, user
 
-    def run(self, request, system=None, assistant=False, existing=None, full_user=None):
+    def run(self, request, system=None, assistant=False, existing=None, full_user=None, deadline=None):
+        """deadline: time.time() value after which no further attempt (retry or cloud call) starts."""
         t0, tried, errors = time.time(), [], []
+        late = lambda: deadline is not None and tried and time.time() >= deadline
         p = self.policy
         simple = clauses(request) <= p.max_clauses_local and len(request) <= 500
         if self.cloud is None or not p.allow_escalation:
             simple = True      # no cloud fallback: always let the local model try instead of failing unseen
         if self.local is not None and simple:
             for attempt in range(1 + p.local_retries):
+                if late():
+                    errors = list(errors) + [OUT_OF_TIME]
+                    break
                 try:
                     raw = self.local.generate(request, attempt)
                 except Exception as ex:
@@ -192,6 +200,9 @@ class Router:
             req = mask(request) if p.mask_pii else request
             err = [mask(e) if p.mask_pii else e for e in errors if not e.startswith("request looks")]
             for attempt in range(2):
+                if late():
+                    err = list(err) + [OUT_OF_TIME]
+                    break
                 if assistant and system:      # the platform's own prompt carries its live action catalog: use it
                     sys_p = system
                     user = (mask(full_user) if p.mask_pii else full_user) + ("\n\nYour previous answer had these problems, fix them:\n- " + "\n- ".join(err) if err else "")
@@ -259,28 +270,80 @@ class CloudBackend:
         return "".join(b.get("text", "") for b in data.get("content", []))
 
 
-def chat_completion(router, body):
-    """OpenAI-style /v1/chat/completions on the router: (http_status, response). Used by this server and by the
-    PC assistant (assistant/app.py), so One Agent Studio's Assistant can use the model as an OpenAI-compatible
-    One Model Connection."""
+MODEL_ID = "ooa-assistant"
+# Model connection checks send one of these and expect a one-word answer (the platform's connection wizard Test
+# button and Command Center's model probe). They are answered at once, without running the model.
+PROBES = {"reply with the single word ok", "answer with the single word ok"}
+NO_TOOLS = "ooa-assistant writes flows only; it does not support tools"
+
+
+def is_probe(text):
+    return " ".join(str(text).lower().split()).rstrip(".!") in PROBES
+
+
+def openai_error(message, type_="invalid_request_error", code=None):
+    err = {"message": message, "type": type_}
+    if code:
+        err["code"] = code
+    return {"error": err}
+
+
+def _approx_tokens(text):
+    return (len(text) + 3) // 4
+
+
+def quick_reply(body, count_tokens=None, version=None):
+    """The answers to /v1/chat/completions that need no model: (http_status, response), or None when the model must
+    run. A malformed request or one with tools gets 400; a connection probe gets "OK"."""
     msgs = body.get("messages") if isinstance(body, dict) else None
     if not isinstance(msgs, list) or not [m for m in msgs if isinstance(m, dict) and m.get("role") == "user"]:
-        return 400, {"error": "send at least one user message"}
+        return 400, openai_error("send at least one user message")
+    if body.get("tools"):
+        return 400, openai_error(NO_TOOLS)
+    if is_probe(parse_messages([m for m in msgs if isinstance(m, dict)])[4]):
+        return 200, _completion(msgs, "OK", {"probe": True}, count_tokens, version)
+    return None
+
+
+def chat_completion(router, body, count_tokens=None, version=None, deadline=None):
+    """OpenAI-style /v1/chat/completions on the router: (http_status, response). Used by this server and by the
+    PC assistant (assistant/app.py), so One Agent Studio's Assistant can use the model as an OpenAI-compatible
+    One Model Connection.
+    count_tokens(text) -> int counts usage with the model's own tokenizer (default: characters / 4).
+    version: dict added to the response's extra "ooa" field (pack / model version).
+    deadline: time.time() after which no further retry attempt starts (see Router.run)."""
+    quick = quick_reply(body, count_tokens, version)
+    if quick is not None:
+        return quick
+    msgs = [m for m in body["messages"] if isinstance(m, dict)]
     request, system, assistant, existing, full_user = parse_messages(msgs)
-    res = router.run(request, system, assistant, existing, full_user)
+    res = router.run(request, system, assistant, existing, full_user, deadline=deadline)
     if res["verified"]:
         content = res["flow"]
     elif assistant:   # Studio reads steps/notes: an empty answer with the honest reason is shown to the user
         content = json.dumps({"variables": [], "steps": [], "notes": "No flow was returned: " + res["reason"] + ". " + " ".join(res.get("problems", [])[:2])})
     else:
         content = json.dumps({"error": res["reason"], "problems": res.get("problems", [])})
-    pt = sum(len(str(m.get("content", ""))) for m in msgs if isinstance(m, dict)) // 4
-    return 200, {"id": "ooa-" + str(int(time.time() * 1000)), "object": "chat.completion",
-                 "created": int(time.time()), "model": body.get("model") or "ooa-assistant",
-                 "choices": [{"index": 0, "finish_reason": "stop" if res["verified"] else "length",
-                              "message": {"role": "assistant", "content": content}}],
-                 "usage": {"prompt_tokens": pt, "completion_tokens": len(content) // 4, "total_tokens": pt + len(content) // 4},
-                 "ooa": {k: v for k, v in res.items() if k != "flow"}}
+    return 200, _completion(msgs, content, {k: v for k, v in res.items() if k != "flow"}, count_tokens, version)
+
+
+def _completion(msgs, content, ooa, count_tokens, version):
+    texts = [m.get("content") if isinstance(m.get("content"), str) else json.dumps(m.get("content", ""))
+             for m in msgs if isinstance(m, dict)]
+    try:
+        count = count_tokens or _approx_tokens
+        pt, ct = sum(count(t) for t in texts), count(content)
+    except Exception:       # a tokenizer problem must not fail the request
+        pt, ct = sum(_approx_tokens(t) for t in texts), _approx_tokens(content)
+    if version:
+        ooa = {**ooa, "version": version}
+    # finish_reason is "stop" whether or not a flow was produced: the answer is complete either way (a missing flow
+    # is explained in the content), and "length" would tell the client to retry with more tokens, which does not help.
+    return {"id": "ooa-" + str(int(time.time() * 1000)), "object": "chat.completion",
+            "created": int(time.time()), "model": MODEL_ID,
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
+            "usage": {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct},
+            "ooa": ooa}
 
 
 def make_handler(router):

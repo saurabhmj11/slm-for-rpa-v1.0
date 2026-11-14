@@ -1,8 +1,12 @@
 """OOA Assistant: a local web app that runs OUR flow-writing model on this PC (CPU is enough).
 
     python app.py --model-dir DIR --nanochat DIR --platform DIR [--catalog FILE] [--port 8765] [--data-dir DIR] [--fake-model]
+                  [--host 127.0.0.1] [--allowed-hosts NAME ...] [--token TOKEN | env OOA_ASSISTANT_TOKEN]
 
-Binds 127.0.0.1 only (nothing is reachable from other machines). Loads the model once at start; one generation at a time.
+Binds 127.0.0.1 by default (nothing is reachable from other machines). Another --host (a server, a container) needs a
+bearer token: the model routes (/v1/*, /api/assistant/v1/*) then require "Authorization: Bearer <token>", and the
+browser page and its /api/* routes answer only requests from the machine itself. See DEPLOY.md.
+Loads the model once at start; one generation at a time, with a bounded queue (429 when it is full).
 Tabs in the page (static/index.html): Build, Learn, Practice, Run, Progress. See README.md and SPEC.md.
 
 Self-learning: Accept / Edit / Reject on a built flow is appended to DATA_DIR/feedback.jsonl. "Export training data"
@@ -11,7 +15,8 @@ the verifier). The model does NOT change live: it improves at the next training 
 """
 from __future__ import annotations
 
-import argparse, json, mimetypes, re, subprocess, sys, threading, time
+import argparse, hashlib, hmac, ipaddress, json, mimetypes, os, re, socket, subprocess, sys, threading, time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -24,7 +29,8 @@ sys.path.insert(0, str(ROOT / "training"))
 
 from knowledge import Knowledge              # noqa: E402
 from runner_bridge import RunnerBridge       # noqa: E402
-from ooa_server import Router, Policy, chat_completion        # noqa: E402
+from ooa_server import Router, Policy, chat_completion, quick_reply, openai_error, MODEL_ID        # noqa: E402
+import ooa_reward                            # noqa: E402
 
 STATIC = HERE / "static"
 INGEST = ROOT / "training" / "ingest_feedback.py"
@@ -33,6 +39,14 @@ MAX_REQUEST = 500          # serving/ooa_server.Router skips the local model for
 CSRF_HEADER = "X-OOA-Assistant"   # every POST must carry it: a web page on another site cannot send it without a
                                   # CORS preflight, which this server never approves
 VERDICTS = ("accept", "edit", "reject")
+TOKEN_ENV = "OOA_ASSISTANT_TOKEN"
+MIN_TOKEN = 16
+CONTRACT = "studio-assistant/v1"
+MAX_WAITING = 4            # requests that may wait for the model while one runs; more get 429
+TIME_BUDGET = 120.0        # seconds per request: no retry attempt starts after this
+RETRY_AFTER = 10           # seconds, sent with 429
+OPEN_PATHS = ("/health", "/ready")                         # no checks at all: process and readiness probes
+API_PREFIXES = ("/v1/", "/api/assistant/v1/")              # model routes for programs (Studio): bearer token when set
 
 GOOD_AT = ["Step-by-step requests worded like the catalog's action descriptions, with the inputs and outputs named, "
            "e.g. 'Read a text file, then parse JSON text into a Dictionary or List. The flow takes path as input. "
@@ -51,9 +65,29 @@ EXPORT_STEPS = ["Upload feedback_train.jsonl from the folder above to Google Dri
 
 
 class ApiError(Exception):
-    def __init__(self, code: int, message: str):
+    def __init__(self, code: int, message: str, headers=None):
         super().__init__(message)
-        self.code, self.message = code, message
+        self.code, self.message, self.headers = code, message, headers or {}
+
+
+ERROR_TYPES = {400: "invalid_request_error", 401: "authentication_error", 403: "permission_error",
+               404: "not_found_error", 413: "invalid_request_error", 429: "rate_limit_error",
+               503: "service_unavailable"}
+
+
+def is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)          # ::ffff:127.0.0.1 on a dual-stack socket
+    return ip.is_loopback or bool(mapped and mapped.is_loopback)
+
+
+def _sha256(path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def default_catalog(model_dir: str | None) -> str:
@@ -94,7 +128,10 @@ class _StatsRecorder:
 class Assistant:
     """Everything the routes need, wired once."""
 
-    def __init__(self, catalog: str, platform: str, data_dir: str, model):
+    def __init__(self, catalog: str, platform: str, data_dir: str, model, max_waiting: int = MAX_WAITING,
+                 time_budget: float = TIME_BUDGET):
+        """model may be None while it loads (main() loads it after the server is up): /ready says so and the
+        model routes answer 503 until set_model() is called."""
         self.catalog = str(Path(catalog).resolve())
         self.platform = str(Path(platform).resolve())
         self.schema = str(Path(self.platform) / "contracts" / "flow-schema" / "flow.v1.json")
@@ -106,14 +143,80 @@ class Assistant:
         (self.data / "sandbox").mkdir(parents=True, exist_ok=True)
         (self.data / "exports").mkdir(parents=True, exist_ok=True)
         self.feedback_path = self.data / "feedback.jsonl"
-        self.model = model
+        self.model = None
+        self.model_error = None
         self.knowledge = Knowledge(self.catalog)
         self.runner = RunnerBridge(self.platform, str(self.data / "sandbox"))
         self.recorder = _StatsRecorder(model)
         self.router = Router(self.catalog, self.platform, Policy(allow_escalation=False, local_retries=1),
                              local=self.recorder)
+        self.catalog_sha256, self.schema_sha256 = _sha256(self.catalog), _sha256(self.schema)
         self.model_lock = threading.Lock()      # one generation at a time
+        self.wait_lock = threading.Lock()
+        self.waiting, self.max_waiting, self.time_budget = 0, max_waiting, time_budget
         self.fb_lock = threading.Lock()
+        if model is not None:
+            self.set_model(model)
+
+    def set_model(self, model):
+        self.recorder.model = model
+        self.model = model
+
+    # ------------------------------------------------------------------ model queue / readiness / version
+    @contextmanager
+    def generation(self):
+        """Wait for the model (one generation at a time). At most max_waiting requests wait; one more, or a wait
+        longer than the time budget, gets 429. Yields the deadline after which no retry attempt starts."""
+        if self.model is None:
+            raise ApiError(503, "the model is still loading" if not self.model_error else
+                           "the model failed to load: " + self.model_error)
+        deadline = time.time() + self.time_budget
+        with self.wait_lock:
+            if self.waiting >= self.max_waiting:
+                raise ApiError(429, f"busy: {self.waiting} requests are already waiting for the model; try again "
+                                    "shortly", {"Retry-After": str(RETRY_AFTER)})
+            self.waiting += 1
+        try:
+            got = self.model_lock.acquire(timeout=self.time_budget)
+        finally:
+            with self.wait_lock:
+                self.waiting -= 1
+        if not got:
+            raise ApiError(429, "busy: the model did not become free in time; try again shortly",
+                           {"Retry-After": str(RETRY_AFTER)})
+        try:
+            yield deadline
+        finally:
+            self.model_lock.release()
+
+    def missing(self):
+        """What is not loaded yet (empty list = ready)."""
+        out = []
+        if self.model is None:
+            out.append("model" + (" (failed to load: " + self.model_error + ")" if self.model_error else " (loading)"))
+        if not self.router.cat or not self.knowledge.entries:
+            out.append("catalog")
+        if getattr(ooa_reward, "_SV", None) is None:
+            out.append("schema")
+        return out
+
+    def version(self):
+        info = dict(getattr(self.model, "info", {}) or {})
+        return {"version": info.get("version") or (f"{info.get('source', 'unknown')}-step{info.get('step')}"
+                                                   if self.model is not None else None),
+                "contract": CONTRACT, "model_step": info.get("step"), "catalog_actions": len(self.router.cat),
+                "catalog_sha256": self.catalog_sha256, "schema_sha256": self.schema_sha256}
+
+    def chat(self, body):
+        """POST /v1/chat/completions -> (status, body). A probe or a refused request never waits for the model."""
+        counter = getattr(self.model, "count_tokens", None)      # the real tokenizer; None: characters / 4
+        v = self.version()
+        version = {"version": v["version"], "model_step": v["model_step"], "catalog_sha256": v["catalog_sha256"]}
+        quick = quick_reply(body, counter, version)
+        if quick is not None:
+            return quick
+        with self.generation() as deadline:
+            return chat_completion(self.router, body, counter, version, deadline)
 
     # ------------------------------------------------------------------ status / build
     def status(self):
@@ -127,9 +230,9 @@ class Assistant:
 
     def build(self, body):
         request = _text(body, "request", MAX_REQUEST)
-        with self.model_lock:
+        with self.generation() as deadline:
             self.recorder.stats = []
-            res = self.router.run(request)
+            res = self.router.run(request, deadline=deadline)
             stats = self.recorder.stats
         attempts = [dict(a) for a in res.get("attempts", [])]
         if not res.get("verified") and not attempts:
@@ -153,7 +256,7 @@ class Assistant:
 
     def ask(self, body):
         q = _text(body, "question", 1000)
-        with self.model_lock:
+        with self.generation():
             answer = self.model.ask(q)
         return {"model_answer": answer, "catalog_matches": self.knowledge.search(q, 5),
                 "note": "The catalog matches are the source of truth; the model's answer can be wrong."}
@@ -266,20 +369,27 @@ def _flow(body, key):
 
 
 # ---------------------------------------------------------------------- HTTP
-def make_handler(app: Assistant):
+def make_handler(app: Assistant, token: str | None = None, allowed_hosts=(), local_only_ui: bool = False):
+    """token: when set, the model routes (API_PREFIXES) need "Authorization: Bearer <token>".
+    allowed_hosts: extra Host header values accepted ("name" or "name:port"; a bare name matches any port).
+    local_only_ui: the page and its /api/* routes answer only clients on this machine (set when bound beyond loopback)."""
+    extra_hosts = {h.strip().lower() for h in allowed_hosts if h and h.strip()}
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "OOAAssistant/1"
 
         def log_message(self, *a):
             pass
 
-        def _send(self, code, obj=None, raw=None, ctype="application/json; charset=utf-8"):
+        def _send(self, code, obj=None, raw=None, ctype="application/json; charset=utf-8", headers=None):
             b = raw if raw is not None else json.dumps(obj, ensure_ascii=False).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(b)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(b)
 
@@ -296,14 +406,43 @@ def make_handler(app: Assistant):
                 ctype += "; charset=utf-8"
             self._send(200, raw=p.read_bytes(), ctype=ctype)
 
+        def _host_ok(self, host, port):
+            host = host.lower()
+            if host in {f"127.0.0.1:{port}", f"localhost:{port}"} or host in extra_hosts:
+                return True
+            return host.rsplit(":", 1)[0] in extra_hosts if ":" in host else False
+
+        def _check_token(self):
+            """Bearer token for the model routes (constant-time compare)."""
+            auth = self.headers.get("Authorization") or ""
+            given = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+            if not given or not hmac.compare_digest(given.encode("utf-8"), token.encode("utf-8")):
+                raise ApiError(401, "missing or wrong API key: send Authorization: Bearer <token>",
+                               {"WWW-Authenticate": "Bearer"})
+
+        def _check_access(self, method, path):
+            if path in OPEN_PATHS:
+                return
+            api = path.startswith(API_PREFIXES)
+            if api and token:
+                self._check_token()          # the token replaces the Host / Origin checks for programs
+                if method == "POST":
+                    ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                    if ctype != "application/json":
+                        raise ApiError(400, "POST needs Content-Type application/json")
+                return
+            if not api and local_only_ui and not is_loopback(self.client_address[0]):
+                raise ApiError(403, "forbidden: the assistant page is only served to this machine")
+            self._check_origin(method)
+
         def _check_origin(self, method):
             """Blocks other web sites (CSRF) and DNS rebinding: only this page on 127.0.0.1/localhost may call us."""
             port = self.server.server_address[1]
-            allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
-            if (self.headers.get("Host") or "").lower() not in allowed:
+            if not self._host_ok(self.headers.get("Host") or "", port):
                 raise ApiError(403, "forbidden: open the assistant at http://127.0.0.1:%d/" % port)
             origin = self.headers.get("Origin")
-            if origin is not None and origin.lower() not in {"http://" + h for h in allowed}:
+            scheme, _, rest = (origin or "").lower().partition("://")
+            if origin is not None and not (scheme in ("http", "https") and self._host_ok(rest, port)):
                 raise ApiError(403, "forbidden: requests from other web sites are refused")
             if method == "POST":
                 ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -315,16 +454,23 @@ def make_handler(app: Assistant):
                     raise ApiError(403, f"forbidden: POST needs Content-Type application/json and {CSRF_HEADER}: 1")
 
         def _dispatch(self, method):
-            self._check_origin(method)
             u = urlparse(self.path)
             path, q = u.path, {k: v[-1] for k, v in parse_qs(u.query).items()}
+            self._check_access(method, path)
             if method == "GET":
+                if path == "/health":             # the process is up
+                    return self._send(200, {"ok": True})
+                if path == "/ready":              # model, catalog and schema loaded
+                    missing = app.missing()
+                    return self._send(503 if missing else 200, {"ready": not missing, "missing": missing})
+                if path == "/api/assistant/v1/admin/version":
+                    return self._send(200, app.version())
                 if path in ("/", "/index.html"):
                     return self._static("index.html")
                 if path.startswith("/static/"):
                     return self._static(path[len("/static/"):])
                 if path == "/v1/models":          # OpenAI-compatible model list (for model connection set-up screens)
-                    return self._send(200, {"object": "list", "data": [{"id": "ooa-assistant", "object": "model",
+                    return self._send(200, {"object": "list", "data": [{"id": MODEL_ID, "object": "model",
                                                                         "owned_by": "local"}]})
                 k = app.knowledge
                 if path == "/api/status":
@@ -371,9 +517,7 @@ def make_handler(app: Assistant):
             if not isinstance(body, dict):
                 raise ApiError(400, "the body must be a JSON object")
             if path == "/v1/chat/completions":
-                with app.model_lock:              # one generation at a time, like the Build tab
-                    code, out = chat_completion(app.router, body)
-                return self._send(code, out)
+                return self._send(*app.chat(body))    # one generation at a time, like the Build tab
             routes = {
                 "/api/build": app.build,
                 "/api/explain": lambda b: app.knowledge.explain_flow(_flow(b, "flow")),
@@ -398,13 +542,20 @@ def make_handler(app: Assistant):
             except (ValueError, KeyError, TypeError) as e:
                 raise ApiError(400, f"invalid quiz id or choice: {e}")
 
+        def _error(self, code, message, headers=None):
+            if urlparse(self.path).path.startswith(API_PREFIXES):     # OpenAI-style error body for programs
+                obj = openai_error(message, ERROR_TYPES.get(code, "server_error"))
+            else:
+                obj = {"error": message}
+            self._send(code, obj, headers=headers)
+
         def _handle(self, method):
             try:
                 self._dispatch(method)
             except ApiError as e:
-                self._send(e.code, {"error": e.message})
+                self._error(e.code, e.message, e.headers)
             except Exception as e:  # noqa: BLE001 - one bad request must not kill the server
-                self._send(500, {"error": f"{type(e).__name__}: {e}"})
+                self._error(500, f"{type(e).__name__}: {e}")
 
         def do_GET(self):
             self._handle("GET")
@@ -422,8 +573,21 @@ def _int(v, default, lo, hi):
         return default
 
 
-def make_server(app: Assistant, port: int = 8765) -> ThreadingHTTPServer:
-    srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app))
+class _Server6(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def make_server(app: Assistant, port: int = 8765, host: str = "127.0.0.1", token: str | None = None,
+                allowed_hosts=()) -> ThreadingHTTPServer:
+    """Binding beyond loopback needs a token (SystemExit otherwise); the page is then only served to this machine."""
+    if token is not None and len(token) < MIN_TOKEN:
+        raise SystemExit(f"the token must be at least {MIN_TOKEN} characters long")
+    local = is_loopback(host)
+    if not local and not token:
+        raise SystemExit(f"--host {host} makes the assistant reachable from other machines: set a token first "
+                         f"(--token or the environment variable {TOKEN_ENV})")
+    cls = _Server6 if ":" in host else ThreadingHTTPServer
+    srv = cls((host, port), make_handler(app, token, allowed_hosts, local_only_ui=not local))
     srv.daemon_threads = True
     return srv
 
@@ -435,6 +599,17 @@ def parse_args(argv=None):
     ap.add_argument("--platform", required=True, help="platform repo folder (has contracts/flow-schema/flow.v1.json)")
     ap.add_argument("--catalog", help="catalog.jsonl (default: MODEL_DIR/../sft/catalog.jsonl, else the repo copy)")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="address to listen on (default 127.0.0.1); any other address needs a token")
+    ap.add_argument("--allowed-hosts", nargs="*", default=[], metavar="HOST",
+                    help="extra Host header values accepted (name or name:port), e.g. the server's DNS name")
+    ap.add_argument("--token", default=None,
+                    help=f"bearer token the model routes require (default: environment variable {TOKEN_ENV}); "
+                         "prefer the environment variable, a command line is visible to other users")
+    ap.add_argument("--max-waiting", type=int, default=MAX_WAITING,
+                    help=f"requests that may wait for the model while one runs; more get 429 (default {MAX_WAITING})")
+    ap.add_argument("--time-budget", type=float, default=TIME_BUDGET,
+                    help=f"seconds per request after which no retry attempt starts (default {TIME_BUDGET:g})")
     ap.add_argument("--data-dir", default="assistant_data", help="feedback, sandbox and exports go here")
     ap.add_argument("--fake-model", action="store_true", help="use a canned fake model (for trying the app / tests)")
     ap.add_argument("--no-catalog-lock", action="store_true",
@@ -444,19 +619,40 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    token = args.token or os.environ.get(TOKEN_ENV) or None
+    if args.max_waiting < 0 or args.time_budget <= 0:
+        raise SystemExit("--max-waiting must be 0 or more and --time-budget more than 0")
+    if not args.fake_model and (not args.model_dir or not args.nanochat):
+        raise SystemExit("--model-dir and --nanochat are required (or use --fake-model to try the app without the model)")
     catalog = args.catalog or default_catalog(args.model_dir)
-    print("Loading the model (this can take a minute on CPU) ...", flush=True)
-    model = load_model(args, catalog)
-    app = Assistant(catalog, args.platform, args.data_dir, model)
-    srv = make_server(app, args.port)
-    print(f"OOA Assistant is running: open http://127.0.0.1:{srv.server_address[1]}/ in your browser "
-          f"(Ctrl+C to stop). Data folder: {app.data}", flush=True)
+    app = Assistant(catalog, args.platform, args.data_dir, None, args.max_waiting, args.time_budget)
+    srv = make_server(app, args.port, args.host, token, args.allowed_hosts)
+    failed = []
+
+    def load():          # the server answers /health (and says "loading" on /ready) while the model loads
+        try:
+            app.set_model(load_model(args, catalog))
+            print(f"OOA Assistant is running: open http://127.0.0.1:{srv.server_address[1]}/ in your browser on this "
+                  f"machine (Ctrl+C to stop). Data folder: {app.data}", flush=True)
+        except BaseException as e:  # noqa: BLE001 - report it and stop: a server without its model is no use
+            app.model_error = f"{type(e).__name__}: {e}"
+            print("The model failed to load: " + app.model_error, file=sys.stderr, flush=True)
+            failed.append(e)
+            threading.Thread(target=srv.shutdown, daemon=True).start()
+
+    print(f"Listening on {args.host}:{srv.server_address[1]}. Loading the model (this can take a minute on CPU) ...",
+          flush=True)
+    threading.Thread(target=load, daemon=True).start()
+    if token:
+        print("Model routes (/v1/*, /api/assistant/v1/*) need the bearer token.", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         print("Stopped.")
     finally:
         srv.server_close()
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

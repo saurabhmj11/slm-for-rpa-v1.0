@@ -142,4 +142,27 @@ r, srv, port = start(S.Policy(allow_escalation=False), Local(["garbage"]), None)
 ans = json.loads(studio(port, "do a thing")["choices"][0]["message"]["content"])
 assert ans["steps"] == [] and "disabled by this client's policy" in ans["notes"]
 print("11 ok: Studio + failure -> empty steps and a clear reason in notes")
+
+# 12. time budget: once the deadline has passed, no retry (and no cloud call) starts; the reason says so
+import time as _time
+loc, cl = Local(["{not a flow"]), Cloud([GOOD])
+r = S.Router(CATALOG, PLATFORM, S.Policy(allow_escalation=True, local_retries=2), loc, cl)
+res = r.run("read a csv file into a table", deadline=_time.time() - 1)
+assert loc.calls == 1 and cl.seen == [] and not res["verified"] and S.OUT_OF_TIME in res["problems"], res
+loc = Local(["{not a flow"]); r = S.Router(CATALOG, PLATFORM, S.Policy(local_retries=2), loc, None)
+assert not r.run("read a csv file into a table", deadline=_time.time() + 60)["verified"] and loc.calls == 3
+print("12 ok: time budget stops further attempts")
+
+# 13. OpenAI contract details: probe answered without the model, tools refused, finish_reason stop, fixed model id
+loc = Local([GOOD]); r, srv, port = start(S.Policy(), loc, None)
+res = ask(port, "  Reply with the single word OK.  ")
+assert res["choices"][0]["message"]["content"] == "OK" and loc.calls == 0 and res["model"] == "ooa-assistant"
+code, out = S.chat_completion(r, {"messages": [{"role": "user", "content": "x"}], "tools": [{"type": "function"}]})
+assert code == 400 and out["error"]["type"] == "invalid_request_error" and loc.calls == 0, out
+r2 = S.Router(CATALOG, PLATFORM, S.Policy(), Local(["garbage"]), None)
+code, out = S.chat_completion(r2, {"model": "anything", "messages": [{"role": "user", "content": "do a thing"}]},
+                              count_tokens=lambda t: 7, version={"pack": "p1"})
+assert code == 200 and out["choices"][0]["finish_reason"] == "stop" and out["model"] == "ooa-assistant"
+assert out["usage"] == {"prompt_tokens": 7, "completion_tokens": 7, "total_tokens": 14} and out["ooa"]["version"] == {"pack": "p1"}
+print("13 ok: probe, tools refused, finish_reason stop, real token counts, version in the ooa field")
 print("ALL SERVER TESTS PASSED")
