@@ -28,20 +28,35 @@ def configure(catalog_path=None, schema_path=None):
     _SV = jsonschema.validators.validator_for(_SCHEMA)(_SCHEMA)
 
 
-def walk(nodes):
-    for n in nodes or []:
-        if not isinstance(n, dict):
+def bodies(n):
+    """The step lists inside one container step (flow.v1.json): children, else, finally, elseIf[].children,
+    catch[].children, core/switch cases[].children and default, core/state_machine states[].entry and
+    states[].transitions[].steps."""
+    for k in ("children", "else", "finally", "elseIf", "catch", "cases", "default"):
+        v = n.get(k)
+        if k in ("elseIf", "catch", "cases"):        # lists of blocks, each with its own children
+            for b in v if isinstance(v, list) else []:
+                if isinstance(b, dict) and isinstance(b.get("children"), list):
+                    yield b["children"]
+        elif isinstance(v, list):
+            yield v
+    for st in n.get("states") if isinstance(n.get("states"), list) else []:
+        if not isinstance(st, dict):
             continue
-        yield n
-        for k in ("children", "else", "finally"):
-            if isinstance(n.get(k), list):
-                yield from walk(n[k])
-        for ei in n.get("elseIf") or []:
-            if isinstance(ei, dict):
-                yield from walk(ei.get("children"))
-        for c in n.get("catch") or []:
-            if isinstance(c, dict):
-                yield from walk(c.get("children"))
+        if isinstance(st.get("entry"), list):
+            yield st["entry"]
+        for t in st.get("transitions") if isinstance(st.get("transitions"), list) else []:
+            if isinstance(t, dict) and isinstance(t.get("steps"), list):
+                yield t["steps"]
+
+
+def walk(nodes):
+    """Every step, depth first, including the steps inside containers (see bodies)."""
+    for n in nodes if isinstance(nodes, list) else []:
+        if isinstance(n, dict):
+            yield n
+            for b in bodies(n):
+                yield from walk(b)
 
 
 def actions_of(flow):

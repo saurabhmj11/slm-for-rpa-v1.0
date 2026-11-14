@@ -6,20 +6,41 @@ changes (nothing is saved automatically). Returns (flow, notes)."""
 import copy, difflib, re
 
 
+def bodies(n):
+    """The step lists inside one container step (flow.v1.json): children, else, finally, elseIf[].children,
+    catch[].children, core/switch cases[].children and default, core/state_machine states[].entry and
+    states[].transitions[].steps."""
+    for k in ("children", "else", "finally", "elseIf", "catch", "cases", "default"):
+        v = n.get(k)
+        if k in ("elseIf", "catch", "cases"):        # lists of blocks, each with its own children
+            for b in v if isinstance(v, list) else []:
+                if isinstance(b, dict) and isinstance(b.get("children"), list):
+                    yield b["children"]
+        elif isinstance(v, list):
+            yield v
+    for st in n.get("states") if isinstance(n.get("states"), list) else []:
+        if not isinstance(st, dict):
+            continue
+        if isinstance(st.get("entry"), list):
+            yield st["entry"]
+        for t in st.get("transitions") if isinstance(st.get("transitions"), list) else []:
+            if isinstance(t, dict) and isinstance(t.get("steps"), list):
+                yield t["steps"]
+
+
+def walk(nodes):
+    """Every step, depth first, including the steps inside containers (see bodies). Same rules as ooa_reward.walk."""
+    for n in nodes if isinstance(nodes, list) else []:
+        if isinstance(n, dict):
+            yield n
+            for b in bodies(n):
+                yield from walk(b)
+
+
 def repair(flow, cat):
     """cat: dict action_id -> catalog entry."""
     flow = copy.deepcopy(flow)
     notes, ids = [], list(cat)
-    def walk(nodes):
-        for n in nodes or []:
-            if isinstance(n, dict):
-                yield n
-                for k in ("children", "else", "finally"):
-                    if isinstance(n.get(k), list):
-                        yield from walk(n[k])
-                for c in n.get("catch") or []:
-                    if isinstance(c, dict):
-                        yield from walk(c.get("children"))
     for s in walk(flow.get("steps")):
         a = s.get("action")
         if isinstance(a, str) and a not in cat:
@@ -81,16 +102,7 @@ def _add_missing_save(flow, notes, cat):
     steps = flow.get("steps")
     if not isinstance(steps, list):
         return
-    def all_steps(nodes):
-        for n in nodes or []:
-            if isinstance(n, dict):
-                yield n
-                for k in ("children", "else", "finally"):
-                    yield from all_steps(n.get(k) if isinstance(n.get(k), list) else [])
-                for c in n.get("catch") or []:
-                    if isinstance(c, dict):
-                        yield from all_steps(c.get("children"))
-    flat = list(all_steps(steps))
+    flat = list(walk(steps))
     for t, saves in SAVES.items():
         acts = [(n.get("action") or "") for n in flat]
         changed = [k for k, a in enumerate(acts) if isinstance(a, str) and a.startswith(t + "/") and a not in OPENS
@@ -148,11 +160,8 @@ def _add_missing_open(flow, notes, cat):
                 notes.append(f"added the missing {op} step before {a}")
                 opened.add(t)
                 k += 1
-            for key in ("children", "else", "finally"):
-                visit(n.get(key))
-            for c in n.get("catch") or []:
-                if isinstance(c, dict):
-                    visit(c.get("children"))
+            for b in bodies(n):
+                visit(b)
             k += 1
     visit(flow.get("steps"))
 

@@ -66,6 +66,45 @@ def test_no_save_when_only_reading_or_already_saved():
     assert len(f["steps"]) == 3 and not notes, notes
 
 
+def _containers(inner):
+    """One copy of `inner` (a list of steps) in every kind of container body of flow.v1.json."""
+    c = lambda: json.loads(json.dumps(inner))
+    return [
+        {"id": "if1", "action": "core/if", "args": {"condition": "$p"}, "children": [],
+         "elseIf": [{"condition": "$p", "children": c()}]},
+        {"id": "sw", "action": "core/switch", "args": {"value": "$p"},
+         "cases": [{"values": ["a"], "children": c()}], "default": c()},
+        {"id": "sm", "action": "core/state_machine", "states": [
+            {"name": "start", "entry": c(), "transitions": [{"to": "end", "steps": c()}]},
+            {"name": "end", "final": True}]}]
+
+
+def test_walk_reaches_switch_state_machine_and_else_if():
+    steps = _containers([{"id": "x", "action": "core/log"}])
+    assert [s["action"] for s in repair.walk(steps)].count("core/log") == 5, list(repair.walk(steps))
+
+
+def test_typos_fixed_inside_switch_state_machine_and_else_if():
+    f, notes = repair.repair(flow([{"name": "p", "type": "String", "direction": "input"}], _containers(
+        [{"id": "x", "action": "ooa.file/read_txt", "description": "r", "args": {"pth": "$p"}}])), CAT)
+    inner = [s for s in repair.walk(f["steps"]) if not s["action"].startswith("core/")]
+    assert len(inner) == 5 and all(s["action"] == "ooa.file/read_text" and s["args"] == {"path": "$p"} for s in inner), inner
+    assert len([n for n in notes if "-> ooa.file/read_text" in n]) == 5, notes
+
+
+def test_open_and_save_added_inside_switch_case_and_state():
+    steps = [{"id": "sw", "action": "core/switch", "args": {"value": "$p"}, "cases": [{"values": ["a"], "children": [
+        {"id": "s1", "action": "ooa.excel/row_count", "description": "n"}]}]},
+             {"id": "sm", "action": "core/state_machine", "states": [{"name": "only", "final": True, "entry": [
+                 {"id": "w1", "action": "ooa.word/open", "description": "o", "args": {"path": "$p"}},
+                 {"id": "w2", "action": "ooa.word/add_paragraph", "description": "a", "args": {"text": "$p"}}]}]}]
+    f, notes = repair.repair(flow([{"name": "p", "type": "String", "direction": "input"}], steps), CAT)
+    case = f["steps"][0]["cases"][0]["children"]
+    assert [s["action"] for s in case] == ["ooa.excel/open", "ooa.excel/row_count"], case
+    assert [s["action"] for s in f["steps"]][-1] == "ooa.word/save", f["steps"]     # the save goes at the end of the flow
+    assert any("ooa.excel/open" in n for n in notes) and any("ooa.word/save" in n for n in notes), notes
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

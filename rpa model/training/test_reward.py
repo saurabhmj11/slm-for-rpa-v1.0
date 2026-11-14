@@ -38,6 +38,33 @@ assert sc(txt, None)["total"] <= 0.75, "without gold the total is capped at .75"
 assert R.refs("${folder}/data/x.csv") == {"folder"} and R.refs("$row.Name") == {"row"} and R.refs("$n - 1") == {"n"}
 assert R.refs("${len($xs)}") == {"xs"} and R.refs("${sys.date}") == set() and R.refs({"literal": "$x"}) == set()
 assert not sc(mut(lambda f: f["steps"][0].update(args={k: "${nope}/x" for k in f["steps"][0]["args"]})))["solved"], "undeclared template variable fails"
+# newer containers (flow.v1.json): core/switch cases[].children + default, core/state_machine states[].entry and
+# states[].transitions[].steps. Steps inside them are checked like any other step.
+_s0 = json.loads(txt)["steps"][0]
+_cont = {"kind": "TaskBot", "id": "containers", "name": "containers", "variables": json.loads(txt)["variables"] + [
+    {"name": "mode", "type": "String", "direction": "input"}], "steps": [
+    {"id": "sw", "action": "core/switch", "args": {"value": "$mode"},
+     "cases": [{"values": ["a"], "children": [dict(_s0, id="c1")]}], "default": [dict(_s0, id="d1")]},
+    {"id": "sm", "action": "core/state_machine", "args": {"initial": "start"}, "states": [
+        {"name": "start", "entry": [dict(_s0, id="e1")], "transitions": [{"to": "end", "steps": [dict(_s0, id="t1")]}]},
+        {"name": "end", "final": True}]}]}
+assert [s["id"] for s in R.walk(_cont["steps"])] == ["sw", "c1", "d1", "sm", "e1", "t1"], list(R.walk(_cont["steps"]))
+assert sc(_cont, None)["valid"], R.problems(json.dumps(_cont))
+_bad_if = {"id": "i", "action": "core/if", "args": {"condition": "$mode"}, "children": [],
+           "elseIf": [{"condition": "$mode", "children": [{"id": "x", "action": "ooa.fake/x"}]}]}
+for _path, _put in [("case", lambda f, s: f["steps"][0]["cases"][0]["children"].append(s)),
+                    ("default", lambda f, s: f["steps"][0]["default"].append(s)),
+                    ("entry", lambda f, s: f["steps"][1]["states"][0]["entry"].append(s)),
+                    ("transition", lambda f, s: f["steps"][1]["states"][0]["transitions"][0]["steps"].append(s))]:
+    _f = json.loads(json.dumps(_cont))
+    _put(_f, {"id": "bad", "action": "ooa.fake/x", "args": {}})
+    assert not sc(_f, None)["valid"] and "Unknown action 'ooa.fake/x'." in R.problems(json.dumps(_f)), _path
+    _f = json.loads(json.dumps(_cont))
+    _put(_f, dict(_s0, id="dup", args={k: "$nope" for k in _s0["args"]}))
+    assert not sc(_f, None)["valid"], "undeclared variable inside " + _path
+    _f = json.loads(json.dumps(_cont))
+    _put(_f, dict(_bad_if))
+    assert "Unknown action 'ooa.fake/x'." in R.problems(json.dumps(_f)), "elseIf inside " + _path
 # the real platform example flows are the ground truth: the verifier must accept them (all but the stepless agent file)
 import glob as _g
 _real = [json.load(open(p)) for p in sorted(_g.glob(os.path.join(repo, "examples", "**", "*.flow.json"), recursive=True))]
