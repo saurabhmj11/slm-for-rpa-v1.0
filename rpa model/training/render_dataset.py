@@ -1,7 +1,7 @@
 """Render training data into the plan-first format with retrieval context (see ooa_format.py).
 
     python render_dataset.py SRC_DIR OUT_DIR --catalog CATALOG.jsonl [--k 12] [--seed 7] [--extra FILE ...]
-                             [--variables-rate 0.3] [--reply-context 0.5] [--max-chars 6500] [--max-tokens 1950]
+                             [--variables-rate 0.3] [--reply-context 0.5] [--max-chars 6500] [--max-tokens 2020]
                              [--no-parts]
 
 Reads every chat file SRC_DIR/*.jsonl ({"messages": [...]} rows, e.g. sft_clean/) and every neutral-record file given

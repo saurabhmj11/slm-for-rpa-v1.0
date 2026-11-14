@@ -20,7 +20,7 @@ Assistant turn, one of:
 parse_answer() also reads old answers that are only the flow JSON, so models trained before this format keep working.
 
 The rendered user + assistant text must fit the model's 2048-token window (row_fits: at most 6,500 characters and
-an estimated MAX_ROW_TOKENS tokens, see approx_tokens): the context
+an estimated MAX_ROW_TOKENS estimated tokens, see approx_tokens): the context
 is trimmed to MAX_CONTEXT_CHARS in a fixed order (see build_user) and a previous flow longer than MAX_PREVIOUS_CHARS
 is shown as its outline. Pure standard library + retrieval.py.
 """
@@ -48,7 +48,7 @@ MAX_PREVIOUS_CHARS = 2400     # a longer previous flow is shown as its outline
 MAX_PROBLEMS = 6
 MAX_PROBLEM_CHARS = 200
 MAX_ROW_CHARS = 6500          # user + assistant: about 2,100 tokens at the measured 2.8-3.1 characters per token
-MAX_ROW_TOKENS = 1950         # approx_tokens(user + assistant): the row fits the 2048-token window
+MAX_ROW_TOKENS = 2020         # approx_tokens(user + assistant): 99% of such rows fit the 2048-token window
 MAX_OUTLINE_CHARS = 160
 MAX_EXAMPLE_REQUEST_CHARS = 140
 MAX_VARIABLES = 12
@@ -679,7 +679,10 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
         if previous is None or not problems:
             return None
     answer = render_flow_answer(flow, cat)
-    for limit in (MAX_CONTEXT_CHARS, MAX_CONTEXT_CHARS // 2, 0):
+    limits = (MAX_CONTEXT_CHARS, MAX_CONTEXT_CHARS // 2, 0)
+    if len(answer) > max_chars or (len(answer) * 10 > max_tokens * 16 and approx_tokens(answer) > max_tokens):
+        limits = (0,)                    # cannot fit whatever the context: one render, the caller splits it
+    for limit in limits:
         user = build_user(request, actions, examples, variables, previous, problems, required, limit)
         row = {"messages": [{"role": "user", "content": user}, {"role": "assistant", "content": answer}]}
         if row_fits(row, max_chars, max_tokens):
@@ -697,8 +700,8 @@ _PIECES = re.compile(r"[A-Za-z]+|[0-9]{1,3}|\n\s*|[ \t]+|[\x21-\x7e]|[^\x00-\x7f
 def approx_tokens(text):
     """Token count estimate for the model's tokenizer (16k BPE) without loading it: one per punctuation mark, digit
     group, line break and word, plus one per 3 letters beyond 4, plus the bytes of non-ASCII characters. Fitted on
-    rendered rows over 1,500 tokens: true / estimate averages 0.91 and stays below 1.04, so a row estimated at
-    MAX_ROW_TOKENS fits 2048."""
+    rendered rows over 1,500 tokens: true / estimate averages 0.91, is under 1.0 for 99% of rows and under 1.04 for
+    all, so a row estimated at MAX_ROW_TOKENS fits 2048 tokens (the rare rest loses a few tokens at the end)."""
     n = 0
     for p in _PIECES.findall(str(text)):
         c = p[0]
@@ -720,4 +723,8 @@ def row_tokens(row):
 
 
 def row_fits(row, max_chars=MAX_ROW_CHARS, max_tokens=MAX_ROW_TOKENS):
-    return row_chars(row) <= max_chars and row_tokens(row) <= max_tokens
+    n = row_chars(row)
+    if n > max_chars:
+        return False
+    # rows run 2.5-3.1 characters per token: a short row needs no estimate (it is the slow part of rendering)
+    return n * 10 <= max_tokens * 16 or row_tokens(row) <= max_tokens
