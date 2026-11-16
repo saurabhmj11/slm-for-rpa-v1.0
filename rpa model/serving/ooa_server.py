@@ -225,9 +225,12 @@ class Router:
         return n if isinstance(n, int) and n > 0 else None
 
     # -- one answer: parse -> repair -> verify -------------------------------------------------------
-    def verify(self, text, existing=None, plan=None):
+    def verify(self, text, existing=None, plan=None, request=None):
         """Flow text -> (flow dict, repair notes) when it passes, else (None, problems). plan: the answer's plan
-        lines; an action the plan names that no step uses is a problem too."""
+        lines; an action the plan names that no step uses is a problem too. A compact flow (a model trained on
+        compact answers: no variables list, steps without ids) is first rebuilt into a full one (ooa_format.expand_flow:
+        variables declared from what the steps make and read, step ids, descriptions from the plan, name from the
+        request); a full flow is checked as written."""
         if text is None:
             return None, ["The answer has a plan but no flow after 'Flow:'."]
         text = extract_json(text)
@@ -237,6 +240,8 @@ class Router:
             return None, R.problems(text)
         if not isinstance(obj, dict):
             return None, ["The answer is not a JSON object."]
+        if F.is_compact(obj):
+            obj = F.expand_flow(obj, self.cat, request, plan, existing or ())
         # Studio's assistant format has no kind/id/name: wrap it so the same verifier applies
         flow = obj if "kind" in obj else {"kind": "TaskBot", "id": "assistant_check", "name": "assistant check",
                                           "variables": list(obj.get("variables", [])), "steps": obj.get("steps", [])}
@@ -270,16 +275,23 @@ class Router:
             return None, info
         return self.answer_text(flow, existing, assistant, safety.warnings(flow, self.cat)), info
 
-    @staticmethod
-    def _previous(text):
-        """The previous answer's flow for a self-correction prompt (dict), or None when it was not JSON."""
+    def _previous(self, text, request=None, plan=None, existing=None):
+        """The previous answer's flow for a self-correction prompt (dict), or None when it was not JSON. A compact
+        flow is shown expanded, as the full flows of the self-correction training rows are."""
         if not text:
             return None
         try:
             obj = json.loads(extract_json(text))
         except Exception:
             return None
-        return F.to_dollar_name_dollar(obj) if isinstance(obj, dict) else None
+        if not isinstance(obj, dict):
+            return None
+        if F.is_compact(obj):
+            try:
+                obj = F.expand_flow(obj, self.cat, request, plan, existing or ())
+            except Exception:
+                pass
+        return F.to_dollar_name_dollar(obj)
 
     def cloud_prompt(self, request, errors):
         cands = self.index.search(request, 40)
@@ -359,7 +371,7 @@ class Router:
                     return {"flow": flow, "notes": info, "plan": plan, "parts": True}
                 errors = info
                 continue                                     # whole answers next
-            flow, info = self.verify(ans["flow_text"] if ans["kind"] == "flow" else raw, existing, ans["plan"])
+            flow, info = self.verify(ans["flow_text"] if ans["kind"] == "flow" else raw, existing, ans["plan"], request)
             tried.append({"source": "local", "ok": flow is not None})
             looped = bool(stop and stop.startswith("loop"))
             if stop:
@@ -381,7 +393,7 @@ class Router:
             if fmt == "context":
                 # self-correction: the next attempt sees the flow it wrote and what the checker found (a looping
                 # answer has no flow to show: the next attempt starts afresh at a higher temperature)
-                prev = None if looped else self._previous(ans["flow_text"])
+                prev = None if looped else self._previous(ans["flow_text"], request, ans["plan"], existing)
                 probs = None if looped else info
             if plan and can_escalate and len(plan) > p.escalate_plan_lines:
                 return {"errors": errors, "plan": plan}      # a long process: the bigger model takes it
@@ -444,7 +456,7 @@ class Router:
                     return None, [f"local model error: {ex}"]
                 ans = F.parse_answer(raw)
                 text = ans["flow_text"] if ans["kind"] == "flow" else raw
-                part, info = self.verify(text, known, ans["plan"])
+                part, info = self.verify(text, known, ans["plan"], creq)
                 tried.append({"source": "local", "part": n, "of": len(chunks), "ok": part is not None})
                 if ch["inside"]:
                     tried[-1]["inside"] = int(ch["inside"])
@@ -453,7 +465,7 @@ class Router:
                 if part is not None:
                     break
                 looped = bool(stop and stop.startswith("loop"))
-                prev, probs = (None, None) if looped else (self._previous(text), info)
+                prev, probs = (None, None) if looped else (self._previous(text, creq, ans["plan"], known), info)
             if part is None:
                 return None, [f"Part {n} of {len(chunks)} ('{creq[:80]}') did not pass the checker: "
                               + "; ".join(info[:2])]

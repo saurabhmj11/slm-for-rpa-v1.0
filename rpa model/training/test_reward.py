@@ -70,4 +70,21 @@ import glob as _g
 _real = [json.load(open(p)) for p in sorted(_g.glob(os.path.join(repo, "examples", "**", "*.flow.json"), recursive=True))]
 _ok = sum(R.score(json.dumps(f))["valid"] for f in _real if f.get("steps"))
 assert _ok == sum(1 for f in _real if f.get("steps")), f"verifier rejects real example flows: {_ok}"
+# compact answers: every valid flow (generated and the platform's own examples) must come back valid after
+# compact_flow -> expand_flow, the step the server applies to a model trained on compact answers
+import ooa_format as _F
+_catd = {e["id"]: e for e in cat}
+_both = [f for _, f, _ in flows] + [f for f in _real if f.get("steps")]
+_n = _ok_c = 0
+for _f in _both:
+    _f = _F.to_dollar_name_dollar(json.loads(json.dumps(_f)))
+    if not R.score(json.dumps(_f))["valid"]:
+        continue
+    _n += 1
+    _c = json.loads(_F.compact(_F.compact_flow(_f)))
+    assert _F.is_compact(_c) and not _F.is_compact(_f)
+    _ex = _F.expand_flow(_c, _catd, "a request", _F.plan_from_flow(_f, _catd))
+    _ok_c += R.score(json.dumps(_ex))["valid"]
+    assert R.actions_of(_ex) == R.actions_of(_f)
+assert _n >= 150 and _ok_c == _n, f"compact -> expand breaks valid flows: {_ok_c}/{_n}"
 print("all reward tests passed")

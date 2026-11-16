@@ -353,7 +353,8 @@ def test_render_dataset_fixture():
     src, out = tempfile.mkdtemp(), tempfile.mkdtemp()
     try:
         extra = _fixture(src)
-        rep = RD.render(src, out, CATALOG, k=8, seed=7, extra=[extra], max_chars=4500, log=lambda *a: None)
+        rep = RD.render(src, out, CATALOG, k=8, seed=7, extra=[extra], max_chars=4500, log=lambda *a: None,
+                        gold_dropout=0.0, answer_format=F.ANSWER_FULL)
         names = sorted(os.listdir(out))
         assert names == ["catalog.jsonl", "examples.jsonl", "records.jsonl", "render_report.json", "train.jsonl", "val.jsonl"], names
         train = [json.loads(l) for l in open(os.path.join(out, "train.jsonl"))]
@@ -381,7 +382,8 @@ def test_render_dataset_fixture():
         assert F.PROBLEMS_HEADER in recs[1][0]["content"]
         # same seed -> same output
         out2 = tempfile.mkdtemp()
-        RD.render(src, out2, CATALOG, k=8, seed=7, extra=[extra], max_chars=4500, log=lambda *a: None)
+        RD.render(src, out2, CATALOG, k=8, seed=7, extra=[extra], max_chars=4500, log=lambda *a: None, gold_dropout=0.0,
+                  answer_format=F.ANSWER_FULL)
         assert open(os.path.join(out, "train.jsonl")).read() == open(os.path.join(out2, "train.jsonl")).read()
         shutil.rmtree(out2)
     finally:
@@ -461,6 +463,112 @@ def test_dollar_name_dollar_reads_back():
                         random.Random(1))
     prev = fix["messages"][0]["content"].split(F.PREVIOUS_HEADER, 1)[1]
     assert '"$folder$"' in prev
+
+
+# ---------------------------------------------------------------------------------------------- compact answers
+def test_compact_flow_drops_what_code_rebuilds():
+    c = F.compact_flow(LOOP_FLOW)
+    assert set(c) == {"steps"}, c                                      # no kind / id / name / description / variables
+    for s, _ in F.walk(c["steps"]):
+        assert "id" not in s and "description" not in s and "note" not in s
+    assert F.actions_of(c) == F.actions_of(LOOP_FLOW)
+    assert F.is_compact(c) and not F.is_compact(LOOP_FLOW)
+    out = dict(LOOP_FLOW, variables=LOOP_FLOW["variables"] + [{"name": "n", "type": "Number", "direction": "output"}])
+    assert F.compact_flow(out)["outputs"] == ["n"]
+    assert len(F.compact(c)) < 0.6 * len(F.compact(LOOP_FLOW))
+
+
+def test_expand_flow_rebuilds_a_full_flow():
+    c = F.compact_flow(LOOP_FLOW)
+    plan = F.plan_from_flow(LOOP_FLOW, CAT)
+    ex = F.expand_flow(c, CAT, "Zip the png files in a folder, delete the others", plan)
+    assert ex["kind"] == "TaskBot" and ex["id"] and ex["name"] and ex["description"]
+    ids = [s["id"] for s, _ in F.walk(ex["steps"])]
+    assert len(ids) == len(set(ids)) == 5
+    v = {x["name"]: x for x in ex["variables"]}
+    assert v["folder"]["direction"] == "input" and v["archive"]["direction"] == "input"      # only read
+    assert v["files"]["direction"] == "local" and v["file"]["direction"] == "local"          # made by a step / the loop
+    assert v["files"]["type"] == "List"                                                       # catalog output type
+    assert F.actions_of(ex) == F.actions_of(LOOP_FLOW)
+    assert ex["steps"][0]["description"]                                                      # from the plan
+    assert not F.is_compact(ex)
+
+
+def test_expand_flow_credentials_out_targets_and_known():
+    c = {"steps": [{"action": "ooa.email/send", "args": {"to": "$boss$", "subject": "Hi", "password": "${smtp_password}",
+                                                          "body": "$api_token"}, "out": {"message_id": "$mid$"}},
+                   {"id": "s1", "action": "core/log", "args": {"message": "$mid$ $known_var$"}},
+                   {"id": "s1", "action": "core/log", "args": {"message": {"literal": "$not_a_var$"}}}],
+         "outputs": ["mid"]}
+    ex = F.expand_flow(c, CAT, "Send it", known=[{"name": "known_var", "type": "String"}])
+    v = {x["name"]: x for x in ex["variables"]}
+    assert v["smtp_password"]["type"] == "Credential" and v["api_token"]["type"] == "Credential"
+    assert v["boss"]["type"] == "String" and v["boss"]["direction"] == "input"
+    assert v["mid"]["direction"] == "output"
+    assert "known_var" not in v and "not_a_var" not in v
+    assert ex["steps"][0]["out"] == {"message_id": "mid"}                                     # "$mid$" -> "mid"
+    ids = [s["id"] for s, _ in F.walk(ex["steps"])]
+    assert len(set(ids)) == 3 and "s1" in ids                                                 # duplicate id renamed
+    assert c["steps"][0]["out"] == {"message_id": "$mid$"}                                    # input unchanged
+
+
+def test_parse_answer_expands_only_compact_flows():
+    full = F.render_flow_answer(LOOP_FLOW, CAT)
+    a = F.parse_answer(full, expand=True, catalog=CAT, request="Zip the png files")
+    assert not a.get("expanded") and json.loads(a["flow_text"]) == LOOP_FLOW               # old model: as written
+    comp = F.render_flow_answer(LOOP_FLOW, CAT, F.ANSWER_COMPACT)
+    assert comp.split(F.FLOW_HEAD)[0] == full.split(F.FLOW_HEAD)[0]                         # same plan
+    assert len(comp) < len(full)
+    b = F.parse_answer(comp)
+    assert F.is_compact(json.loads(b["flow_text"]))                                          # no expand asked
+    b = F.parse_answer(comp, expand=True, catalog=CAT, request="Zip the png files")
+    assert b["expanded"] and F.is_compact(json.loads(b["compact_text"]))
+    ex = json.loads(b["flow_text"])
+    assert ex["variables"] and F.actions_of(ex) == F.actions_of(LOOP_FLOW)
+
+
+def test_drop_gold():
+    rng = random.Random(3)
+    gold = ["ooa.csv/read", "core/loop", "ooa.datatable/sort", "core/if", "ooa.email/send", "ooa.file/move"]
+    assert F.drop_gold(gold, rng, 0.0) == []
+    hits = [F.drop_gold(gold, rng, 0.5) for _ in range(400)]
+    share = sum(1 for h in hits if h) / len(hits)
+    assert 0.4 < share < 0.6, share
+    for h in hits:
+        assert not set(h) & {"core/loop", "core/if"}
+        assert len(h) <= 3                                    # 4 droppable: at most 45% -> 2, and one always kept
+    assert all(len(F.drop_gold(["ooa.csv/read"], rng, 1.0)) == 1 for _ in range(5))
+    assert F.drop_gold(["core/loop", "core/if"], rng, 1.0) == []
+
+
+def test_render_gold_dropout_keeps_the_answer():
+    src, out0, out1 = tempfile.mkdtemp(), tempfile.mkdtemp(), tempfile.mkdtemp()
+    try:
+        extra = _fixture(src)
+        RD.render(src, out0, CATALOG, k=8, seed=7, extra=[extra], max_chars=4500, log=lambda *a: None, gold_dropout=0.0)
+        rep = RD.render(src, out1, CATALOG, k=8, seed=7, extra=[extra], max_chars=4500, log=lambda *a: None,
+                        gold_dropout=1.0)
+        assert rep["settings"]["gold_dropout"] == 1.0 and rep["settings"]["answer_format"] == F.ANSWER_COMPACT
+        assert rep["settings"]["format"] == F.FORMAT_COMPACT
+        a0 = [json.loads(l)["messages"][1]["content"] for l in open(os.path.join(out0, "train.jsonl"))]
+        r1 = [json.loads(l)["messages"] for l in open(os.path.join(out1, "train.jsonl"))]
+        assert a0 == [m[1]["content"] for m in r1]                                    # plan and flow unchanged
+        missing = 0
+        for user, ans in ((m[0]["content"], m[1]["content"]) for m in r1):
+            if not ans.startswith("Plan:"):
+                continue
+            flow = json.loads(F.parse_answer(ans)["flow_text"])
+            assert F.is_compact(flow)
+            acts = set(F.actions_of(flow))
+            gone = [a for a in acts if f"- {a}:" not in user]
+            assert gone and not set(gone) & {"core/loop", "core/if"}, (acts, user)
+            missing += len(gone)
+        assert missing >= 7
+        f = rep["files"]["train.jsonl"]
+        assert f["split_long"] == 0 and f["skipped_too_long"] == 0, f      # compact: the long flow fits whole
+    finally:
+        for d in (src, out0, out1):
+            shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":

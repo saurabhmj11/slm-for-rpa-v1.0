@@ -2,7 +2,7 @@
 
     python render_dataset.py SRC_DIR OUT_DIR --catalog CATALOG.jsonl [--k 12] [--seed 7] [--extra FILE ...]
                              [--variables-rate 0.3] [--reply-context 0.5] [--max-chars 6500] [--max-tokens 2020]
-                             [--no-parts]
+                             [--no-parts] [--answer-format compact|full] [--gold-dropout 0.5] [--dropout-frac 0.2,0.45]
 
 Reads every chat file SRC_DIR/*.jsonl ({"messages": [...]} rows, e.g. sft_clean/) and every neutral-record file given
 with --extra ({"kind": "flow"|"fix"|"clarify", ...}), and writes OUT_DIR/<same name>.jsonl in chat format:
@@ -19,6 +19,11 @@ with --extra ({"kind": "flow"|"fix"|"clarify", ...}), and writes OUT_DIR/<same n
     ooa_format.approx_tokens) gets a smaller context, down to its own actions only; if it still does not fit it is
     written as its parts (ooa_format.split_flow: the part requests the server writes when it builds a long flow in
     parts). What still does not fit is skipped and counted.
+  - --answer-format compact (default): the flow after "Flow:" is ooa_format.compact_flow (no variables list, no step
+    ids / descriptions / notes; the server rebuilds them with expand_flow). full: the flow as stored (plan-v1).
+  - --gold-dropout (default 0.5) of the flow / fix rows get a context that misses --dropout-frac (20-45%) of the
+    needed actions (never core/loop, core/if; ooa_format.drop_gold), so the model learns to write an action it knows
+    when retrieval did not offer it. Plan and flow still use the right action.
 Files named val*.jsonl / eval*.jsonl are held out: rendered the same way, never used as examples.
 Also writes OUT_DIR/examples.jsonl (the example index the server loads), OUT_DIR/catalog.jsonl and
 OUT_DIR/render_report.json. Standard library only; one pass to load, one to render (about 60k rows in a few minutes).
@@ -112,7 +117,8 @@ def load_items(path, extra, cat, fixes):
 
 
 def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.3, reply_context=0.5,
-           max_chars=F.MAX_ROW_CHARS, parts=True, log=print, max_tokens=F.MAX_ROW_TOKENS):
+           max_chars=F.MAX_ROW_CHARS, parts=True, log=print, max_tokens=F.MAX_ROW_TOKENS, answer_format=F.ANSWER_COMPACT,
+           gold_dropout=F.GOLD_DROPOUT, dropout_frac=F.GOLD_DROPOUT_FRAC):
     t0 = time.time()
     src, out = Path(src), Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -132,6 +138,7 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
         names.add(name)
         files.append((p, True, name))
 
+    opts = dict(answer_format=answer_format, gold_dropout=gold_dropout, dropout_frac=tuple(dropout_frac))
     fixes = [0]
     loaded = []
     for p, is_extra, name in files:
@@ -153,7 +160,10 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
     log(f"example index: {len(ex_index)} requests ({time.time() - t0:.0f}s)")
 
     report = {"settings": {"k": k, "seed": seed, "variables_rate": variables_rate, "reply_context": reply_context,
-                           "max_chars": max_chars, "max_tokens": max_tokens, "format": F.FORMAT_VERSION,
+                           "max_chars": max_chars, "max_tokens": max_tokens,
+                           "format": F.FORMAT_COMPACT if answer_format == F.ANSWER_COMPACT else F.FORMAT_VERSION,
+                           "answer_format": answer_format, "gold_dropout": gold_dropout,
+                           "dropout_frac": list(dropout_frac),
                            "max_context_chars": F.context_for(F.window_of(max_tokens)),
                            "clauses": {"min": F.CLAUSE_MIN, "k": F.CLAUSE_K, "votes": F.CLAUSE_VOTES,
                                        "whole_votes": F.WHOLE_VOTES, "max_actions": F.MAX_CONTEXT_ACTIONS}},
@@ -168,7 +178,8 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
                 row = None
                 if it["type"] == "record":
                     rec = it["record"]
-                    row = F.render_chat(rec, cat, index, ex_index, rng, k, variables_rate, max_chars, max_tokens)
+                    row = F.render_chat(rec, cat, index, ex_index, rng, k, variables_rate, max_chars, max_tokens,
+                                        **opts)
                     if row is None:
                         c["skipped_unusable"] += 1
                         continue
@@ -195,7 +206,8 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
                     rows = []
                     for req, part, carried in F.split_flow(rec["flow"], cat):
                         prow = F.render_chat({"kind": "flow", "request": req, "flow": part, "variables": carried},
-                                             cat, index, ex_index, rng, k, variables_rate, max_chars, max_tokens)
+                                             cat, index, ex_index, rng, k, variables_rate, max_chars, max_tokens,
+                                             **opts)
                         if prow is not None:
                             rows.append((prow, "part"))
                     c["split_long"] += 1 if rows else 0
@@ -244,9 +256,16 @@ def main(argv=None):
     ap.add_argument("--max-chars", type=int, default=F.MAX_ROW_CHARS)
     ap.add_argument("--max-tokens", type=int, default=F.MAX_ROW_TOKENS, help="estimated tokens (ooa_format.approx_tokens)")
     ap.add_argument("--no-parts", action="store_true", help="skip flows that do not fit instead of training their parts")
+    ap.add_argument("--answer-format", choices=(F.ANSWER_COMPACT, F.ANSWER_FULL), default=F.ANSWER_COMPACT,
+                    help="compact: the flow without variables list / step ids / descriptions (expanded at serving)")
+    ap.add_argument("--gold-dropout", type=float, default=F.GOLD_DROPOUT,
+                    help="share of flow rows whose context misses some needed actions (0 = never)")
+    ap.add_argument("--dropout-frac", default=",".join(str(x) for x in F.GOLD_DROPOUT_FRAC),
+                    help="low,high share of the needed actions such a row misses")
     a = ap.parse_args(argv)
+    frac = tuple(float(x) for x in a.dropout_frac.split(","))
     render(a.src, a.out, a.catalog, a.k, a.seed, a.extra, a.variables_rate, a.reply_context, a.max_chars, not a.no_parts,
-           max_tokens=a.max_tokens)
+           max_tokens=a.max_tokens, answer_format=a.answer_format, gold_dropout=a.gold_dropout, dropout_frac=frac)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,13 @@ The model format is defined in `training/ooa_format.py`; training data is render
    (`assistant/constrained.py`) applies only inside the flow JSON.
 3. Clarify: a request too vague to automate gets `Question: ...` back; Studio shows it as notes, with no steps.
 4. Verify: repair, the platform checker, and plan coverage (every action the plan names must be in the flow).
+   Compact answers (models trained with `render_dataset.py --answer-format compact`, the default from this round)
+   have no variables list, no step ids and no descriptions; `ooa_format.expand_flow` rebuilds them first (variables
+   from what the steps make and read, Credential for password / token / secret names, types from the catalog; ids;
+   descriptions from the plan; name from the request). A full flow (older models) is checked as written. Every
+   compact rendering of the training flows expands to a flow that passes the checker (all 26,105 source flows and
+   25,963 rendered rows; the full flows pass 99.8-99.9%).
+   A self-correction prompt shows the previous compact answer expanded, as the training rows do.
 5. Self-correction: the next attempt is given its previous flow and the problems. An answer the backend stopped as a
    loop (`assistant/model_backend.py`: RepetitionGuard for exact repeats up to 200 tokens long, AnswerWatch for a flow
    that outgrows its plan or writes one "id" 3 times) is a failed attempt; the next one starts afresh.

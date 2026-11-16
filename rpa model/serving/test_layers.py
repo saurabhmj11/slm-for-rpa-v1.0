@@ -447,6 +447,59 @@ def test_flows_come_back_written_dollar_name_dollar():
     assert res["verified"] and json.loads(res["flow"])["steps"][0]["args"] == {"folder": "$folder$"}, res
 
 
+def compact_answer(flow, plan=None):
+    return "Plan:\n" + "\n".join(plan or F.plan_from_flow(flow, CAT)) + "\nFlow:\n" + F.compact(F.compact_flow(flow))
+
+
+def test_compact_answers_are_expanded():
+    """A model trained on compact answers writes no variables list and no step ids; the server rebuilds them. A full
+    answer (the current model) is used as written."""
+    m = Scripted(lambda req, p, a: compact_answer(CSV_TO_EXCEL))
+    res = router(m, local_retries=0).run(CSV_REQ)
+    assert res["verified"], res
+    flow = json.loads(res["flow"])
+    assert F.actions_of(flow) == F.actions_of(CSV_TO_EXCEL)
+    assert flow["variables"] and all(s.get("id") for s, _ in F.walk(flow["steps"]))
+    assert flow["name"] and flow["description"]
+    full = router(Scripted(lambda req, p, a: plan_answer(CSV_TO_EXCEL)), local_retries=0).run(CSV_REQ)
+    assert full["verified"] and json.loads(full["flow"])["id"] == CSV_TO_EXCEL["id"]
+    # Studio's assistant answer from a compact flow, with the agent's own variables not declared again
+    code, out = S.chat_completion(router(m, local_retries=0), studio_body(CSV_REQ))
+    assert code == 200 and out["ooa"]["verified"], out
+    # a compact answer that fails the checker: the next attempt sees it expanded as its previous flow
+    bad = json.loads(json.dumps(CSV_TO_EXCEL))
+    bad["steps"][0]["args"] = {}
+    m2 = Scripted(lambda req, p, a: compact_answer(bad if a == 0 else CSV_TO_EXCEL))
+    res = router(m2, local_retries=1).run(CSV_REQ)
+    assert res["verified"] and len(m2.prompts) == 2, res
+    prev = json.loads(m2.prompts[1].split(F.PREVIOUS_HEADER)[1].split(F.PROBLEMS_HEADER)[0])
+    assert prev.get("variables") and prev.get("kind") == "TaskBot"
+
+
+def test_compact_parts_are_expanded_and_merged():
+    p1, p2, p3 = _loop_parts()
+    plans = F.plan_from_flow(LOOP_WHOLE, CAT)
+    parts = F.plan_parts(plans, max_lines=4)
+    assert len(parts) == 3, parts
+    by_req = {}
+    for ch, pf in zip(parts, (p1, p2, p3)):
+        by_req[F.chunk_request(ch["chunk"])] = pf
+
+    def answer(req, prompt, attempt):
+        if req == LOOP_REQ:
+            return compact_answer(LOOP_WHOLE)
+        key = next(k for k in by_req if req.endswith(k[1:]) or req == k)
+        return compact_answer(by_req[key])
+    m = PlanAware(answer)
+    res = router(m, local_retries=0, part_lines=4, decompose_lines=4, long_plan_lines=4).run(LOOP_REQ)
+    assert res["verified"] and res.get("built_in_parts"), res
+    flow = json.loads(res["flow"])
+    assert F.actions_of(flow) == F.actions_of(LOOP_WHOLE)
+    names = [v["name"] for v in flow["variables"]]
+    assert len(names) == len(set(names)) and {"inbox", "files", "file", "text"} <= set(names)
+    assert {v["name"]: v["direction"] for v in flow["variables"]}["inbox"] == "input"
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

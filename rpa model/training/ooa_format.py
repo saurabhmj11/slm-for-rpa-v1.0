@@ -14,7 +14,10 @@ User turn (build_user):
 
 Assistant turn, one of:
     flow:     "Plan:\\n1. <step in plain words> (<action id>)\\n2. ...\\nFlow:\\n<compact flow JSON>"
-              (plan lines of steps inside a loop / if are indented two spaces per level)
+              (plan lines of steps inside a loop / if are indented two spaces per level). The flow is either the
+              full flow (plan-v1) or, for models trained on FORMAT_COMPACT, only what the model must decide
+              (compact_flow: steps without ids / descriptions, no variables list); expand_flow rebuilds the full
+              flow, and parse_answer(expand=True) / the server do that only for a compact flow.
     clarify:  "Question: <one short question>"
     reply:    plain text (not a task)
 parse_answer() also reads old answers that are only the flow JSON, so models trained before this format keep working.
@@ -340,8 +343,342 @@ def plan_from_flow(flow, catalog=None):
     return out
 
 
-def render_flow_answer(flow, catalog=None):
-    return PLAN_HEAD + "\n" + "\n".join(plan_from_flow(flow, catalog)) + "\n" + FLOW_HEAD + "\n" + compact(flow)
+def render_flow_answer(flow, catalog=None, answer_format="full"):
+    """The plan-first answer for a flow. answer_format "compact": the flow after "Flow:" is compact_flow(flow) (the
+    plan, made from the full flow, still carries the step descriptions)."""
+    body = compact_flow(flow) if answer_format == ANSWER_COMPACT else flow
+    return PLAN_HEAD + "\n" + "\n".join(plan_from_flow(flow, catalog)) + "\n" + FLOW_HEAD + "\n" + compact(body)
+
+
+# ---------------------------------------------------------------------------------------------- compact answers
+# A compact answer's flow holds only what the model must decide: the steps (action, args, out, containers and their
+# branches; disabled), plus "outputs" (names of the flow's output variables) and any rare flow-level setting
+# (errorHandling, onError, subflows, requires, a kind other than TaskBot). Left out, because code rebuilds them
+# (expand_flow): kind / id / name / description of the flow, the variables list, step ids, step descriptions and notes.
+# On the long and business training flows the variables list is 35-37% of the flow JSON and descriptions much of the
+# rest. Serving reads both: a flow with a variables list and step ids is used as written (models trained on full
+# flows), any other flow is expanded first (is_compact).
+ANSWER_FULL, ANSWER_COMPACT = "full", "compact"
+FORMAT_COMPACT = "plan-v2-compact"
+COMPACT_OUTPUTS = "outputs"
+_COMPACT_DROP_TOP = ("kind", "id", "name", "description", "variables", "$schema", "tags", "version", "ui")
+_COMPACT_DROP_STEP = ("id", "description", "note")
+_CRED_NAME = re.compile(r"pass(word|wd|phrase)?(_|$)|(^|_)pwd(_|$)|secret|token|api_?key|apikey|credential|private_key",
+                        re.I)
+# catalog type words -> flow.v1 variable types
+_CAT_TYPES = {"Text": "String", "File path": "String", "Yes/No": "Boolean", "Credential (vault)": "Credential",
+              "Number": "Number", "List": "List", "Dictionary": "Dictionary", "Table": "Table", "DateTime": "DateTime",
+              "Any": "Any"}
+VARIABLE_TYPES = ("String", "Number", "Boolean", "DateTime", "List", "Dictionary", "Table", "Record", "File", "Window",
+                  "UIElement", "Credential", "Any", "Time", "TimeSpan", "Image", "Binary")
+_VAR_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_STEP_ID_OK = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+# the platform checker's reference rules (ooa_reward.refs): $name / $name$ / ${name}, never inside {"literal": ...}
+_READ_PLAIN = re.compile(r"\$(?!\{)([A-Za-z_]\w*)")
+_READ_TEMPLATE = re.compile(r"\$\{\s*([A-Za-z_]\w*)(?![\w(])")
+
+
+def _compact_step(s):
+    if not isinstance(s, dict):
+        return s
+    out = {}
+    for k, v in s.items():
+        if k in _COMPACT_DROP_STEP:
+            continue
+        if k in ("children", "else", "finally", "default", "entry", "steps") and isinstance(v, list):
+            out[k] = [_compact_step(x) for x in v]
+        elif k in ("elseIf", "catch", "cases", "transitions") and isinstance(v, list):
+            out[k] = [{kk: ([_compact_step(x) for x in vv] if kk in ("children", "steps") and isinstance(vv, list)
+                            else vv) for kk, vv in b.items()} if isinstance(b, dict) else b for b in v]
+        elif k == "states" and isinstance(v, list):
+            out[k] = [_compact_step(st) if isinstance(st, dict) else st for st in v]
+        else:
+            out[k] = v
+    return out
+
+
+def compact_flow(flow):
+    """The compact form of a full flow (see above): {"steps": [...]} with step ids, descriptions and notes left out,
+    plus "outputs": [names] when the flow has output variables, plus the flow's rare settings (errorHandling, onError,
+    subflows, requires; kind only when not TaskBot). expand_flow rebuilds a full flow from it."""
+    if not isinstance(flow, dict):
+        return flow
+    out = {}
+    if flow.get("kind") not in (None, "TaskBot"):
+        out["kind"] = flow["kind"]
+    for k, v in flow.items():
+        if k in _COMPACT_DROP_TOP or k == "steps":
+            continue
+        if k == "subflows" and isinstance(v, list):
+            v = [{kk: ([_compact_step(x) for x in vv] if kk == "steps" and isinstance(vv, list) else vv)
+                  for kk, vv in sf.items() if kk != "description"} if isinstance(sf, dict) else sf for sf in v]
+        elif k == "onError" and isinstance(v, dict) and isinstance(v.get("steps"), list):
+            v = {**v, "steps": [_compact_step(x) for x in v["steps"]]}
+        out[k] = v
+    out["steps"] = [_compact_step(s) for s in flow.get("steps") or []]
+    outs = [v["name"] for v in flow.get("variables") or [] if isinstance(v, dict)
+            and v.get("direction") in ("output", "in_out") and isinstance(v.get("name"), str)]
+    if outs:
+        out[COMPACT_OUTPUTS] = outs
+    return out
+
+
+def is_compact(obj):
+    """True when a flow (dict) needs expand_flow: it has steps but no variables list, or a step without an id."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("steps"), list):
+        return False
+    vs = obj.get("variables")
+    if not isinstance(vs, list) or COMPACT_OUTPUTS in obj or any(not isinstance(v, dict) for v in vs):
+        return True
+    return any(isinstance(s, dict) and not s.get("id") for s, _ in walk(obj["steps"]))
+
+
+def _all_bodies(flow):
+    """Every top-level step list of a flow: steps, subflows[].steps, onError.steps."""
+    lists = [flow.get("steps")]
+    lists += [sf.get("steps") for sf in flow.get("subflows") or [] if isinstance(sf, dict)]
+    if isinstance(flow.get("onError"), dict):
+        lists.append(flow["onError"].get("steps"))
+    return [x for x in lists if isinstance(x, list)]
+
+
+def reads_of(value):
+    """Root variable names an arg value reads, by the platform checker's rules (ooa_reward.refs), sys / global aside,
+    in order of appearance."""
+    out = []
+
+    def go(v):
+        if isinstance(v, str):
+            hits = sorted([(m.start(), m.group(1)) for m in _READ_PLAIN.finditer(v)]
+                          + [(m.start(), m.group(1)) for m in _READ_TEMPLATE.finditer(v)])
+            out.extend(n for _, n in hits)
+        elif isinstance(v, dict):
+            if set(v) == {"literal"}:
+                return
+            for x in v.values():
+                go(x)
+        elif isinstance(v, list):
+            for x in v:
+                go(x)
+    go(value)
+    return [n for n in dict.fromkeys(out) if n not in BUILTIN_ROOTS]
+
+
+def _bare(name):
+    """A variable target as written by a model: 'x', '$x$', '$x', '${x}' -> 'x' (None when not a name)."""
+    if not isinstance(name, str):
+        return None
+    m = _WHOLE_REF.match(name.strip())
+    n = (m.group(1) if m else name.strip())
+    return n if _VAR_NAME.match(n) else None
+
+
+def _slug(text, limit=48):
+    words = re.findall(r"[A-Za-z0-9]+", str(text or "").lower())
+    stop = {"the", "a", "an", "and", "of", "to", "in", "for", "on", "each", "every", "it", "its", "with", "from", "into",
+            "then", "if", "is", "are", "all", "my", "our", "that", "this", "as", "by", "at", "or"}
+    keep = [w for w in words if w not in stop][:6] or words[:6]
+    return ("_".join(keep)[:limit].strip("_")) or "flow"
+
+
+def _flow_name(request):
+    t = " ".join(str(request or "").split())
+    first = re.split(r"(?<=[.;:!?])\s|,\s(?:then|and)\s", t)[0].rstrip(".;:!? ")
+    if len(first) > 60:
+        first = first[:60].rsplit(" ", 1)[0].rstrip(",;: ")
+    return (first[:1].upper() + first[1:]) if first else "Flow"
+
+
+def _infer_set_type(value):
+    if isinstance(value, bool):
+        return "Boolean"
+    if isinstance(value, (int, float)):
+        return "Number"
+    if isinstance(value, list):
+        return "List"
+    if isinstance(value, str) and not _WHOLE_REF.match(value.strip()):
+        return "String"
+    return "Any"
+
+
+def expand_flow(obj, catalog=None, request=None, plan=None, known=()):
+    """A compact flow (compact_flow, or what a model wrote in that form) -> a full flow the platform accepts:
+      - kind TaskBot (unless given), id / name / description from the request (or kept when given);
+      - step ids: every step without a valid, unique id gets the next free sN (document order);
+      - step descriptions from the answer's plan lines (plan_from_flow writes one line per step in the same order;
+        lines and steps are matched by action id), only where a step has none;
+      - variables: every name a step makes (an out mapping, a loop's item / index, core/set's variable, a catch's
+        message_to, onError's as / message_to / line_to) is declared local (output when listed in "outputs"), typed
+        from the catalog's output type when known; every name only read ($name$ / ${name} / $name in args, by the
+        checker's own rules) is declared an input, typed Credential for secret-like names (password, token, api_key,
+        secret ...) or from the catalog input it fills, else String. Names in `known` (variables the caller already
+        has, e.g. Studio's open agent) and variables the flow already declares are not declared again.
+    Out targets written "$x$" become "x". The input is not changed; a new flow is returned."""
+    if not isinstance(obj, dict):
+        return obj
+    cat = _as_dict(catalog)
+    flow = json.loads(compact(obj))
+    outputs = [n for n in (_bare(x) for x in flow.pop(COMPACT_OUTPUTS, None) or []) if n]
+    req = " ".join(str(request or "").split())
+    base = {"kind": flow.pop("kind", None) or "TaskBot"}
+    fid = flow.pop("id", None)
+    base["id"] = fid if isinstance(fid, str) and _STEP_ID_OK.match(fid) else _slug(req or flow.get("name"))
+    name = flow.pop("name", None)
+    base["name"] = name if isinstance(name, str) and name.strip() else _flow_name(req or base["id"])
+    desc = flow.pop("description", None)
+    if isinstance(desc, str) and desc.strip():
+        base["description"] = desc
+    elif req:
+        base["description"] = req
+    # declarations the answer gave (a full variable dict) are kept; bare names are only hints, inferred like the rest
+    variables = [v for v in flow.pop("variables", None) or [] if isinstance(v, dict) and isinstance(v.get("name"), str)
+                 and isinstance(v.get("type"), str)]
+    full = {**base, **{k: v for k, v in flow.items() if k != "steps"}, "steps": flow.get("steps") or []}
+    bodies = _all_bodies(full)
+    steps = [s for b in bodies for s, _ in walk(b)]
+
+    # step ids
+    used, n = set(), 0
+    for s in steps:
+        sid = s.get("id")
+        if isinstance(sid, str) and _STEP_ID_OK.match(sid) and sid not in used:
+            used.add(sid)
+    seen = set()
+    for s in steps:
+        sid = s.get("id")
+        if isinstance(sid, str) and _STEP_ID_OK.match(sid) and sid not in seen:
+            seen.add(sid)
+            continue
+        n += 1
+        while f"s{n}" in used:
+            n += 1
+        s["id"] = f"s{n}"
+        used.add(s["id"])
+        seen.add(s["id"])
+    # rebuild key order: id first, as written by the platform
+    def order(s):
+        if not isinstance(s, dict):
+            return s
+        lead = {k: s[k] for k in ("id", "action", "description") if k in s}
+        return {**lead, **{k: v for k, v in s.items() if k not in lead}}
+
+    # descriptions from the plan
+    main = [s for s, _ in walk(full["steps"])]
+    items = plan_items(plan) if plan else []
+    if items and main:
+        import difflib
+        a = [s.get("action") for s in main]
+        b = [it["action"] for it in items]
+        for blk in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_matching_blocks():
+            for k in range(blk.size):
+                s, it = main[blk.a + k], items[blk.b + k]
+                t = _plain(it["text"])
+                if t and not s.get("description"):
+                    s["description"] = t
+
+    # variables
+    declared = {v["name"] for v in variables}
+    skip = set(declared) | {_bare(x) if isinstance(x, str) else (x.get("name") if isinstance(x, dict) else None)
+                            for x in known or ()} | set(BUILTIN_ROOTS)
+    made, read = {}, {}                     # name -> type (in order of first appearance)
+
+    def make(nm, typ):
+        nm = _bare(nm)
+        if nm and nm not in made:
+            made[nm] = typ or "Any"
+        elif nm and made.get(nm) == "Any" and typ and typ != "Any":
+            made[nm] = typ
+
+    for s in steps:
+        a, args = s.get("action"), s.get("args") if isinstance(s.get("args"), dict) else {}
+        e = cat.get(a) or {}
+        if isinstance(s.get("out"), dict):
+            outs_t = {o.get("name"): _CAT_TYPES.get(o.get("type"), "Any") for o in e.get("outputs") or []}
+            for k, v in list(s["out"].items()):
+                b = _bare(v)
+                if b and b != v:
+                    s["out"][k] = b
+                make(b, outs_t.get(k))
+        ins_t = {i.get("name"): _CAT_TYPES.get(i.get("type"), "String") for i in e.get("inputs") or []}
+        for k, v in args.items():
+            for nm in reads_of(v):
+                if nm not in read:
+                    whole = _var(v) == nm                       # the whole field is this variable
+                    t = ins_t.get(k) if whole and not str(a).startswith("core/") else None
+                    read[nm] = t if t in VARIABLE_TYPES and t != "Any" else "String"
+        if a == "core/loop":
+            make(args.get("as"), "Any")
+            make(args.get("index"), "Number")
+        elif a == "core/set":
+            make(args.get("variable"), _infer_set_type(args.get("value")))
+        for c in s.get("catch") or []:
+            if isinstance(c, dict):
+                make(c.get("message_to"), "String")
+    oe = full.get("onError")
+    if isinstance(oe, dict):
+        make(oe.get("as"), "Dictionary")
+        make(oe.get("message_to"), "String")
+        make(oe.get("line_to"), "Number")
+    new = []
+    for nm, t in read.items():
+        if nm in made or nm in skip or not _VAR_NAME.match(nm):
+            continue
+        typ = "Credential" if _CRED_NAME.search(nm) else t
+        new.append({"name": nm, "type": typ, "direction": "input", "required": True})
+    for nm, t in made.items():
+        if nm in skip:
+            continue
+        new.append({"name": nm, "type": t if t in VARIABLE_TYPES else "Any",
+                    "direction": "output" if nm in outputs else "local"})
+    for nm in outputs:
+        if nm not in made and nm not in skip and nm not in read:
+            new.append({"name": nm, "type": "Any", "direction": "output"})
+    full["variables"] = variables + new
+
+    def reorder(steps_):
+        out = []
+        for s in steps_:
+            if not isinstance(s, dict):
+                out.append(s)
+                continue
+            s = order(s)
+            for k in ("children", "else", "finally", "default"):
+                if isinstance(s.get(k), list):
+                    s[k] = reorder(s[k])
+            for k in ("elseIf", "catch", "cases"):
+                if isinstance(s.get(k), list):
+                    s[k] = [{**b, "children": reorder(b["children"])} if isinstance(b, dict)
+                            and isinstance(b.get("children"), list) else b for b in s[k]]
+            out.append(s)
+        return out
+    full["steps"] = reorder(full["steps"])
+    head = {k: full[k] for k in ("kind", "id", "name", "description", "variables") if k in full}
+    return {**head, **{k: v for k, v in full.items() if k not in head}}
+
+
+def flow_object(text):
+    """The JSON object in a flow text (code fences / text around it allowed), or None."""
+    t = str(text or "").split("<|assistant_end|>")[0].strip()
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t).strip()
+    i, j = t.find("{"), t.rfind("}")
+    if i < 0 or j <= i:
+        return None
+    try:
+        obj = json.loads(t[i:j + 1])
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def answer_flow_text(ans, catalog=None, request=None, known=()):
+    """The full flow JSON text of a parsed answer (parse_answer): a compact flow is expanded (expand_flow, with the
+    answer's plan for step descriptions), a full one is returned as the model wrote it; None when there is no flow."""
+    if not isinstance(ans, dict) or ans.get("kind") != "flow" or ans.get("flow_text") is None:
+        return None
+    obj = flow_object(ans["flow_text"])
+    if obj is None or not is_compact(obj):
+        return ans["flow_text"]
+    return compact(expand_flow(obj, catalog, request, ans.get("plan"), known))
 
 
 _PLAN_LINE = re.compile(r"^(?P<indent>\s*)(?:\d+[.)]\s*)?(?P<text>.*?)\s*(?:\((?P<action>[\w.\-]+/[\w.\-]+)\))?\s*$")
@@ -780,9 +1117,12 @@ def split_user(content):
 
 
 # ---------------------------------------------------------------------------------------------- assistant turn
-def parse_answer(text):
+def parse_answer(text, expand=False, catalog=None, request=None, known=()):
     """{"kind": "flow"|"question"|"reply", "plan": [lines], "flow_text": str|None, "question": str|None, "text": str}.
-    An answer that is only flow JSON (the format before plans) is kind "flow" with an empty plan."""
+    An answer that is only flow JSON (the format before plans) is kind "flow" with an empty plan.
+    expand: a compact flow (is_compact) is rebuilt into a full one (expand_flow with catalog, request, known and the
+    answer's plan) and flow_text is that full flow; "compact_text" then keeps what the model wrote. A full flow (a
+    model trained before compact answers) is left exactly as written."""
     t = str(text or "").split("<|assistant_end|>")[0].strip()
     res = {"kind": "reply", "plan": [], "flow_text": None, "question": None, "text": t}
     if t.startswith(QUESTION_HEAD):
@@ -796,6 +1136,10 @@ def parse_answer(text):
                    flow_text=body[m.end():].strip() if m else None)
     elif t.startswith("{") or t.startswith("```"):
         res.update(kind="flow", flow_text=t)
+    if expand and res["kind"] == "flow" and res["flow_text"] is not None:
+        full = answer_flow_text(res, catalog, request, known)
+        if full is not None and full != res["flow_text"]:
+            res.update(compact_text=res["flow_text"], flow_text=full, expanded=True)
     return res
 
 
@@ -846,7 +1190,7 @@ def _clause_ids(request, cat, index, example_index, clause_k, clause_votes, excl
 
 def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng=None, examples=(), example_index=None,
                     clause_k=CLAUSE_K, clause_votes=CLAUSE_VOTES, exclude_request=None, exclude_sig=None,
-                    max_actions=MAX_CONTEXT_ACTIONS):
+                    max_actions=MAX_CONTEXT_ACTIONS, withheld=()):
     """Action entries for the context and the ids trimming must keep. Training and serving both call this, so the
     model is trained on the context it gets.
     examples: the similar examples shown (dicts with "actions"); up to EXAMPLE_ACTIONS of their actions are added.
@@ -857,10 +1201,14 @@ def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng
     drops from the end, so a smaller window loses the per-clause extras first. Training: the gold flow's actions are
     always in (they are required), plus CORE_ALWAYS and the examples' actions, filled up with the serving candidates to
     the same size, shuffled with rng so the position of an action says nothing. exclude_request / exclude_sig keep the
-    row itself out of the votes (training)."""
+    row itself out of the votes (training). withheld: ids never listed (training's gold dropout, see drop_gold): the
+    row then looks like a serving request whose retrieval missed them."""
     cat = _as_dict(catalog) or (index.by_id if index is not None else {})
+    gone = set(withheld or ())
+    if gone:
+        cat = {a: e for a, e in cat.items() if a not in gone}
     gold = [a for a in dict.fromkeys(gold) if a in cat]
-    found = [e["id"] for e in index.search(request, k)] if index is not None else []
+    found = [e["id"] for e in index.search(request, k + len(gone)) if e["id"] in cat][:k] if index is not None else []
     core = [c for c in CORE_ALWAYS if c in cat]
     shown = []
     for x in examples or []:
@@ -986,8 +1334,33 @@ def input_variables(flow):
             if isinstance(v, dict) and v.get("name") and v.get("direction") == "input"]
 
 
+GOLD_DROPOUT = 0.5               # share of flow rows whose context misses some of the needed actions (render default)
+GOLD_DROPOUT_FRAC = (0.2, 0.45)  # share of the needed actions such a row misses (at least one)
+NEVER_DROPPED = CORE_ALWAYS      # core/loop and core/if are always offered at serving too
+
+
+def drop_gold(gold, rng, rate=GOLD_DROPOUT, frac=GOLD_DROPOUT_FRAC):
+    """Gold dropout for one training row: the needed actions the context will NOT list. At serving, retrieval offers
+    only part of the needed actions (56% on whole business processes), but a model trained with every needed action
+    always listed trusts the list and picks a wrong app when the right one is missing. So for `rate` of the rows,
+    a share drawn from `frac` of the droppable needed actions (never NEVER_DROPPED; at least one, and one is kept
+    when there are two or more) is left out; the plan and flow still use them. Draws from rng only when rate > 0,
+    so a render without dropout is reproduced exactly."""
+    if not rate or rate <= 0:
+        return []
+    u, f = rng.random(), rng.uniform(*frac)
+    cand = [a for a in dict.fromkeys(gold) if a not in NEVER_DROPPED]
+    if u >= rate or not cand:
+        return []
+    n = max(1, round(f * len(cand)))
+    if len(cand) >= 2:
+        n = min(n, len(cand) - 1)
+    return rng.sample(cand, n)
+
+
 def render_chat(record, catalog, action_index, example_index=None, rng=None, k=DEFAULT_K, variables_rate=0.3,
-                max_chars=MAX_ROW_CHARS, max_tokens=MAX_ROW_TOKENS, context_chars=None):
+                max_chars=MAX_ROW_CHARS, max_tokens=MAX_ROW_TOKENS, context_chars=None, answer_format=ANSWER_FULL,
+                gold_dropout=0.0, dropout_frac=GOLD_DROPOUT_FRAC):
     """A neutral record -> {"messages": [user, assistant]} in this format (None when the record is unusable).
     record: {"kind": "flow", "request", "flow"} | {"kind": "fix", "request", "previous", "problems", "flow"} |
             {"kind": "clarify", "request", "question"}.
@@ -995,7 +1368,10 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
     dataset.
     A row that does not fit (row_fits) is rendered again with a smaller context (down to the required actions only); the
     caller still checks the final length. context_chars: the context budget (default: context_for the window that
-    max_tokens implies, the same budget the server gives a model with that window)."""
+    max_tokens implies, the same budget the server gives a model with that window).
+    answer_format: ANSWER_FULL (the flow as stored) or ANSWER_COMPACT (compact_flow: code fills in the rest at
+    serving, expand_flow). gold_dropout: share of flow / fix rows whose Actions list misses some needed actions
+    (drop_gold); the answer is unchanged."""
     import random
     rng = rng or random.Random(0)
     cat = _as_dict(catalog)
@@ -1022,8 +1398,9 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
     flow = to_dollar_name_dollar(flow)              # the platform's notation: the model learns to write $name$
     examples = (example_index.search(request, n_ex, exclude_request=request, exclude_sig=flow_signature(flow))
                 if example_index else [])
+    withheld = drop_gold(actions_of(flow), rng, gold_dropout, dropout_frac)
     actions, required = context_actions(request, actions_of(flow), cat, action_index, k, rng, examples, example_index,
-                                        exclude_request=request, exclude_sig=flow_signature(flow))
+                                        exclude_request=request, exclude_sig=flow_signature(flow), withheld=withheld)
     # variables the request came with (Studio's open agent) always; else the flow's inputs for some rows
     variables = record.get("variables") or (input_variables(flow) if use_vars else ())
     previous = problems = None
@@ -1032,7 +1409,7 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
         if previous is None or not problems:
             return None
         previous = to_dollar_name_dollar(previous)  # as the server shows it (Router._previous)
-    answer = render_flow_answer(flow, cat)
+    answer = render_flow_answer(flow, cat, answer_format)
     limits = (context_chars, context_chars // 2, 0)
     if len(answer) > max_chars or (len(answer) * 10 > max_tokens * 16 and approx_tokens(answer) > max_tokens):
         limits = (0,)                    # cannot fit whatever the context: one render, the caller splits it
