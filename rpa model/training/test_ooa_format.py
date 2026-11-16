@@ -142,10 +142,10 @@ def test_plan_parts_cut_a_long_loop():
     pre = F.answer_prefix(F.chunk_plan_lines(parts[0]["chunk"]))
     assert pre.startswith("Plan:\n1. List the files (ooa.file/list)\n2. For each file (core/loop)\n  3. Read it")
     assert pre.endswith("\nFlow:\n") and F.parse_answer(pre + "{}")["plan"] == F.chunk_plan_lines(parts[0]["chunk"])
-    # short plans and long non-loop groups are not cut
+    # short plans are not cut; nor is a long group that is not a loop, try or if
     assert [p["inside"] for p in F.plan_parts(plan[:4])] == [False]
-    iff = ["1. If it is late (core/if)"] + [f"  {i}. Step {i} (core/log)" for i in range(2, 9)]
-    assert len(F.plan_parts(iff)) == 1
+    sw = ["1. Run them all at once (core/parallel)"] + [f"  {i}. Step {i} (core/log)" for i in range(2, 9)]
+    assert len(F.plan_parts(sw)) == 1
     # merging: an inside part goes into the loop that ends the parts before it (also when it wrapped itself in the
     # same loop again); ids stay unique
     p1 = linear_flow(["ooa.file/list"], "a")
@@ -162,6 +162,59 @@ def test_plan_parts_cut_a_long_loop():
     m = F.merge_flows([p1, wrapped], None, [False, True])
     assert F.outline(m) == "ooa.file/list > [loop: ooa.file/read_text > ooa.file/move > ooa.file/move]"
     assert F.outline(F.merge_flows([p3, p2], None, [False, True])) == "ooa.email/send > ooa.file/move > ooa.file/move"
+
+
+def _part_lines(parts):
+    return [[i["line"].split(".")[0].strip() for g in p["chunk"] for i in g] for p in parts]
+
+
+def test_plan_parts_cut_a_long_try_and_nested_containers():
+    # a try around the whole process (seen on the real model: a part of 12 lines): the try line, its first children
+    # and its "On error" lines in one part (the part that writes the try and its catch), the rest of its body inside
+    plan = ["1. Try to build the summary (core/try)", "  2. Open the mailbox (ooa.email/connect)",
+            "  3. List the invoices (ooa.email/list)", "  4. Read the totals (ooa.excel/read_range)",
+            "  5. Write the summary (ooa.file/write_text)", "  6. Move the file (ooa.file/move)",
+            "  7. Post it in Slack (ooa.slack/post_message)", "  8. On error: Email the error (ooa.email/send)",
+            "  9. Log the error (core/log)", "10. Log that it is done (core/log)"]
+    parts = F.plan_parts(plan)
+    assert [p["inside"] for p in parts] == [False, True, False], parts
+    assert _part_lines(parts) == [["1", "2", "3", "8", "9"], ["4", "5", "6", "7"], ["10"]]
+    assert F.chunk_plan_lines(parts[0]["chunk"])[-2:] == ["  4. On error: Email the error (ooa.email/send)",
+                                                          "  5. Log the error (core/log)"]
+    # a loop whose child is a long try: the try is cut inside the loop (inside=2 goes into the try in the loop)
+    plan = ["1. List the files (ooa.file/list)", "2. For each file (core/loop)", "  3. Read it (ooa.file/read_text)",
+            "  4. Try to check it (core/try)", "    5. Compute the HMAC (ooa.crypto/hmac)",
+            "    6. Read the signature (ooa.file/read_text)", "    7. Compare them (core/if)",
+            "    8. Move it to verified (ooa.file/move)", "    9. On error: Log the failure (core/log)",
+            "  10. Log the file (core/log)", "11. Email the summary (ooa.email/send)"]
+    parts = F.plan_parts(plan)
+    assert [p["inside"] for p in parts] == [False, True, 2, True, False], parts
+    assert _part_lines(parts) == [["1", "2", "3"], ["4", "5", "9"], ["6", "7", "8"], ["10"], ["11"]]
+    # merging follows the levels: part 3 into the try inside the loop, part 4 into the loop after the try
+    p = [linear_flow(["ooa.file/list"], "a"), linear_flow(["ooa.crypto/hmac"], "b"), linear_flow(["core/log"], "c"),
+         linear_flow(["ooa.file/move"], "d"), linear_flow(["ooa.email/send"], "e")]
+    p[0]["steps"].append({"id": "s2", "action": "core/loop", "args": {"iterator": "list", "over": "$files$",
+                          "as": "file"}, "children": [{"id": "s3", "action": "ooa.file/read_text"}]})
+    p[1]["steps"] = [{"id": "s1", "action": "core/try", "children": p[1]["steps"],
+                      "catch": [{"children": [{"id": "s9", "action": "core/log"}]}]}]
+    m = F.merge_flows(p, "whole", [False, True, 2, True, False])
+    assert F.actions_of(m) == ["ooa.file/list", "core/loop", "ooa.file/read_text", "core/try", "ooa.crypto/hmac",
+                               "core/log", "core/log", "ooa.file/move", "ooa.email/send"], F.actions_of(m)
+    loop = m["steps"][1]
+    assert [s["action"] for s in loop["children"]] == ["ooa.file/read_text", "core/try", "ooa.file/move"]
+    assert [s["action"] for s in loop["children"][1]["children"]] == ["ooa.crypto/hmac", "core/log"]
+    assert F.container_path(m["steps"], 2) is None and F.container_path(m["steps"][:2], 1) == [loop]
+    # a loop whose only child is a long try (seen on the real model): the cut is inside the try
+    plan = (["1. List the files (ooa.file/list)", "2. For each file (core/loop)", "  3. Try to check it (core/try)"]
+            + [f"    {i}. Step {i} (core/log)" for i in range(4, 10)] + ["    10. On error: Log it (core/log)"])
+    parts = F.plan_parts(plan)
+    assert [p["inside"] for p in parts] == [False, False, 2], parts
+    assert _part_lines(parts) == [["1"], ["2", "3", "4", "5", "10"], ["6", "7", "8", "9"]]
+    # a long if is cut too, its "Otherwise" branch stays with the if line
+    iff = (["1. If it is late (core/if)"] + [f"  {i}. Step {i} (core/log)" for i in range(2, 8)]
+           + ["  8. Otherwise: Wait (core/log)"])
+    parts = F.plan_parts(iff)
+    assert [p["inside"] for p in parts] == [False, True] and _part_lines(parts) == [["1", "2", "3", "8"], ["4", "5", "6", "7"]]
 
 
 def test_split_flow_parts_are_complete():

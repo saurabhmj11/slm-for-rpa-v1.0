@@ -249,6 +249,45 @@ def test_parts_first_stops_after_the_plan():
     assert router(m2, parts_first=False).run(LOOP_REQ) and not m2.options[-1]["on_plan"]
 
 
+TRY_REQ = ("List the files in the inbox; try to read the first one, log it, copy it to the archive, move it to "
+           "verified and log the move; on error log the failure")
+
+
+def test_parts_cut_a_long_try():
+    """A try around most of the process: the first part writes the try with its first children and its catch, the
+    next part's steps go into the try's body (not after it, and not into its catch)."""
+    w = json.loads(json.dumps(LOOP_WHOLE))
+    kids = w["steps"][1]["children"]
+    w["steps"][0]["out"] = {"files": "files"}
+    trystep = {"id": "s2", "action": "core/try", "description": "Try to handle the file", "children": kids,
+               "catch": [{"children": [{"id": "s9", "action": "core/log", "description": "Log the failure",
+                                        "args": {"message": "failed"}}]}]}
+    for k in kids:
+        k["args"] = {kk: (vv.replace("$file$", "$inbox$") if isinstance(vv, str) else vv)
+                     for kk, vv in k["args"].items()}
+    whole = {**w, "steps": [w["steps"][0], trystep]}
+    plan = F.plan_from_flow(whole, CAT)
+    parts = F.plan_parts(plan)
+    assert [p["inside"] for p in parts] == [False, True], (plan, parts)
+    head = json.loads(json.dumps(whole))
+    head["steps"][1]["children"] = head["steps"][1]["children"][:2]
+    rest = json.loads(json.dumps(whole))
+    rest["steps"] = rest["steps"][1]["children"][2:]
+    second = F.chunk_request(parts[1]["chunk"])
+
+    def answer(req, prompt, attempt):
+        if req == TRY_REQ:
+            return plan_answer(whole)
+        return plan_answer(rest if req == second else head)
+    m = PlanAware(answer)
+    res = router(m, local_retries=1).run(TRY_REQ)
+    assert res["verified"] and res.get("built_in_parts"), res
+    assert res["attempts"][2].get("inside") == 1, res["attempts"]
+    flow = json.loads(res["flow"])
+    assert F.outline(flow) == F.outline(whole), F.outline(flow)
+    assert [s["action"] for s in flow["steps"][1]["catch"][0]["children"]] == ["core/log"]
+
+
 def test_parts_first_falls_back_to_whole_answers():
     """Parts that do not pass: the next attempts are whole answers (no plan cut), with the parts' problems."""
     def answer(req, prompt, attempt):

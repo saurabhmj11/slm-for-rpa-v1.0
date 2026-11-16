@@ -34,10 +34,12 @@ The model format is defined in `training/ooa_format.py`; training data is render
 4. Verify: repair, the platform checker, and plan coverage (every action the plan names must be in the flow).
 5. Self-correction: the next attempt is given its previous flow and the problems. An answer the backend stopped as a
    loop (`assistant/model_backend.py`: RepetitionGuard for exact repeats up to 200 tokens long, AnswerWatch for a flow
-   that outgrows its plan or repeats a step id) is a failed attempt; the next one starts afresh.
+   that outgrows its plan or writes one "id" 3 times) is a failed attempt; the next one starts afresh.
 6. Decomposition (parts first): when the plan is over 6 lines (over 4 for a request of 5+ clauses) the first answer
    stops right after its plan and the flow is built in parts at once (`ooa_format.plan_parts`: up to 4 items / 5 plan
-   lines each; a long loop is cut and its later children are built as parts that go inside it), each a short answer
+   lines each; a long loop, try or if is cut: the part with its line also writes its first children and its
+   "On error" / "Otherwise" lines, its later children are built as parts that go inside it, also several levels
+   deep, such as a long try inside a loop), each a short answer
    (1,500 tokens) that starts with the part's own plan lines (given as the answer's start, so the model writes only
    the flow), with the variables made so far; the merged flow must pass the checker. If the parts fail, the
    remaining attempts are whole answers. A backend without `on_plan` gets the old order (one whole attempt first).

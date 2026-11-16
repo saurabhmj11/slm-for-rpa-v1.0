@@ -411,62 +411,115 @@ def _subgroups(group):
     return out
 
 
-def plan_parts(plan, max_lines=5, max_items=4):
-    """Parts to build a long plan in, smaller than chunk_plan's, that may also cut a loop's body: a list of
-    {"chunk": [groups], "inside": bool}. chunk is what chunk_request / chunk_actions read (groups as plan_groups);
-    inside=True means the part's steps go inside the loop that ends the parts before it (the loop's own line and its
-    first children are in the earlier part). Top-level groups are packed up to max_items items / max_lines lines; a
-    group longer than max_lines whose first item is a loop (core/loop) is cut about evenly: the loop line with its first
-    children, then the rest of its children (each child with its nested lines, never cut) packed the same way. Any other long
-    group (an if, a try) stays one part. A plan of one part comes back as one part."""
-    units = []                                        # (groups, inside)
-    for g in plan_groups(plan):
-        if len(g) <= max_lines or g[0]["action"] != "core/loop" or len(_subgroups(g)) < 2:
-            units.append(([g], False))
-            continue
-        subs = _subgroups(g)
-        target = -(-len(g) // -(-len(g) // max_lines))        # lines per piece when the loop is cut evenly
-        head, rest = [g[0]] + subs[0], subs[1:]
-        while len(rest) > 1 and len(head) + len(rest[0]) <= target:
-            head += rest.pop(0)
-        units.append(([head], False))
-        cur = []
-        for sg in rest:
-            if cur and (len(cur) >= max_items or sum(len(x) for x in cur) + len(sg) > max_lines):
-                units.append((cur, True))
+_CUT_CONTAINERS = ("core/loop", "core/try", "core/if")
+
+
+def _cut_units(g, level, max_lines, max_items):
+    """Units ([groups], level) for one group (plan_groups / _subgroups shape) at nesting level `level`. A group longer
+    than max_lines whose first item is a loop, a try or an if with 2+ body children is cut: the container line with its
+    first body children and all its branch lines ("On error: ...", "Otherwise: ..." and what follows them, which stay
+    in the part that writes the container), then the rest of its body children at level + 1, each cut the same way
+    when it is itself a long container. A container whose body is one long container (a loop around a try) is cut
+    inside that child: the container line goes with the child's first part."""
+    subs = _subgroups(g) if len(g) > max_lines and g[0]["action"] in _CUT_CONTAINERS else []
+    body = []
+    for sg in subs:                                    # the body: the children before the first branch line
+        if _BRANCH_PREFIX.match(_PLAN_LINE.match(sg[0]["line"]).group("text") or ""):
+            break
+        body.append(sg)
+    branch_lines = [it for sg in subs[len(body):] for it in sg]
+    if len(body) == 1:                                 # one long child (a loop around a try): cut that child
+        deeper = _cut_units(body[0], level + 1, max_lines, max_items) if body else []
+        if len(deeper) < 2:
+            return [([g], level)]
+        return [([[g[0]] + deeper[0][0][0] + branch_lines], level)] + deeper[1:]
+    if len(body) < 2:
+        return [([g], level)]
+    target = -(-len(g) // -(-len(g) // max_lines))     # lines per piece when the container is cut evenly
+    head, rest = [g[0]] + body[0], body[1:]
+    while len(rest) > 1 and len(head) + len(branch_lines) + len(rest[0]) <= target:
+        head += rest.pop(0)
+    units, cur = [([head + branch_lines], level)], []
+    for sg in rest:
+        deeper = _cut_units(sg, level + 1, max_lines, max_items)
+        if len(deeper) > 1:                            # a long container child: cut on its own
+            if cur:
+                units.append((cur, level + 1))
                 cur = []
-            cur.append(sg)
-        if cur:
-            units.append((cur, True))
+            units.extend(deeper)
+            continue
+        if cur and (len(cur) >= max_items or sum(len(x) for x in cur) + len(sg) > max_lines):
+            units.append((cur, level + 1))
+            cur = []
+        cur.append(sg)
+    if cur:
+        units.append((cur, level + 1))
+    return units
+
+
+def plan_parts(plan, max_lines=5, max_items=4):
+    """Parts to build a long plan in, smaller than chunk_plan's, that may also cut a container's body: a list of
+    {"chunk": [groups], "inside": level}. chunk is what chunk_request / chunk_actions read (groups as plan_groups);
+    inside=0 (False) means the part's steps follow the steps so far, inside=1 (True) that they go into the body of
+    the container (loop, try, if) that ends the steps so far, inside=2 into the body of the container that ends that
+    body, and so on (merge_flows / insert_inside). Top-level groups are packed up to max_items items / max_lines lines;
+    a group longer than max_lines whose first item is a loop, a try or an if is cut about evenly (_cut_units): the
+    container line with its first children and its branch lines (catch / else), then the rest of its children (each
+    with its nested lines; a long container child is cut the same way) packed the same way. A plan of one part comes
+    back as one part."""
+    units = []                                        # (groups, level)
+    for g in plan_groups(plan):
+        units.extend(_cut_units(g, 0, max_lines, max_items))
     parts = []
-    for i, (groups, inside) in enumerate(units):
+    for i, (groups, level) in enumerate(units):
         last = parts[-1] if parts else None
-        if (not inside and last is not None and not last["inside"] and not last["open"]
+        if (last is not None and last["inside"] == level and not last["open"]
                 and len(last["chunk"]) + len(groups) <= max_items
                 and sum(len(x) for x in last["chunk"]) + sum(len(x) for x in groups) <= max_lines):
             last["chunk"].extend(groups)
         else:
-            parts.append({"chunk": list(groups), "inside": inside, "open": False})
-        # a cut loop's head ends its part: the inside part after it goes into that loop
-        parts[-1]["open"] = i + 1 < len(units) and units[i + 1][1]
-    return [{"chunk": p["chunk"], "inside": p["inside"]} for p in parts]
+            parts.append({"chunk": list(groups), "inside": level, "open": False})
+        # a cut container's head ends its part: the deeper part after it goes into that container
+        parts[-1]["open"] = i + 1 < len(units) and units[i + 1][1] > level
+    return [{"chunk": p["chunk"], "inside": p["inside"] if p["inside"] > 1 else bool(p["inside"])} for p in parts]
+
+
+def container_path(steps, level):
+    """The containers an inside part of this level goes into: [top-level last step, the last step of its body, ...]
+    (level of them), or None when the steps so far do not end that way. A body is a container's "children"."""
+    path, cur = [], steps
+    for _ in range(int(level)):
+        last = cur[-1] if isinstance(cur, list) and cur else None
+        if not isinstance(last, dict) or last.get("action") not in _CUT_CONTAINERS:
+            return None
+        path.append(last)
+        cur = last.get("children") if isinstance(last.get("children"), list) else []
+    return path
+
+
+def insert_inside(steps, part_steps, level=1):
+    """Add part_steps to the body ("children") of the container at the end of steps, level containers deep
+    (plan_parts' inside). A part that wrapped its steps in the same container again (one step with that action, and
+    for a loop the same item) is unwrapped first. Returns False when steps do not end in such containers."""
+    path = container_path(steps, level)
+    if not path:
+        return False
+    box, body = path[-1], part_steps
+    if (len(body) == 1 and isinstance(body[0], dict) and body[0].get("action") == box.get("action")
+            and isinstance(body[0].get("children"), list)
+            and (box.get("action") != "core/loop"
+                 or (body[0].get("args") or {}).get("as") == (box.get("args") or {}).get("as"))):
+        body = body[0]["children"]
+    box.setdefault("children", [])
+    box["children"] = list(box["children"]) + list(body)
+    return True
 
 
 def insert_into_last_loop(steps, part_steps):
-    """Add part_steps to the body of the last top-level step of steps (a loop cut by plan_parts). A part that wrapped
-    its steps in the same loop again (one core/loop over the same item) is unwrapped first. Returns False when the
-    last step is not a loop."""
+    """insert_inside one level deep, for a loop only (kept for callers of the loop-only cut)."""
     if not steps or not isinstance(steps[-1], dict) or steps[-1].get("action") != "core/loop":
         return False
-    loop = steps[-1]
-    body = part_steps
-    if (len(body) == 1 and isinstance(body[0], dict) and body[0].get("action") == "core/loop"
-            and isinstance(body[0].get("children"), list)
-            and (body[0].get("args") or {}).get("as") == (loop.get("args") or {}).get("as")):
-        body = body[0]["children"]
-    loop.setdefault("children", [])
-    loop["children"] = list(loop["children"]) + list(body)
-    return True
+    return insert_inside(steps, part_steps, 1)
 
 
 def chunk_request(chunk):
@@ -519,8 +572,8 @@ def chunk_actions(chunk):
 
 def merge_flows(parts, description=None, inside=None):
     """Join part flows in order: steps appended, step ids made unique (a repeated id gets the next free sN), variables
-    united (the first declaration of a name wins). inside: one bool per part (plan_parts); a True part's steps go into
-    the loop that ends the steps so far (insert_into_last_loop), else after them."""
+    united (the first declaration of a name wins). inside: one level per part (plan_parts; False/0, True/1, 2 ...); an
+    inside part's steps go into the body of the container that ends the steps so far (insert_inside), else after them."""
     if not parts:
         return None
     base = {k: v for k, v in parts[0].items() if k not in ("variables", "steps")}
@@ -541,7 +594,7 @@ def merge_flows(parts, description=None, inside=None):
                     n += 1
                 s["id"] = f"s{n}"
             used.add(s["id"])
-        if not (inside and k < len(inside) and inside[k] and insert_into_last_loop(steps, new)):
+        if not (inside and k < len(inside) and inside[k] and insert_inside(steps, new, inside[k])):
             steps.extend(new)
     return {**base, "variables": variables, "steps": steps}
 

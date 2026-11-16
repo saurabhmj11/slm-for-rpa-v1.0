@@ -63,7 +63,7 @@ class Policy:
     max_tokens: int = 2500               # tokens for a whole answer (the backend also keeps it inside its window)
     part_max_tokens: int = 1500          # tokens for the answer of one part
     part_plan_given: bool = True         # a part's answer starts with its plan lines (backends that take prefix)
-    part_lines: int = 5                  # plan lines per part (ooa_format.plan_parts; a long loop's body is cut too)
+    part_lines: int = 5                  # plan lines per part (ooa_format.plan_parts; a long loop / try / if is cut too)
 
     @classmethod
     def load(cls, path=None):
@@ -402,8 +402,9 @@ class Router:
 
     def _decompose(self, request, plan, existing, tried, late):
         """Build a flow from its plan in parts (ooa_format.plan_parts: up to 4 plan items / part_lines lines each; a long
-        loop is cut, its later children built as parts that go inside it), each a short answer (part_max_tokens).
-        Each part is its own request with the variables made so far (and the loop's item for a part inside a loop);
+        loop, try or if is cut, its later children built as parts that go inside it), each a short answer
+        (part_max_tokens). Each part is its own request with the variables made so far (and the item of each loop a
+        part is inside);
         the parts are merged (unique step ids, variables united) and the merged flow must pass the checker and cover
         the plan. Returns (flow, notes) or (None, problems)."""
         chunks = self.parts_of(plan)
@@ -417,13 +418,18 @@ class Router:
             known = list(have)
             if ch["inside"]:
                 so_far = F.merge_flows(parts, inside=inside) or {}
-                last = (so_far.get("steps") or [{}])[-1]
-                item = (last.get("args") or {}).get("as") if last.get("action") == "core/loop" else None
-                if item is None:
-                    return None, [f"Part {n} of {len(chunks)} goes inside a loop, but the part before it made none."]
-                if isinstance(item, str) and item not in {v.get("name") for v in known}:
-                    known.append({"name": item, "type": "Any", "direction": "local"})
-                creq = f"With the current {item}: {creq[:1].lower() + creq[1:]}"
+                path = F.container_path(so_far.get("steps") or [], ch["inside"])
+                if not path:
+                    return None, [f"Part {n} of {len(chunks)} goes inside a loop, try or if, but the parts before it "
+                                  "did not end with one."]
+                # the items of the loops it is inside are known variables there
+                items = [b["args"]["as"] for b in path if b.get("action") == "core/loop"
+                         and isinstance((b.get("args") or {}).get("as"), str)]
+                for item in items:
+                    if item not in {v.get("name") for v in known}:
+                        known.append({"name": item, "type": "Any", "direction": "local"})
+                if items:
+                    creq = f"With the current {items[-1]}: {creq[:1].lower() + creq[1:]}"
             part, prev, probs = None, None, None
             prefix = F.answer_prefix(F.chunk_plan_lines(chunk)) if self.policy.part_plan_given else None
             for attempt in range(max(1, self.policy.part_attempts)):
@@ -441,7 +447,7 @@ class Router:
                 part, info = self.verify(text, known, ans["plan"])
                 tried.append({"source": "local", "part": n, "of": len(chunks), "ok": part is not None})
                 if ch["inside"]:
-                    tried[-1]["inside_loop"] = True
+                    tried[-1]["inside"] = int(ch["inside"])
                 if stop and stop != "end":
                     tried[-1]["stop"] = stop
                 if part is not None:
