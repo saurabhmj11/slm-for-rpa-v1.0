@@ -270,10 +270,18 @@ def test_looping_answer_is_a_failed_attempt():
 def test_context_budget_follows_the_model_window():
     long_req = ("Download the payment report from SFTP, read it as CSV, keep the rejected rows, for each one update "
                 "the database, then email the list to AP and post a message in Slack")
-    small = router(Scripted(lambda *a: "", info={"sequence_len": 2048}))
-    big = router(Scripted(lambda *a: "", info={"sequence_len": 4096}))
+    import tempfile
+    d = Path(tempfile.mkdtemp())
+    F.ExampleIndex.from_flows([("Read a csv file and save it as excel", CSV_TO_EXCEL)]).save(d / "examples.jsonl")
+    ex = str(d / "examples.jsonl")
+    # no render report: the 2048-token budget whatever the window (a model is served the context it was trained on)
+    assert router(Scripted(lambda *a: "", info={"sequence_len": 4096}), examples=ex).context_limit() == F.MAX_CONTEXT_CHARS
+    (d / "render_report.json").write_text(json.dumps({"settings": {"max_context_chars": F.MAX_CONTEXT_CHARS_LONG}}))
+    small = router(Scripted(lambda *a: "", info={"sequence_len": 2048}), examples=ex)
+    big = router(Scripted(lambda *a: "", info={"sequence_len": 4096}), examples=ex)
     assert small.context_limit() == F.MAX_CONTEXT_CHARS < big.context_limit() == F.MAX_CONTEXT_CHARS_LONG
-    assert router(Scripted(lambda *a: "")).context_limit() == F.MAX_CONTEXT_CHARS          # window unknown
+    assert router(Scripted(lambda *a: ""), examples=ex).context_limit() == F.MAX_CONTEXT_CHARS_LONG   # window unknown
+    assert router(Scripted(lambda *a: ""), examples=ex, context_chars=3000).context_limit() == 3000
     ps, pb = small.prompt(long_req), big.prompt(long_req)
     assert len(F.request_clauses(long_req)) >= F.CLAUSE_MIN and pb.count("\n- ") >= ps.count("\n- ") >= F.MIN_ACTIONS
     assert len(ps) - len(long_req) <= F.MAX_CONTEXT_CHARS + 1 and len(pb) - len(long_req) <= F.MAX_CONTEXT_CHARS_LONG + 1

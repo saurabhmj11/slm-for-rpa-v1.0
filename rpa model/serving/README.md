@@ -22,10 +22,12 @@ The model format is defined in `training/ooa_format.py`; training data is render
    training requests from `examples.jsonl` with their action outline, and the variables Studio sends. A request of
    2+ clauses (cut on , ; : . then / and / if / for each / otherwise ...) also gets per clause 2 BM25 hits and the 3
    actions most used by the 20 most similar training requests, plus 4 voted for the whole request (at most 40 actions).
-   Training renders the same context (`ooa_format.context_actions`). The context budget is 2,600 characters, 4,800
-   for a model whose window is 4,096 tokens or more (`info["sequence_len"]` of the backend); trimming drops the
-   per-clause extras first. Recall of the needed actions on eval/plain_requests sets 1 / 2 / 3: 0.88 / 0.89 / 0.56
-   before, 0.98 / 0.92 / 0.75 now (0.94 / 0.92 / 0.62 with the 2,600 budget of older models).
+   Training renders the same context (`ooa_format.context_actions`). The context budget is what the model was trained
+   with (`render_report.json` beside `examples.jsonl`; 2,600 characters without it; render_dataset uses 4,800 for a
+   4,096-token window), capped by the backend's `info["sequence_len"]`; trimming drops the per-clause extras first.
+   Recall of the needed actions on eval/plain_requests sets 1 / 2 / 3: 0.88 / 0.89 / 0.56 before, 0.98 / 0.92 / 0.70
+   now with 2,600 characters, 0.98 / 0.92 / 0.75 with 4,800. A model trained with 2,600 is worse with more: the first
+   4,096-token model's plans named 39% of the needed set-3 actions with 4,800 characters, 49% with 2,600.
 2. Plan first: the model writes a numbered plan (one action id per line), then the flow. The catalog lock
    (`assistant/constrained.py`) applies only inside the flow JSON.
 3. Clarify: a request too vague to automate gets `Question: ...` back; Studio shows it as notes, with no steps.
@@ -55,6 +57,7 @@ The model format is defined in `training/ooa_format.py`; training data is render
 | escalate_url, escalate_model, escalate_key_env | escalation to an OpenAI-compatible endpoint instead of the Anthropic API |
 | escalate_plan_lines | a failed local flow with a longer plan goes to escalation at once (default 12) |
 | prompt_format, context_k, decompose_lines, part_attempts | the layers above (auto, 12, 6, 2) |
+| context_chars | context budget in characters (0: what the model was trained with) |
 | parts_first, long_clauses, long_plan_lines, part_lines | parts at once for long plans (true, 5, 4, 5) |
 | max_tokens, part_max_tokens | answer budget for a whole flow / one part (2500, 1500; the backend keeps it inside its window) |
 

@@ -59,15 +59,19 @@ MIN_ACTIONS = 4               # trimming never goes below this many action lines
 # BM25 query over all of it finds the few words that dominate. So a request of CLAUSE_MIN clauses or more also gets, for
 # each clause (request_clauses), its BM25 top CLAUSE_K and the CLAUSE_VOTES actions most used by the training requests
 # most like it (ExampleIndex.vote), plus WHOLE_VOTES voted for the whole request. Measured recall of the needed actions in
-# the context (eval/plain_requests*.jsonl, sets 1 / 2 / 3, 4096-token budget): before 0.88 / 0.89 / 0.56 (18 actions
-# offered on set 3); top-3 per clause + each clause's most similar example 0.93 / 0.92 / 0.69 (34 actions); this
-# setting 0.98 / 0.92 / 0.75 (30 actions). A one-clause request gets exactly the context it got before.
+# the context (eval/plain_requests*.jsonl, sets 1 / 2 / 3, 4,800-character budget): before 0.88 / 0.89 / 0.56 (18
+# actions offered on set 3); top-3 per clause + each clause's most similar example 0.93 / 0.92 / 0.69 (34 actions);
+# this setting 0.98 / 0.92 / 0.75 (30 actions); with the 2,600-character budget 0.98 / 0.92 / 0.70. A one-clause
+# request gets exactly the context it got before.
 CLAUSE_MIN = 2                # requests with at least this many clauses get per-clause candidates
 CLAUSE_K = 2                  # BM25 hits per clause
 CLAUSE_VOTES = 3              # voted actions per clause
 WHOLE_VOTES = 4               # voted actions for the whole request
 VOTE_EXAMPLES = 20            # similar training requests that vote
 MAX_CONTEXT_ACTIONS = 40      # never more action lines than this (the context budget trims further)
+FOUND_FIRST = 6               # a long request's whole-request BM25 hits ranked before the per-clause candidates; the
+                              # rest come after them, so a 2,600-character budget keeps the per-clause ones (set-3
+                              # recall at 2,600: 0.63 with all 12 first, 0.70 with 6)
 LONG_WINDOW = 4096            # a model with this sequence length or more gets the larger context budget:
 MAX_CONTEXT_CHARS_LONG = 4800 # characters of context for such a model (about 1,700 tokens, leaving 2,300 for the answer)
 
@@ -773,9 +777,10 @@ def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng
     """Action entries for the context and the ids trimming must keep. Training and serving both call this, so the
     model is trained on the context it gets.
     examples: the similar examples shown (dicts with "actions"); up to EXAMPLE_ACTIONS of their actions are added.
-    Serving (no gold), best first: the examples' actions, BM25 top-k for the request, then for a request of CLAUSE_MIN
-    clauses or more the actions voted for it and per clause clause_k BM25 hits and clause_votes voted actions (votes
-    need example_index; see _clause_ids), then CORE_ALWAYS; at most max_actions. Trimming (build_user)
+    Serving (no gold), best first: the examples' actions, BM25 top-k for the request, then CORE_ALWAYS. A request of
+    CLAUSE_MIN clauses or more: the examples' actions, the first FOUND_FIRST BM25 hits, the actions voted for it and
+    per clause clause_k BM25 hits and clause_votes voted actions (votes need example_index; see _clause_ids), the
+    other BM25 hits, then CORE_ALWAYS; at most max_actions. Trimming (build_user)
     drops from the end, so a smaller window loses the per-clause extras first. Training: the gold flow's actions are
     always in (they are required), plus CORE_ALWAYS and the examples' actions, filled up with the serving candidates to
     the same size, shuffled with rng so the position of an action says nothing. exclude_request / exclude_sig keep the
@@ -792,7 +797,7 @@ def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng
     more = _clause_ids(request, cat, index, example_index, clause_k, clause_votes, exclude_request, exclude_sig)
     if gold:
         ids = list(dict.fromkeys(gold + core + shown))
-        pool = [a for a in dict.fromkeys(found + more) if a not in ids]
+        pool = [a for a in dict.fromkeys(found[:FOUND_FIRST] + more + found) if a not in ids]
         extra = len([a for a in dict.fromkeys(more) if a not in found and a not in shown and a not in core])
         cap = max(min(k + 2 + len(shown) + extra, max_actions), len(ids))
         for a in pool:
@@ -802,7 +807,7 @@ def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng
     else:
         ids = list(dict.fromkeys(shown + found + core))
         if more:
-            ids = [a for a in dict.fromkeys(shown + found + more) if a not in core]
+            ids = [a for a in dict.fromkeys(shown + found[:FOUND_FIRST] + more + found) if a not in core]
             ids = ids[:max(0, max_actions - len(core))] + core
     if rng is not None:
         rng.shuffle(ids)

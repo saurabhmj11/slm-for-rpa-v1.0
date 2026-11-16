@@ -53,6 +53,7 @@ class Policy:
     # the local model's layers (see Router)
     prompt_format: str = "auto"          # "plain" | "context" | "auto" (context when the model pack has examples.jsonl)
     context_k: int = 12                  # BM25 candidate actions in the context
+    context_chars: int = 0               # context budget in characters; 0: what the model was trained with
     decompose_lines: int = 6             # a plan longer than this is built in parts (at once with parts_first)
     part_attempts: int = 2               # attempts per part (the second sees the first one's problems)
     parts_first: bool = True             # a long plan: stop the answer after its plan and build the flow in parts at
@@ -163,6 +164,7 @@ class Router:
         self.rules = rules.read_text(encoding="utf-8") if rules.exists() else "Write an OOA Flow v1 JSON document."
         self.policy, self.local, self.cloud = policy, local, cloud
         self.examples = F.ExampleIndex.load(examples) if examples and Path(examples).is_file() else None
+        self.trained_context = self._trained_context(examples) if self.examples is not None else None
         self.prompt_format = prompt_format or policy.prompt_format
         self.lock = threading.Lock()
 
@@ -196,8 +198,30 @@ class Router:
         return n if isinstance(n, int) and n > 0 else None
 
     def context_limit(self):
-        """Characters of context: ooa_format.context_for the model's window (the 2048-token budget when unknown)."""
-        return F.context_for(self.sequence_len())
+        """Characters of context the model gets: the policy's context_chars when set; else the budget its training data
+        was rendered with (render_report.json next to examples.jsonl, settings.max_context_chars), never more than
+        its window allows (ooa_format.context_for(info["sequence_len"])); else MAX_CONTEXT_CHARS. A bigger context
+        than the model was trained with hurts: the first 4096-token model (trained with 2,600 characters) wrote plans
+        naming 39% of the needed actions on plain_requests_3 with 4,800 characters, 49% with 2,600."""
+        if self.policy.context_chars > 0:
+            return self.policy.context_chars
+        trained = self.trained_context
+        if trained:
+            seq = self.sequence_len()
+            return min(trained, F.context_for(seq)) if seq else trained
+        return F.MAX_CONTEXT_CHARS
+
+    @staticmethod
+    def _trained_context(examples):
+        """settings.max_context_chars of the render_report.json beside the example index, or None."""
+        if not examples:
+            return None
+        f = Path(examples).resolve().parent / "render_report.json"
+        try:
+            n = json.loads(f.read_text(encoding="utf-8"))["settings"]["max_context_chars"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return n if isinstance(n, int) and n > 0 else None
 
     # -- one answer: parse -> repair -> verify -------------------------------------------------------
     def verify(self, text, existing=None, plan=None):
