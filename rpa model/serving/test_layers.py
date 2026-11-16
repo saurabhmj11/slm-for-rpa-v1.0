@@ -245,6 +245,27 @@ def test_feedback_endpoint_shapes():
         srv.shutdown()
 
 
+def test_flows_come_back_written_dollar_name_dollar():
+    """The platform writes variables $name$: what the model wrote as $name / ${name} reaches Studio as $name$, the
+    self-correction prompt shows the previous flow the same way, and a $name$ answer passes the checker as is."""
+    flow = json.loads(json.dumps(PART2))
+    flow["steps"][2]["args"]["message"] = "Read ${text} from $path"
+    bad = json.loads(json.dumps(flow))
+    del bad["steps"][1]
+
+    def answer(req, prompt, attempt):
+        return plan_answer(bad, F.plan_from_flow(flow, CAT)) if attempt == 0 else plan_answer(flow)
+    m = Scripted(answer)
+    code, out = S.chat_completion(router(m, local_retries=1), studio_body(LIST_REQ))
+    assert code == 200 and out["ooa"]["verified"], out
+    steps = json.loads(out["choices"][0]["message"]["content"])["steps"]
+    assert steps[0]["args"] == {"folder": "$folder$"} and steps[1]["args"] == {"path": "$path$"}
+    assert steps[2]["args"]["message"] == "Read $text$ from $path$"
+    assert '"folder":"$folder$"' in m.prompts[1].split(F.PREVIOUS_HEADER)[1]
+    res = router(Scripted(lambda req, p, a: plan_answer(F.to_dollar_name_dollar(flow))), local_retries=0).run(LIST_REQ)
+    assert res["verified"] and json.loads(res["flow"])["steps"][0]["args"] == {"folder": "$folder$"}, res
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

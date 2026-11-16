@@ -3,7 +3,9 @@
 Usage: python data_filter.py SFT_DIR OUT_DIR PLATFORM_REPO [EVAL_DIR] [--cap 60]
 Reads every *.jsonl in SFT_DIR (catalog.jsonl is copied as it is; train.jsonl, a combined copy of train_flows and
 train_catalog, and the eval*.jsonl test files are skipped), writes the kept rows to OUT_DIR with the same
-file names, and OUT_DIR/filter_report.json with what each filter removed per file.
+file names, and OUT_DIR/filter_report.json with what each filter removed per file. Files of neutral records
+(fix_train, targeted_train, clarify_train, long_train, business2_train: {"kind": ...} rows, checked when they were
+made) are left out; render_dataset.py reads them with --extra.
 
 Filters, in order (a row is dropped by the first one it fails):
   structure      messages are user/assistant turns in order, all text, nothing empty
@@ -67,6 +69,19 @@ def norm(text):
     return " ".join(re.sub(r"[^a-z0-9 ]", " ", text.lower()).split())
 
 
+def is_neutral(path):
+    """A file of neutral records ({"kind": "flow"|"fix"|"clarify", ...}, gen_targeted.py and friends), not chat rows."""
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    return False
+                return isinstance(row, dict) and "kind" in row and "messages" not in row
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sft")
@@ -93,12 +108,16 @@ def main():
     seen_pair = set()
     by_request = defaultdict(Counter)             # normalised request -> Counter(flow text) over all files
     staged = []                                   # (file, row_text, request_norm, answer, seq) after per-row filters
+    neutral = []
     for f in sorted(sft.glob("*.jsonl")):
         if (f.name == "catalog.jsonl" or f.name in NOT_TRAINING or f.name.startswith("eval")
                 or DRIVE_COPY.search(f.name)):     # "synth_train (1).jsonl": a second upload Google Drive renamed;
                                                    # read first, it would take the rows and leave the real file empty
             continue          # not training data: train.jsonl repeats train_flows + train_catalog (it would make them
                               # "duplicates" and empty them); eval*.jsonl are tests
+        if is_neutral(f):
+            neutral.append(f.name)     # left for render_dataset.py --extra (checked by their generator)
+            continue
         why = Counter()
         n = 0
         for line in open(f, encoding="utf-8"):
@@ -204,12 +223,14 @@ def main():
     drops = Counter()
     for r in report.values():
         drops.update(r["dropped"])
-    report["_total"] = {**total, "dropped": dict(drops)}
+    report["_total"] = {**total, "dropped": dict(drops), "neutral_files_not_filtered": neutral}
     (out / "filter_report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
     print(f"kept {total['kept']} of {total['rows']} rows | dropped: {dict(drops.most_common())}")
     for name, r in sorted(report.items()):
         if name != "_total":
             print(f"  {name:24s} {r['kept']:6d} of {r['rows']:6d}  {r['dropped'] or ''}")
+    if neutral:
+        print("  neutral records, not filtered (render_dataset.py --extra reads them):", ", ".join(neutral))
 
 
 if __name__ == "__main__":

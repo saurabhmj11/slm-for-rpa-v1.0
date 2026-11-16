@@ -44,7 +44,8 @@ MAX_EXAMPLES = 2
 MAX_CONTEXT_CHARS = 2600      # variables + actions + similar lines
 EXAMPLE_ACTIONS = 6           # actions of the similar examples added to the candidates (measured: recall of the
                               # needed actions on the plain-request sets 0.77 -> 0.86 and 0.65 -> 0.82)
-MAX_PREVIOUS_CHARS = 2400     # a longer previous flow is shown as its outline
+MAX_PREVIOUS_CHARS = 1600     # a longer previous flow is shown as its outline (1600: measured on gen_fix rows, a
+                              # quarter fewer self-correction rows lose the window than at 2400)
 MAX_PROBLEMS = 6
 MAX_PROBLEM_CHARS = 200
 MAX_ROW_CHARS = 6500          # user + assistant: about 2,100 tokens at the measured 2.8-3.1 characters per token
@@ -97,6 +98,112 @@ def walk(steps, depth=0):
 
 def actions_of(flow):
     return [s.get("action") for s, _ in walk(flow.get("steps") if isinstance(flow, dict) else flow)]
+
+
+# ---------------------------------------------------------------------------------------------- variable notation
+# Since 14 Nov 2026 the platform writes variables $name$ (as AA does): Studio saves whole-field references and
+# calculations as $name$, and the runner replaces only $name$ (or ${name}) inside text, so "Report for $month" is left
+# as typed. to_dollar_name_dollar() rewrites a flow the same way (Studio's upgradeRefs in platform/ui/src/studio/
+# variables.ts) and also mends text: a known variable written $name or ${name} inside text becomes $name$.
+_PATH = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+|\[[^\]$]+\])*"
+_WHOLE_REF = re.compile(r"^\$(?:\{\s*)?(" + _PATH + r")(?:\s*\}|\$)?$")
+_EXPR_REF = re.compile(r"\$\{?\s*(" + _PATH + r")(\s*\})?(?![A-Za-z0-9_.\[$])")
+_TEXT_REF = re.compile(r"(?P<done>\$" + _PATH + r"\$)|\$\{\s*(?P<brace>" + _PATH + r")\s*\}|(?<!\[)\$(?P<bare>" + _PATH + r")(?![$\[\w]|\.\w)")
+# inputs whose text is code or a pattern with its own $ words: only whole-field references are rewritten there
+_CODE_INPUTS = {"script", "code", "command", "pattern", "name_pattern", "regex", "expression", "formula", "js",
+                "javascript", "python", "powershell", "vbscript", "macro"}
+BUILTIN_ROOTS = ("sys", "global")
+
+
+def var_ref(name):
+    """How a variable is written in a field: $name$."""
+    return "$" + name + "$"
+
+
+def _root(path):
+    return re.match(r"[A-Za-z_][A-Za-z0-9_]*", path).group(0)
+
+
+def _fix_text(s, known):
+    def sub(m):
+        if m.group("done"):
+            return m.group(0)
+        path = m.group("brace") or m.group("bare")
+        return var_ref(path) if _root(path) in known else m.group(0)
+    return _TEXT_REF.sub(sub, s)
+
+
+def _fix_value(v, known, text, key=None):
+    if isinstance(v, str):
+        t = v.strip()
+        m = _WHOLE_REF.match(t)
+        if m:
+            return v if t.endswith("$") else var_ref(m.group(1))
+        return _fix_text(v, known) if text and key not in _CODE_INPUTS and "$" in v else v
+    if isinstance(v, list):
+        return [_fix_value(x, known, text, key) for x in v]
+    if isinstance(v, dict):
+        if len(v) == 1 and "literal" in v:
+            return v
+        if len(v) == 1 and isinstance(v.get("expr"), str):
+            return {"expr": _EXPR_REF.sub(lambda m: m.group(0) if m.group(0).startswith("${") and not m.group(2)
+                                          else var_ref(m.group(1)), v["expr"])}
+        if isinstance(v.get("action"), str):
+            return _fix_step(v, known)
+        return {k: _fix_value(x, known, text, k if text else None) for k, x in v.items()}
+    return v
+
+
+def _fix_step(step, known):
+    text = step.get("action") != "core/comment"
+    out = {}
+    for k, v in step.items():
+        if k == "note":                       # the builder's own words
+            out[k] = v
+        elif k == "args":
+            out[k] = _fix_value(v, known, text)
+        else:
+            out[k] = _fix_value(v, known, False)
+    return out
+
+
+def variable_names(flow):
+    """Names a flow declares or makes: its variables, out targets, loop / set targets, plus sys and global."""
+    names = set(BUILTIN_ROOTS)
+    if not isinstance(flow, dict):
+        return names
+    names |= {v["name"] for v in flow.get("variables") or [] if isinstance(v, dict) and isinstance(v.get("name"), str)}
+    bodies = [flow.get("steps")] + [sf.get("steps") for sf in flow.get("subflows") or [] if isinstance(sf, dict)]
+    for body in bodies:
+        for s, _ in walk(body):
+            names |= {x for x in (s.get("out") or {}).values() if isinstance(x, str)} if isinstance(s.get("out"), dict) else set()
+            args = s.get("args") if isinstance(s.get("args"), dict) else {}
+            names |= {args[k] for k in ("variable", "as", "index") if isinstance(args.get(k), str)}
+    return names
+
+
+def to_dollar_name_dollar(flow, variable_names_=None):
+    """The flow with its variable references written $name$, as the platform saves them: a whole field ($name,
+    ${name}, with .field / [index] parts) and every reference in a calculation ({"expr": ...}) becomes $name$; inside
+    other text of a step's args a known variable written $name or ${name} becomes $name$ too (the runner would leave
+    it as typed). Left alone: notes, an index that is itself a variable ($rates[$reason]), {"literal": ...}, a $ with no name after it, spreadsheet references such as $F$1,
+    unknown names inside text, comment steps and code / pattern inputs (script, code, pattern ...). Known names are
+    variable_names_ plus what the flow declares or makes (variable_names). Returns a new flow; running it again
+    changes nothing. A list of steps is accepted too."""
+    if isinstance(flow, list):
+        known = set(variable_names_ or ()) | variable_names({"steps": flow})
+        return [_fix_value(s, known, False) for s in flow]
+    if not isinstance(flow, dict):
+        return flow
+    known = set(variable_names_ or ()) | variable_names(flow)
+    out = dict(flow)
+    if isinstance(flow.get("steps"), list):
+        out["steps"] = [_fix_value(s, known, False) for s in flow["steps"]]
+    if isinstance(flow.get("subflows"), list):
+        out["subflows"] = [{**sf, "steps": [_fix_value(s, known, False) for s in sf["steps"]]}
+                           if isinstance(sf, dict) and isinstance(sf.get("steps"), list) else sf
+                           for sf in flow["subflows"]]
+    return out
 
 
 def flow_signature(flow):
@@ -157,7 +264,9 @@ def _plain(text):
 
 
 def _var(v):
-    return v[1:] if isinstance(v, str) and v.startswith("$") and re.fullmatch(r"\$[A-Za-z_][\w.]*", v) else None
+    """The name a whole-field reference points to ($name$, $name or ${name}), else None."""
+    m = _WHOLE_REF.match(v.strip()) if isinstance(v, str) else None
+    return m.group(1) if m else None
 
 
 def step_text(step, cat=None):
@@ -179,7 +288,8 @@ def step_text(step, cat=None):
         if isinstance(c, dict) and {"op", "left"} <= set(c) and isinstance(c.get("left"), str):
             right = c.get("right")
             right = right if isinstance(right, (str, int, float)) and len(str(right)) <= 30 else "a value"
-            return f"If {c['left'].lstrip('$')} {c['op']} {right}"
+            right = _var(right) or right
+            return f"If {_var(c['left']) or c['left']} {c['op']} {right}"
         return "If the condition holds"
     if a == "core/set" and isinstance(args.get("variable"), str) and args["variable"]:
         return f"Set {args['variable']}"
@@ -668,6 +778,7 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
     flow = record.get("flow")
     if not isinstance(flow, dict) or not isinstance(flow.get("steps"), list) or not flow["steps"]:
         return None
+    flow = to_dollar_name_dollar(flow)              # the platform's notation: the model learns to write $name$
     examples = (example_index.search(request, n_ex, exclude_request=request, exclude_sig=flow_signature(flow))
                 if example_index else [])
     actions, required = context_actions(request, actions_of(flow), cat, action_index, k, rng, examples)
@@ -678,6 +789,7 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
         previous, problems = record.get("previous"), [str(p) for p in record.get("problems") or []]
         if previous is None or not problems:
             return None
+        previous = to_dollar_name_dollar(previous)  # as the server shows it (Router._previous)
     answer = render_flow_answer(flow, cat)
     limits = (MAX_CONTEXT_CHARS, MAX_CONTEXT_CHARS // 2, 0)
     if len(answer) > max_chars or (len(answer) * 10 > max_tokens * 16 and approx_tokens(answer) > max_tokens):

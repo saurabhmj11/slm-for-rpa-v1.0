@@ -192,7 +192,8 @@ class Router:
         problems += [f"The plan names {a} but no step of the flow uses it." for a in F.plan_coverage(plan, flow)]
         if problems:
             return None, problems
-        return flow, notes
+        # the platform writes variables $name$ (Studio saves them so, and only $name$ is replaced inside text)
+        return F.to_dollar_name_dollar(flow, names | {v.get("name") for v in extra}), notes
 
     def answer_text(self, flow, existing=None, assistant=False, warnings=()):
         """The verified flow as the client reads it: Studio's {variables, steps, notes, warnings}, or the flow JSON."""
@@ -221,7 +222,7 @@ class Router:
             obj = json.loads(extract_json(text))
         except Exception:
             return None
-        return obj if isinstance(obj, dict) else None
+        return F.to_dollar_name_dollar(obj) if isinstance(obj, dict) else None
 
     def cloud_prompt(self, request, errors):
         cands = self.index.search(request, 40)

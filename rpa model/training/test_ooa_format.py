@@ -260,6 +260,67 @@ def test_render_dataset_cli():
         shutil.rmtree(out, ignore_errors=True)
 
 
+def test_dollar_name_dollar_platform_saving_rule():
+    """Studio's upgradeRefs cases (platform/ui/src/studio/refs.test.ts) and conformance case 029."""
+    flow = {"kind": "TaskBot", "id": "a", "name": "A", "variables": [{"name": "count", "type": "Number"}], "steps": [
+        {"id": "s1", "action": "core/set", "args": {"variable": "count", "value": "$count"}, "note": "uses $count"},
+        {"id": "s2", "action": "core/log", "args": {"message": "Total ${count}", "other": "${count}",
+                                                     "calc": {"expr": "$count + ${count} * 2"}, "keep": {"literal": "$count"}}},
+        {"id": "s3", "action": "core/if", "args": {"condition": {"op": "gt", "left": "$count", "right": 1}},
+         "children": [{"id": "s4", "action": "core/log", "args": {"message": "$count$"}}]}],
+        "subflows": [{"name": "Tidy", "steps": [{"id": "t1", "action": "core/log", "args": {"message": "$sys.date"}}]}]}
+    g = F.to_dollar_name_dollar(flow)
+    assert g["steps"][0] == {"id": "s1", "action": "core/set", "args": {"variable": "count", "value": "$count$"}, "note": "uses $count"}
+    assert g["steps"][1]["args"] == {"message": "Total $count$", "other": "$count$", "calc": {"expr": "$count$ + $count$ * 2"},
+                                     "keep": {"literal": "$count"}}
+    assert g["steps"][2]["args"] == {"condition": {"op": "gt", "left": "$count$", "right": 1}}
+    assert g["steps"][2]["children"][0]["args"] == {"message": "$count$"}
+    assert g["subflows"][0]["steps"][0]["args"] == {"message": "$sys.date$"}
+    assert F.to_dollar_name_dollar(g) == g                     # saving again changes nothing
+    assert flow["steps"][0]["args"]["value"] == "$count"       # the input is not changed
+    # conformance 029: spreadsheet references, US$ amounts, a variable index and an unknown name stay as typed
+    c29 = {"variables": [{"name": n} for n in ("customer", "count", "rates", "reason")], "steps": [
+        {"id": "s2", "action": "core/set", "args": {"variable": "msg", "value": "Total $count for ${customer} (US$ 5, $other)"}},
+        {"id": "s3", "action": "core/set", "args": {"variable": "f", "value": "=B2*$F$1 for $customer$"}},
+        {"id": "s4", "action": "core/set", "args": {"variable": "rate", "value": "$rates[$reason]"}},
+        {"id": "s5", "action": "core/loop", "args": {"over": "$rows", "as": "row"}, "children": [
+            {"id": "s6", "action": "core/log", "args": {"message": "Row $row.Name, done."}},
+            {"id": "s7", "action": "ooa.powershell/run", "args": {"script": "Write-Host $count"}},
+            {"id": "s8", "action": "core/comment", "args": {"text": "uses $count"}}]}]}
+    a = [s["args"] for s, _ in F.walk(F.to_dollar_name_dollar(c29)["steps"])]
+    assert a[0]["value"] == "Total $count$ for $customer$ (US$ 5, $other)"
+    assert a[1]["value"] == "=B2*$F$1 for $customer$"
+    assert a[2]["value"] == "$rates[$reason]"
+    assert a[3]["over"] == "$rows$"
+    assert a[4]["message"] == "Row $row.Name$, done."
+    assert a[5]["script"] == "Write-Host $count" and a[6]["text"] == "uses $count"
+    # names given by the caller (Studio's open agent) count as known
+    steps = [{"id": "s1", "action": "core/log", "args": {"message": "Hello $who"}}]
+    assert F.to_dollar_name_dollar(steps, ["who"])[0]["args"]["message"] == "Hello $who$"
+    assert F.to_dollar_name_dollar(steps)[0]["args"]["message"] == "Hello $who"
+
+
+def test_dollar_name_dollar_reads_back():
+    """$name$ flows: the plan words, the checker's references and render_chat targets."""
+    g = F.to_dollar_name_dollar(LOOP_FLOW)
+    assert g["steps"][1]["args"]["over"] == "$files$"
+    assert F.plan_from_flow(g, CAT) == F.plan_from_flow(LOOP_FLOW, CAT)
+    assert "For each file in files" in "\n".join(F.plan_from_flow(g, CAT))
+    import ooa_reward as R
+    assert R.refs(g["steps"][1]["args"]) == {"files"}
+    row = F.render_chat({"kind": "flow", "request": "zip the png files", "flow": LOOP_FLOW}, CAT, INDEX, None,
+                        random.Random(1))
+    ans = F.parse_answer(row["messages"][1]["content"])
+    assert '"$folder$"' in ans["flow_text"] and '"$folder"' not in ans["flow_text"]
+    bad = json.loads(F.compact(LOOP_FLOW))
+    del bad["steps"][1]
+    fix = F.render_chat({"kind": "fix", "request": "zip the png files", "flow": LOOP_FLOW, "previous": bad,
+                         "problems": ["The plan names core/loop but no step of the flow uses it."]}, CAT, INDEX, None,
+                        random.Random(1))
+    prev = fix["messages"][0]["content"].split(F.PREVIOUS_HEADER, 1)[1]
+    assert '"$folder$"' in prev
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

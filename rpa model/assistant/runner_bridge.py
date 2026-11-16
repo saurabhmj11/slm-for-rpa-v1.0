@@ -59,8 +59,8 @@ MAX_EVENTS = 200
 _HEAD_EVENTS = 190          # events kept from the start of a run; the rest of MAX_EVENTS come from its end
 _MAX_FILES = 500
 _PATH_KEYS = re.compile(r"(path|folder|file|dir|source|target)", re.I)
-_VAR_REF = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$")
-_EXPR = re.compile(r"\$\{[^}]*\}")
+_VAR_REF = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*(?:\}|\$)?$")     # $name$, $name or ${name}
+_EXPR = re.compile(r"\$\{[^}]*\}|\$[A-Za-z_][\w.]*\$")
 
 
 def is_risky(action: str, args: dict | None = None) -> bool:
@@ -118,7 +118,7 @@ def path_problem(s: str, sandbox: Path, key: str = "") -> str | None:
     """None if `s` is not path-like or stays inside the sandbox, else a plain reason."""
     if not isinstance(s, str) or not _looks_like_path(s, key):
         return None
-    literal = _EXPR.sub("x", s.strip()).strip("'\"")   # keep the literal parts of "${...}" / quoted expressions
+    literal = _EXPR.sub("x", s.strip()).strip("'\"")   # keep the literal parts of "${...}" / "$name$" / quoted expressions
     if not literal or _VAR_REF.match(literal):
         return None
     if literal.startswith("~") or PureWindowsPath(literal).drive or PureWindowsPath(literal).root:
