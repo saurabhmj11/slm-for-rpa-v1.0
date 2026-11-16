@@ -293,6 +293,28 @@ def test_real_model_guard():
               f"(each: {', '.join(f'{x:.1f}' for x in saved)})")
 
 
+def test_window_check_trained_vs_served():
+    from model_backend import window_check, base_window
+    import tempfile
+    mc = {"model_config": {"sequence_len": 4096}}
+    assert window_check({**mc, "trained_window": 4096}) == (4096, None)               # trained with the fix
+    tw, w = window_check({**mc, "trained_window": 1024})
+    assert tw == 1024 and "mismatch" in w
+    tw, w = window_check(mc, base_seq=1024)                                           # before the fix, base known
+    assert tw == 1024 and "mismatch" in w and "1024" in w
+    assert window_check(mc, base_seq=4096) == (4096, None)
+    tw, w = window_check(mc)                                                          # before the fix, base unknown
+    assert tw is None and "unknown" in w
+    assert window_check({"model_config": {"sequence_len": 2048}}) == (None, None)
+    with tempfile.TemporaryDirectory() as d:
+        assert base_window(d) is None
+        for step, n in ((100, 512), (300, 1024)):
+            p = Path(d) / "base_checkpoints" / "d8"
+            p.mkdir(parents=True, exist_ok=True)
+            (p / f"meta_{step:06d}.json").write_text(json.dumps({"model_config": {"sequence_len": n}}))
+        assert base_window(d) == 1024
+
+
 if __name__ == "__main__":
     fails = skipped = 0
     for name, fn in list(globals().items()):

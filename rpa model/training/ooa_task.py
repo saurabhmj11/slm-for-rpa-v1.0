@@ -42,10 +42,24 @@ def _session_fixer(data_path):
 
 
 class OOADialogues(Task):
-    def __init__(self, path, **kwargs):
+    """views: how many times the file is read per pass of the mixture (a float: 2.4 = every row twice, 40% of them a
+    third time, chosen by a seeded shuffle); None = once, in file order (as before). See sft_setup.plan_mixture."""
+    def __init__(self, path, views=None, seed=1, **kwargs):
         super().__init__(**kwargs)
         with open(path, encoding="utf-8") as f:
             self.rows = [json.loads(l) for l in f if l.strip()]
+        self.num_rows = len(self.rows)
+        self.order = None
+        if views is not None and self.rows:
+            import random
+            n = max(1, int(round(float(views) * len(self.rows))))
+            order, c = [], 0
+            while len(order) < n:
+                perm = list(range(len(self.rows)))
+                random.Random(f"{seed}:{os.path.basename(path)}:{c}").shuffle(perm)
+                order += perm
+                c += 1
+            self.order = order[:n]
         fix, fixed = _session_fixer(path), 0
         for row in self.rows if fix else []:
             m = row["messages"][-1]
@@ -66,9 +80,11 @@ class OOADialogues(Task):
         return "generative"
 
     def num_examples(self):
-        return len(self.rows)
+        return len(self.order) if self.order is not None else len(self.rows)
 
     def get_example(self, index):
+        if self.order is not None:
+            index = self.order[index]
         messages = self.rows[index]["messages"]
         rest = messages[1:] if messages[0]["role"] == "system" else messages
         assert len(rest) >= 2

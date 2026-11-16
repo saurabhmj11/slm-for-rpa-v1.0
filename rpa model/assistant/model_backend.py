@@ -198,6 +198,50 @@ def pack_version(model_dir):
     return None
 
 
+def base_window(model_dir):
+    """sequence_len of the newest base checkpoint's meta under model_dir/base_checkpoints (the pretraining window),
+    or None when the base checkpoint is not in the pack."""
+    best = None
+    for f in Path(model_dir).glob("base_checkpoints/*/meta_*.json"):
+        try:
+            step = int(f.stem.split("_")[-1])
+            n = json.loads(f.read_text(encoding="utf-8"))["model_config"]["sequence_len"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if isinstance(n, int) and (best is None or step > best[0]):
+            best = (step, n)
+    return best[1] if best else None
+
+
+def window_check(meta, base_seq=None):
+    """(trained window or None, warning or None) for a chat checkpoint's meta. The served attention window is
+    model_config.sequence_len. SFT made with the notebook's window fix saves "trained_window"; SFT made before it
+    kept the BASE model's window (nanochat builds the SFT model from the base config) while saving --max-seq-len, so a
+    model pretrained at 1024 and fine-tuned "at 4096" is served with a 4096 window it never trained with (its JSON
+    breaks past about 2,000 tokens). base_seq: the base checkpoint's sequence_len when known (base_window)."""
+    mc = meta.get("model_config") if isinstance(meta, dict) else None
+    served = mc.get("sequence_len") if isinstance(mc, dict) else None
+    trained = meta.get("trained_window") if isinstance(meta, dict) else None
+    if not isinstance(served, int):
+        return (trained if isinstance(trained, int) else None), None
+    if isinstance(trained, int):
+        if trained != served:
+            return trained, (f"window mismatch: this model trained with an attention window of {trained} tokens but is "
+                             f"served with {served}")
+        return trained, None
+    if isinstance(base_seq, int):
+        if base_seq < served:
+            return base_seq, (f"window mismatch: SFT kept the base model's window of {base_seq} tokens (trained before "
+                              f"the SFT window fix) but the model is served with {served}; long answers break past "
+                              f"about {2 * base_seq} tokens. Retrain SFT with the current notebook.")
+        return served, None
+    if served > 2048:
+        return None, (f"unknown trained window: this checkpoint was trained before the SFT window fix and its base "
+                      f"checkpoint is not here, so it may have trained with the base model's shorter window (1024 on "
+                      f"the t4 profile) while it is served with {served}")
+    return None, None
+
+
 class NanochatLocal:
     def __init__(self, model_dir, nanochat_dir, source="sft", device=None, guard=True, catalog=None):
         os.environ["NANOCHAT_BASE_DIR"] = str(Path(model_dir).resolve())
@@ -227,6 +271,12 @@ class NanochatLocal:
         self.sequence_len = seq if isinstance(seq, int) and seq > 0 else None
         self.info = {"device": dev_type, "params_M": round(params / 1e6, 1), "step": meta.get("step"), "source": source,
                      "catalog_lock": False, "version": pack_version(model_dir), "sequence_len": self.sequence_len}
+        # the window the model trained with vs the one it is served with (see window_check)
+        trained, warning = window_check(meta, base_window(model_dir))
+        self.info["trained_window"] = trained
+        if warning:
+            self.info["window_warning"] = warning
+            print("WARNING (model):", warning, file=sys.stderr)
         self.last_stats = {}
         # catalog lock (constrained.py): action ids and input/output names can only be real catalog names
         self.constraint = None
