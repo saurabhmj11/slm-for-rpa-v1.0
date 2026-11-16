@@ -181,7 +181,7 @@ never trained on; they are used in the final test. This seed set is small (about
 
 code('''
 #@title 6. Build OOA training data
-import json
+import json, os
 os.makedirs("/content/ooa", exist_ok=True)
 FILES = %s
 for name, text in FILES.items():
@@ -248,6 +248,7 @@ if CLEAN_DATA:
 
 code('''
 #@title 6d. Write the data in the plan-first format (new): sft_clean + the new files -> sft_render
+import os, json
 # Every request gets a "### Context" block (the likely actions, 0-2 similar examples, sometimes the agent's variables)
 # and every answer becomes "Plan: 1. ... 2. ..." then "Flow: {...}". Flows too long for the 2048-token window are
 # written as their parts (window = SFT_SEQ tokens). Variables are written $name$ as the platform now saves them. About 3-5 minutes.
@@ -273,7 +274,7 @@ if RENDER:
 
 code('''
 #@title 7. Patch nanochat SFT to use our data, then train
-import re, shutil
+import os, re, shutil
 SFT_DIR = f"{DRIVE_DIR}/sft_clean" if CLEAN_DATA and os.path.exists(f"{DRIVE_DIR}/sft_clean/filter_report.json") else f"{DRIVE_DIR}/sft"
 if RENDER and os.path.exists(f"{DRIVE_DIR}/sft_render/render_report.json"):
     SFT_DIR = f"{DRIVE_DIR}/sft_render"
@@ -359,7 +360,7 @@ if os.path.exists(_ck):
 
 code('''
 #@title 8. Test on held-out workflow families (never trained on)
-import subprocess, json, sys
+import os, subprocess, json, sys
 EVAL_SOURCE = globals().get("EVAL_SOURCE", "sft")
 print("evaluating model source:", EVAL_SOURCE)
 # chat_cli stops after 256 new tokens; flows are longer, so raise the limit
@@ -386,6 +387,26 @@ def run_cli(prompt, max_tokens=3000):
             break
         out.append(col[0])
     return "Assistant: " + _tok.decode(out)
+# the new model (trained on sft_render) reads each request with a "### Context" block and answers "Plan: ... Flow: {...}";
+# the prompt is built exactly as the server and Studio build it (serving/ooa_server.Router.prompt)
+sys.path[:0] = ["/content/ooa", "/content/ooa/serving"]
+import ooa_format as _F, ooa_server as _S
+NEW_FORMAT = globals().get("RENDER", False) and os.path.exists(f"{DRIVE_DIR}/sft_render/examples.jsonl")
+_EV_DIR = f"{DRIVE_DIR}/sft_render" if NEW_FORMAT else f"{DRIVE_DIR}/sft"
+_EV_EXAMPLES = f"{_EV_DIR}/examples.jsonl" if NEW_FORMAT else None
+_prompter = _S.Router(f"{_EV_DIR}/catalog.jsonl", "/content/platform", _S.Policy(allow_escalation=False), None, None,
+                      _EV_EXAMPLES, "context" if NEW_FORMAT else "plain")
+print("prompt format:", "context + plan (new)" if NEW_FORMAT else "plain request (old model)")
+_kinds = {}
+def ask(request):
+    """The model's flow JSON text for a plain request (plan stripped); questions / replies give their text."""
+    text = run_cli(_prompter.prompt(request) if NEW_FORMAT else request)
+    text = text.split("Assistant:", 1)[-1].split("<|assistant_end|>")[0].strip()
+    if not NEW_FORMAT:
+        return text
+    ans = _F.parse_answer(text)
+    _kinds[ans["kind"]] = _kinds.get(ans["kind"], 0) + 1
+    return ans.get("flow_text") or ans.get("text") or ""
 import jsonschema
 schema = json.load(open("/content/platform/contracts/flow-schema/flow.v1.json"))
 catalog = {json.loads(l)["id"]: json.loads(l) for l in open(f"{DRIVE_DIR}/sft/catalog.jsonl")}
@@ -401,8 +422,7 @@ def steps(nodes):
 
 results = []
 for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval.jsonl")):
-    out = run_cli(row["prompt"])
-    text = out.split("Assistant:", 1)[-1].split("<|assistant_end|>")[0].strip()   # drop the end-of-answer marker
+    text = ask(row["prompt"])
     print("---", row["family"], "| first 250 chars:", text[:250])
     r = {"family": row["family"], "json": False, "schema": False, "actions_known": False}
     try:
@@ -418,8 +438,7 @@ print(f"\\nheld-out flows: {n} | valid JSON {sum(r['json'] for r in results)} | 
 print("\\n=== Synthetic eval: unseen generated flows, exact action sequence ===")
 sr = []
 for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval_synth.jsonl")):
-    out = run_cli(row["prompt"])
-    text = out.split("Assistant:", 1)[-1].split("<|assistant_end|>")[0].strip()
+    text = ask(row["prompt"])
     r = {"json": False, "schema": False, "actions_known": False, "actions_match": False}
     try:
         flow = json.loads(text); r["json"] = True
@@ -434,12 +453,11 @@ print(f"synthetic eval: {len(sr)} | valid JSON {sum(r['json'] for r in sr)} | sc
 print("\\n=== Real-pattern eval: unseen long, multi-toolkit flows (closest thing to real flows) ===")
 sys.path.insert(0, "/content/ooa")
 import ooa_reward as RW
-os.environ["OOA_CATALOG"] = f"{DRIVE_DIR}/sft/catalog.jsonl"; os.environ["OOA_SCHEMA"] = "/content/platform/contracts/flow-schema/flow.v1.json"
+os.environ["OOA_CATALOG"] = f"{_EV_DIR}/catalog.jsonl"; os.environ["OOA_SCHEMA"] = "/content/platform/contracts/flow-schema/flow.v1.json"
 RW.configure()
 pr = []
 for row in map(json.loads, open(f"{DRIVE_DIR}/sft/eval_pattern.jsonl")):
-    out = run_cli(row["prompt"])
-    sc = RW.score(out.split("Assistant:", 1)[-1], RW.gold_actions(row["gold_flow"]))
+    sc = RW.score(ask(row["prompt"]), RW.gold_actions(row["gold_flow"]))
     pr.append(sc)
 print(f"real-pattern eval: {len(pr)} | valid (passes every rule) {sum(x['valid'] for x in pr)} | exact action sequence {sum(x['solved'] for x in pr)} | mean score {sum(x['total'] for x in pr)/max(1,len(pr)):.3f}")
 def _in_order(need, got):
@@ -455,14 +473,16 @@ for _f, _label in _sets:
     print(f"\\n=== Plain-wording eval, {_label} ===")
     pl = []
     for row in map(json.loads, open(f"/content/ooa/{_f}")):
-        out = run_cli(row["prompt"])
-        sc = RW.score(out.split("Assistant:", 1)[-1])
-        try: got = RW.actions_of(json.loads(RW.clean(out.split("Assistant:", 1)[-1])))
+        _txt = ask(row["prompt"])
+        sc = RW.score(_txt)
+        try: got = RW.actions_of(json.loads(RW.clean(_txt)))
         except Exception: got = []
         pl.append((sc["valid"], sc["valid"] and _in_order(row["must"], got)))
         print(("OK  " if pl[-1][1] else ("VALID" if pl[-1][0] else "FAIL ")), row["prompt"][:70], "->", got[:6])
     _summary.append(f"{_label.split(':')[0]}: {sum(o for _, o in pl)}/{len(pl)} right ({sum(v for v, _ in pl)} pass every rule)")
 print("\\nplain-wording eval (bare model) | " + " | ".join(_summary))
+if NEW_FORMAT:
+    print("answer kinds (flow / question / reply):", _kinds)
 if ASSISTANT_EVAL:
     # the same pipeline as the PC app and Studio: the model can only write real action / input names (catalog lock),
     # a loop guard stops repetition, typo-level repair is applied, the platform rules verify, up to 2 retries
@@ -471,9 +491,11 @@ if ASSISTANT_EVAL:
     import ooa_server as _S
     from model_backend import NanochatLocal as _Local
     _local = _Local(os.environ["NANOCHAT_BASE_DIR"], "/content/nanochat", source=EVAL_SOURCE, device="cuda",
-                    catalog=f"{DRIVE_DIR}/sft/catalog.jsonl")
-    _router = _S.Router(f"{DRIVE_DIR}/sft/catalog.jsonl", "/content/platform",
-                        _S.Policy(allow_escalation=False, local_retries=2), _local, None)
+                    catalog=f"{_EV_DIR}/catalog.jsonl")
+    # the same Router as Studio: context + plan, plan coverage, self-correction with the problems, parts for long flows
+    _router = _S.Router(f"{_EV_DIR}/catalog.jsonl", "/content/platform",
+                        _S.Policy(allow_escalation=False, local_retries=2), _local, None,
+                        _EV_EXAMPLES, "context" if NEW_FORMAT else "plain")
     _asum = []
     for _f, _label in _sets:
         if not os.path.exists(f"/content/ooa/{_f}"):
