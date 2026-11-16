@@ -86,7 +86,7 @@ class RepetitionGuard:
         return False
 
 
-_STEP_ID = re.compile(r'"id"\s*:\s*"([^"\\]{1,80})"\s*,\s*"action"')
+_STEP_ID = re.compile(r'"id"\s*:\s*"([^"\\$][^"\\]{0,79})"')    # step ids (and the flow's own id), not "$var$" args
 _PLAN_NUM = re.compile(r"^\s*\d+[.)]\s*")
 
 
@@ -99,7 +99,8 @@ class AnswerWatch:
         10 fields);
       - the flow has more steps than the plan has lines, plus slack (max(3, a third of the plan)): the plan has one
         line per step (ooa_format.plan_from_flow), so a trained answer never does this;
-      - one step id is written max_same_id times (ids are unique in every training flow).
+      - one "id" value is written max_same_id times (ids are unique in every training flow; a looping answer often
+        writes {"id":"x", ...} fragments that are not whole steps, so any "id" counts, not only one before "action").
     on_plan(plan_lines) -> bool is called once, when the plan is complete ("Flow:" starts): True stops the answer there
     (reason "plan": the caller builds the flow in parts from the plan instead). self.reason says why it stopped;
     self.kind is "loop" or "plan". prefix: text the answer was started with (given, not generated)."""

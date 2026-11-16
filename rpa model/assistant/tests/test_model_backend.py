@@ -105,6 +105,10 @@ def test_answer_watch_repeated_step_id_and_plan_line():
     plan = "Plan:\n" + "".join(f"{i}. Step {i} (ooa.file/move)\n" for i in range(1, 13)) + "Flow:\n"
     text = plan + '{"steps":[' + _step(1) + _step(2) + "".join(_step(0, "summary") for _ in range(4))
     assert _watch_feed(w, text) is not None and "'summary' is written 3 times" in w.reason, w.reason
+    # the loop seen on the real model: {"id":...} fragments that are not whole steps (no "action" after the id)
+    w = AnswerWatch(lambda piece: piece)
+    frag = '{"id":"summary_folder$","folder":"$invoice_folder$","name":"POwner"},"out":{"folder":"noticefile"}},'
+    assert _watch_feed(w, plan + '{"id":"f","steps":[' + _step(1) + frag * 4) is not None and "written 3" in w.reason
     w = AnswerWatch(lambda piece: piece)
     looping_plan = "Plan:\n" + "".join(f"{i}. Send the alert to finance (ooa.email/send)\n" for i in range(1, 30))
     assert _watch_feed(w, looping_plan) is not None and "repeats the line" in w.reason
