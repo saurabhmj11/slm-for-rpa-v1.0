@@ -19,14 +19,25 @@ For cloud escalation set `ANTHROPIC_API_KEY` (production: route through the plat
 ## Layers of the local model (Router)
 The model format is defined in `training/ooa_format.py`; training data is rendered into it by `training/render_dataset.py`.
 1. Retrieval: the request + 12 BM25 actions (plus loop / if and the actions of the similar examples), up to 2 similar
-   training requests from `examples.jsonl` with their action outline, and the variables Studio sends.
+   training requests from `examples.jsonl` with their action outline, and the variables Studio sends. A request of
+   2+ clauses (cut on , ; : . then / and / if / for each / otherwise ...) also gets per clause 2 BM25 hits and the 3
+   actions most used by the 20 most similar training requests, plus 4 voted for the whole request (at most 40 actions).
+   Training renders the same context (`ooa_format.context_actions`). The context budget is 2,600 characters, 4,800
+   for a model whose window is 4,096 tokens or more (`info["sequence_len"]` of the backend); trimming drops the
+   per-clause extras first. Recall of the needed actions on eval/plain_requests sets 1 / 2 / 3: 0.88 / 0.89 / 0.56
+   before, 0.98 / 0.92 / 0.75 now (0.94 / 0.92 / 0.62 with the 2,600 budget of older models).
 2. Plan first: the model writes a numbered plan (one action id per line), then the flow. The catalog lock
    (`assistant/constrained.py`) applies only inside the flow JSON.
 3. Clarify: a request too vague to automate gets `Question: ...` back; Studio shows it as notes, with no steps.
 4. Verify: repair, the platform checker, and plan coverage (every action the plan names must be in the flow).
-5. Self-correction: the next attempt is given its previous flow and the problems.
-6. Decomposition: a plan over 6 lines (after one failed attempt), or any plan after every attempt failed, is built in
-   parts of 2-4 top-level items, each with the variables made so far; the merged flow must pass the checker.
+5. Self-correction: the next attempt is given its previous flow and the problems. An answer the backend stopped as a
+   loop (`assistant/model_backend.py`: RepetitionGuard for exact repeats up to 200 tokens long, AnswerWatch for a flow
+   that outgrows its plan or repeats a step id) is a failed attempt; the next one starts afresh.
+6. Decomposition (parts first): when the plan is over 6 lines (over 4 for a request of 5+ clauses) the first answer
+   stops right after its plan and the flow is built in parts at once (`ooa_format.plan_parts`: up to 4 items / 5 plan
+   lines each; a long loop is cut and its later children are built as parts that go inside it), each a short answer
+   (1,500 tokens), with the variables made so far; the merged flow must pass the checker. If the parts fail, the
+   remaining attempts are whole answers. A backend without `on_plan` gets the old order (one whole attempt first).
 7. Escalation (only when allowed): after the local attempts fail, or at once when the plan is over 12 lines.
 8. Safety: `training/safety.py` warnings for destructive steps go into notes, `warnings` and the `ooa` field.
 `prompt_format` "auto" uses the request alone (models trained before this format) unless the model pack has
@@ -44,6 +55,8 @@ The model format is defined in `training/ooa_format.py`; training data is render
 | escalate_url, escalate_model, escalate_key_env | escalation to an OpenAI-compatible endpoint instead of the Anthropic API |
 | escalate_plan_lines | a failed local flow with a longer plan goes to escalation at once (default 12) |
 | prompt_format, context_k, decompose_lines, part_attempts | the layers above (auto, 12, 6, 2) |
+| parts_first, long_clauses, long_plan_lines, part_lines | parts at once for long plans (true, 5, 4, 5) |
+| max_tokens, part_max_tokens | answer budget for a whole flow / one part (2500, 1500; the backend keeps it inside its window) |
 
 ## Not done yet
 Browser export of the model; per-client adapter training; true constrained decoding (nanochat's generator has no logits

@@ -19,7 +19,7 @@ Local backend: any object with generate(prompt, attempt) -> str (see backends.py
 (env ANTHROPIC_API_KEY) or an OpenAI-compatible endpoint (policy escalate_url / escalate_model / escalate_key_env).
 Default policy is LOCAL-ONLY and stores nothing.
 """
-import argparse, json, os, re, sys, time, threading
+import argparse, inspect, json, os, re, sys, time, threading
 from dataclasses import dataclass, asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,8 +53,15 @@ class Policy:
     # the local model's layers (see Router)
     prompt_format: str = "auto"          # "plain" | "context" | "auto" (context when the model pack has examples.jsonl)
     context_k: int = 12                  # BM25 candidate actions in the context
-    decompose_lines: int = 6             # a plan longer than this is built in parts after one failed whole attempt
+    decompose_lines: int = 6             # a plan longer than this is built in parts (at once with parts_first)
     part_attempts: int = 2               # attempts per part (the second sees the first one's problems)
+    parts_first: bool = True             # a long plan: stop the answer after its plan and build the flow in parts at
+                                         # once (needs a backend whose generate takes on_plan; else after one failure)
+    long_clauses: int = 5                # a request of this many clauses (ooa_format.request_clauses) or more ...
+    long_plan_lines: int = 4             # ... is built in parts when its plan is longer than this
+    max_tokens: int = 2500               # tokens for a whole answer (the backend also keeps it inside its window)
+    part_max_tokens: int = 1500          # tokens for the answer of one part
+    part_lines: int = 5                  # plan lines per part (ooa_format.plan_parts; a long loop's body is cut too)
 
     @classmethod
     def load(cls, path=None):
@@ -109,12 +116,26 @@ def parse_messages(messages):
     return request, system, assistant, existing, text
 
 
+def call_generate(model, prompt, attempt=0, **options):
+    """model.generate(prompt, attempt, **options) with only the options its generate takes (all of them when it takes
+    **kwargs): max_tokens and on_plan are newer than some backends (serving/backends.py, test doubles)."""
+    fn = model.generate
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if not any(p.kind == p.VAR_KEYWORD for p in params.values()):
+        options = {k: v for k, v in options.items() if k in params}
+    return fn(prompt, attempt, **{k: v for k, v in options.items() if v is not None})
+
+
 NOT_A_TASK = ("The model did not read this as a task to automate, so it answered with text instead of a flow. "
               "Describe what the bot should do, step by step, for example: 'Read a CSV file and write it to an "
               "Excel sheet'. Questions about actions go in the Learn tab.")
 
 
 OUT_OF_TIME = "The time for this request ran out, so no further attempt was made."
+LOOPED = "The answer started repeating itself and was stopped."
 
 
 STUDIO_NOTE = "Written by the OOA assistant and checked against the platform's rules."
@@ -160,12 +181,23 @@ class Router:
     def prompt(self, request, existing=None, previous=None, problems=None, required=()):
         """The user turn for the local model: the request + retrieval context (+ previous flow and problems)."""
         examples = self.examples.search(request, F.MAX_EXAMPLES) if self.examples is not None else []
-        actions, keep = F.context_actions(request, (), self.cat, self.index, self.policy.context_k, examples=examples)
+        actions, keep = F.context_actions(request, (), self.cat, self.index, self.policy.context_k, examples=examples,
+                                          example_index=self.examples)
         have = {e["id"] for e in actions}
         actions = [self.cat[a] for a in required if a in self.cat and a not in have] + actions
         variables = [v for v in existing or [] if isinstance(v, dict)]
         return F.build_user(request, actions, examples, variables, previous, problems,
-                            required=list(dict.fromkeys(list(required) + keep)))
+                            required=list(dict.fromkeys(list(required) + keep)), context_limit=self.context_limit())
+
+    def sequence_len(self):
+        """The local model's window in tokens when its backend says (info["sequence_len"]), else None."""
+        info = getattr(self.local, "info", None)
+        n = info.get("sequence_len") if isinstance(info, dict) else None
+        return n if isinstance(n, int) and n > 0 else None
+
+    def context_limit(self):
+        """Characters of context: ooa_format.context_for the model's window (the 2048-token budget when unknown)."""
+        return F.context_for(self.sequence_len())
 
     # -- one answer: parse -> repair -> verify -------------------------------------------------------
     def verify(self, text, existing=None, plan=None):
@@ -248,89 +280,154 @@ class Router:
         return system, user
 
     # -- the local model's layers ------------------------------------------------------------------------
+    def generate(self, prompt, attempt, **options):
+        """The local model's answer; options (max_tokens, on_plan) only when its generate takes them. Returns
+        (text, stop) where stop is the backend's last_stats["stop"] ("end", "max_tokens", "loop: ...", "plan: ...")
+        or None when it does not say."""
+        raw = call_generate(self.local, prompt, attempt, **options)
+        st = getattr(self.local, "last_stats", None)
+        stop = st.get("stop") if isinstance(st, dict) else None
+        return raw, stop if isinstance(stop, str) else None
+
+    def parts_rule(self, request, can_escalate=False):
+        """on_plan for the first answer: True (stop after the plan) when the plan is long enough to build in parts
+        (more than decompose_lines lines, or than long_plan_lines for a request of long_clauses clauses or more) and
+        splits into 2+ parts, or when it goes to the escalation model anyway (longer than escalate_plan_lines)."""
+        p = self.policy
+        limit = p.long_plan_lines if len(F.request_clauses(request)) >= p.long_clauses else p.decompose_lines
+
+        def rule(plan):
+            if can_escalate and len(plan) > p.escalate_plan_lines:
+                return True
+            return len(plan) > limit and len(self.parts_of(plan)) >= 2
+        return rule
+
     def _local(self, request, existing, tried, late, can_escalate):
         """Attempts of the local model. Returns {"flow", "notes", "plan", "parts"} on success, {"question"} when it
-        asks, else {"errors", "plan"}."""
+        asks, else {"errors", "plan"}. A long plan is built in parts at once (parts_first: the first answer stops
+        after its plan); an answer that loops (the backend's guards) counts as a failed attempt."""
         p, fmt = self.policy, self.format()
         prev = probs = None
-        plan, errors = [], []
+        plan, errors, decomposed = [], [], False
+        rule = self.parts_rule(request, can_escalate) if fmt == "context" and p.parts_first else None
         for attempt in range(1 + p.local_retries):
             if late():
                 return {"errors": list(errors) + [OUT_OF_TIME], "plan": plan}
             prompt = self.prompt(request, existing, prev, probs) if fmt == "context" else request
             try:
-                raw = self.local.generate(prompt, attempt)
+                raw, stop = self.generate(prompt, attempt, max_tokens=p.max_tokens,
+                                          on_plan=rule if not decomposed else None)
             except Exception as ex:
                 return {"errors": [f"local model error: {ex}"], "plan": plan}
             ans = F.parse_answer(raw)
             if ans["kind"] == "question":
                 tried.append({"source": "local", "ok": True, "kind": "question"})
                 return {"question": ans["question"], "plan": []}
+            if stop and stop.startswith("plan") and ans["plan"]:
+                plan = ans["plan"]
+                tried.append({"source": "local", "ok": True, "plan_lines": len(plan), "plan_only": True})
+                if can_escalate and len(plan) > p.escalate_plan_lines:
+                    return {"errors": ["a long process: the plan has %d lines" % len(plan)], "plan": plan}
+                decomposed = True
+                flow, info = self._decompose(request, plan, existing, tried, late)
+                if flow is not None:
+                    return {"flow": flow, "notes": info, "plan": plan, "parts": True}
+                errors = info
+                continue                                     # whole answers next
             flow, info = self.verify(ans["flow_text"] if ans["kind"] == "flow" else raw, existing, ans["plan"])
             tried.append({"source": "local", "ok": flow is not None})
-            if ans["plan"]:
+            looped = bool(stop and stop.startswith("loop"))
+            if stop:
+                tried[-1]["stop"] = stop
+            if ans["plan"] and not (looped and ans["flow_text"] is None):     # a plan that loops is not a plan
                 plan = ans["plan"]
                 tried[-1]["plan_lines"] = len(plan)
             if flow is not None:
                 return {"flow": flow, "notes": info, "plan": ans["plan"]}
             tried[-1]["preview"] = (raw or "")[:300]      # what the model wrote, so a failure can be read
             errors = info
+            if looped:
+                errors = [LOOPED] + list(info)
             if ans["kind"] == "reply":
                 # Text instead of a flow: the request was not read as a task (a question, an error message pasted
                 # in, chat). A retry only loops on the same text, and forcing JSON makes up an unrelated flow, so
                 # stop here and say so.
                 return {"errors": [NOT_A_TASK], "plan": plan}
             if fmt == "context":
-                # self-correction: the next attempt sees the flow it wrote and what the checker found
-                prev, probs = self._previous(ans["flow_text"]), info
+                # self-correction: the next attempt sees the flow it wrote and what the checker found (a looping
+                # answer has no flow to show: the next attempt starts afresh at a higher temperature)
+                prev = None if looped else self._previous(ans["flow_text"])
+                probs = None if looped else info
             if plan and can_escalate and len(plan) > p.escalate_plan_lines:
                 return {"errors": errors, "plan": plan}      # a long process: the bigger model takes it
-            if len(plan) > p.decompose_lines:
+            if not decomposed and len(plan) > p.decompose_lines and len(self.parts_of(plan)) >= 2:
                 break                                        # a long plan: build it in parts instead of retrying
-        if plan and not late():
+        if plan and not decomposed and len(self.parts_of(plan)) >= 2 and not late():
             flow, info = self._decompose(request, plan, existing, tried, late)
             if flow is not None:
                 return {"flow": flow, "notes": info, "plan": plan, "parts": True}
             errors = list(errors) + info
-        elif plan:
+        elif plan and late():
             errors = list(errors) + [OUT_OF_TIME]
         return {"errors": errors, "plan": plan}
 
+    def parts_of(self, plan):
+        """How a plan is built in parts (ooa_format.plan_parts with part_lines): [{"chunk", "inside"}]."""
+        return F.plan_parts(plan, max_lines=self.policy.part_lines)
+
     def _decompose(self, request, plan, existing, tried, late):
-        """Build a flow whose whole-flow attempts failed from its plan, in parts (ooa_format.chunk_plan: 2-4
-        consecutive top-level plan items each). Each part is its own request with the variables made so far; the
-        parts are merged (unique step ids, variables united) and the merged flow must pass the checker and cover the
-        plan. Returns (flow, notes) or (None, problems)."""
-        chunks = F.chunk_plan(plan)
+        """Build a flow from its plan in parts (ooa_format.plan_parts: up to 4 plan items / part_lines lines each; a long
+        loop is cut, its later children built as parts that go inside it), each a short answer (part_max_tokens).
+        Each part is its own request with the variables made so far (and the loop's item for a part inside a loop);
+        the parts are merged (unique step ids, variables united) and the merged flow must pass the checker and cover
+        the plan. Returns (flow, notes) or (None, problems)."""
+        chunks = self.parts_of(plan)
         if len(chunks) < 2:
             return None, []
-        fmt, have, parts = self.format(), [dict(v) for v in existing or [] if isinstance(v, dict)], []
+        fmt, have, parts, inside = self.format(), [dict(v) for v in existing or [] if isinstance(v, dict)], [], []
         info = []
-        for n, chunk in enumerate(chunks, 1):
+        for n, ch in enumerate(chunks, 1):
+            chunk = ch["chunk"]
             creq, need = F.chunk_request(chunk), F.chunk_actions(chunk)
+            known = list(have)
+            if ch["inside"]:
+                so_far = F.merge_flows(parts, inside=inside) or {}
+                last = (so_far.get("steps") or [{}])[-1]
+                item = (last.get("args") or {}).get("as") if last.get("action") == "core/loop" else None
+                if item is None:
+                    return None, [f"Part {n} of {len(chunks)} goes inside a loop, but the part before it made none."]
+                if isinstance(item, str) and item not in {v.get("name") for v in known}:
+                    known.append({"name": item, "type": "Any", "direction": "local"})
+                creq = f"With the current {item}: {creq[:1].lower() + creq[1:]}"
             part, prev, probs = None, None, None
             for attempt in range(max(1, self.policy.part_attempts)):
                 if late():
                     return None, [OUT_OF_TIME]
-                prompt = self.prompt(creq, have, prev, probs, required=need) if fmt == "context" else creq
+                prompt = self.prompt(creq, known, prev, probs, required=need) if fmt == "context" else creq
                 try:
-                    raw = self.local.generate(prompt, attempt)
+                    raw, stop = self.generate(prompt, attempt, max_tokens=self.policy.part_max_tokens)
                 except Exception as ex:
                     return None, [f"local model error: {ex}"]
                 ans = F.parse_answer(raw)
                 text = ans["flow_text"] if ans["kind"] == "flow" else raw
-                part, info = self.verify(text, have, ans["plan"])
+                part, info = self.verify(text, known, ans["plan"])
                 tried.append({"source": "local", "part": n, "of": len(chunks), "ok": part is not None})
+                if ch["inside"]:
+                    tried[-1]["inside_loop"] = True
+                if stop and stop != "end":
+                    tried[-1]["stop"] = stop
                 if part is not None:
                     break
-                prev, probs = self._previous(text), info
+                looped = bool(stop and stop.startswith("loop"))
+                prev, probs = (None, None) if looped else (self._previous(text), info)
             if part is None:
                 return None, [f"Part {n} of {len(chunks)} ('{creq[:80]}') did not pass the checker: "
                               + "; ".join(info[:2])]
             parts.append(part)
+            inside.append(ch["inside"])
             names = {v.get("name") for v in have}
             have += [v for v in part.get("variables", []) if isinstance(v, dict) and v.get("name") not in names]
-        merged = F.merge_flows(parts, request)
+        merged = F.merge_flows(parts, request, inside)
         flow, info = self.verify(F.compact(merged), existing, plan)
         tried.append({"source": "local", "merged_parts": len(parts), "ok": flow is not None})
         if flow is None:

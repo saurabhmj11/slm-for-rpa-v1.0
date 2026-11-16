@@ -38,7 +38,7 @@ sys.path.insert(0, str(ROOT / "training"))
 from knowledge import Knowledge              # noqa: E402
 from runner_bridge import RunnerBridge       # noqa: E402
 from ooa_server import (Router, Policy, chat_completion, quick_reply, openai_error, feedback_row, make_cloud,  # noqa: E402
-                        MODEL_ID)
+                        MODEL_ID, call_generate)
 import ooa_reward                            # noqa: E402
 
 STATIC = HERE / "static"
@@ -129,10 +129,15 @@ class _StatsRecorder:
     def info(self):
         return getattr(self.model, "info", None)
 
-    def generate(self, request, attempt=0):
+    @property
+    def last_stats(self):
+        return getattr(self.model, "last_stats", None)
+
+    def generate(self, request, attempt=0, **options):
+        """options (max_tokens, on_plan) go to the model when its generate takes them (Router.generate checks)."""
         t0 = time.time()
         try:
-            return self.model.generate(request, attempt)
+            return call_generate(self.model, request, attempt, **options)
         finally:
             st = dict(getattr(self.model, "last_stats", None) or {})
             st.pop("ids", None)

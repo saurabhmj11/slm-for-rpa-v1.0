@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT.parent / "training"))
 sys.path.insert(0, str(ROOT.parent / "serving"))
 
-from model_backend import FakeModel, RepetitionGuard  # noqa: E402
+from model_backend import FakeModel, RepetitionGuard, AnswerWatch, Guards  # noqa: E402
 
 
 class Skip(Exception):
@@ -43,8 +43,8 @@ def test_guard_stops_long_period_loop():
     cycle = list(range(1000, 1036))           # a 36-token cycle, like a whole step repeated verbatim
     g = RepetitionGuard()
     n = feed(g, list(range(10, 50)) + cycle * 30)
-    assert n is not None and n <= 40 + 320 + 8, n
-    assert "36-token" in g.reason
+    assert n is not None and n <= 40 + 3 * 72 + 8, n         # caught as 3 copies of 2 cycles (72 tokens)
+    assert "72-token" in g.reason or "36-token" in g.reason, g.reason
 
 
 def test_guard_spares_varied_repetition():
@@ -59,6 +59,89 @@ def test_guard_spares_repeated_clause_in_description():
     # the SFT data has descriptions like "read and parse a JSON file, then " x 9 (11 tokens) and a 25-token clause x 9
     assert feed(RepetitionGuard(), list(range(10, 60)) + list(range(200, 211)) * 10 + [1, 2, 3]) is None
     assert feed(RepetitionGuard(), list(range(10, 60)) + list(range(300, 325)) * 9 + [1, 2, 3]) is None
+
+
+def test_guard_stops_whole_step_loop():
+    # a whole step (59 tokens) written again and again: the n <= 40 rules never see it, the long-period rule does
+    step = list(range(2000, 2059))
+    g = RepetitionGuard()
+    n = feed(g, list(range(10, 400)) + step * 10)
+    assert n is not None and n <= 390 + 4 * 59 + 8 and "59-token" in g.reason, (n, g.reason)
+    # 2 copies of a long stretch (a description written twice, a step pair) is normal: never stopped
+    assert feed(RepetitionGuard(), list(range(10, 100)) + step * 2 + list(range(3000, 3100))) is None
+    # the SFT data's worst case for long periods: a 46-token sentence 4 times (185 tokens)
+    assert feed(RepetitionGuard(), list(range(10, 60)) + list(range(4000, 4046)) * 4 + [1, 2, 3]) is None
+
+
+def _watch_feed(watch, text, pieces=3):
+    """Feed text to an AnswerWatch a few characters at a time (each piece stands for one token)."""
+    for i in range(0, len(text), pieces):
+        if watch.push(text[i:i + pieces]):
+            return i + pieces
+    return None
+
+
+PLAN3 = "Plan:\n1. List the files (ooa.file/list)\n2. For each file (core/loop)\n  3. Move it (ooa.file/move)\nFlow:\n"
+
+
+def _step(i, sid=None):
+    return ('{"id":"%s","action":"ooa.file/move","description":"Move it","args":{"source":"$f$"}},'
+            % (sid or "s%d" % i))
+
+
+def test_answer_watch_flow_outgrows_plan():
+    w = AnswerWatch(lambda piece: piece)
+    good = PLAN3 + '{"kind":"TaskBot","steps":[' + "".join(_step(i) for i in range(1, 4)) + "]}"
+    assert _watch_feed(w, good) is None and w.plan_lines == 3
+    w = AnswerWatch(lambda piece: piece)
+    bad = PLAN3 + '{"kind":"TaskBot","steps":[' + "".join(_step(i) for i in range(1, 30))
+    n = _watch_feed(w, bad)
+    assert n is not None and w.kind == "loop" and "steps for a plan of 3 lines" in w.reason, w.reason
+    assert n < len(bad) // 2
+
+
+def test_answer_watch_repeated_step_id_and_plan_line():
+    w = AnswerWatch(lambda piece: piece)
+    plan = "Plan:\n" + "".join(f"{i}. Step {i} (ooa.file/move)\n" for i in range(1, 13)) + "Flow:\n"
+    text = plan + '{"steps":[' + _step(1) + _step(2) + "".join(_step(0, "summary") for _ in range(4))
+    assert _watch_feed(w, text) is not None and "'summary' is written 3 times" in w.reason, w.reason
+    w = AnswerWatch(lambda piece: piece)
+    looping_plan = "Plan:\n" + "".join(f"{i}. Send the alert to finance (ooa.email/send)\n" for i in range(1, 30))
+    assert _watch_feed(w, looping_plan) is not None and "repeats the line" in w.reason
+    # up to 10 identical lines happen in real plans ("Set text" for 10 fields): not a loop
+    w = AnswerWatch(lambda piece: piece)
+    assert _watch_feed(w, "Plan:\n" + "".join(f"{i}. Set text (ooa.browser/type_text)\n" for i in range(1, 11))
+                       + "Flow:\n{") is None
+    # a JSON-only answer or a question is not watched for plan rules
+    assert _watch_feed(AnswerWatch(lambda p: p), "Question: which folder? " * 30) is None
+
+
+def test_answer_watch_on_plan_stops_after_the_plan():
+    seen = []
+    w = AnswerWatch(lambda piece: piece, on_plan=lambda plan: seen.append(plan) or len(plan) > 2)
+    n = _watch_feed(w, PLAN3 + '{"kind":"TaskBot","steps":[' + _step(1), pieces=1)
+    assert n == len(PLAN3) - 1 and w.kind == "plan" and len(seen) == 1 and seen[0][0].startswith("1. List")
+    w = AnswerWatch(lambda piece: piece, on_plan=lambda plan: len(plan) > 5)
+    assert _watch_feed(w, PLAN3 + '{"kind":"TaskBot","steps":[' + _step(1) + "]}") is None
+    g = Guards(RepetitionGuard(), AnswerWatch(lambda piece: piece, on_plan=lambda plan: True))
+    assert _watch_feed(g, PLAN3 + "{", pieces=1) and g.kind == "plan"
+
+
+def test_fake_model_on_plan():
+    F = _fmt()
+    m = FakeModel(style="plan", catalog={})
+    req = "Read a CSV file into a table, then write the table to an Excel sheet"
+    full = m.generate(req)
+    assert F.parse_answer(full)["flow_text"] and m.last_stats["stop"] == "end"
+    cut = m.generate(req, on_plan=lambda plan: len(plan) > 2)
+    a = F.parse_answer(cut)
+    assert a["flow_text"] in (None, "") and len(a["plan"]) == 4 and m.last_stats["stop"].startswith("plan")
+    assert m.generate(req, on_plan=lambda plan: False) == full
+
+
+def _fmt():
+    import ooa_format
+    return ooa_format
 
 
 def test_guard_window_rule_optional():

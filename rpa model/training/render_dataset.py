@@ -6,7 +6,8 @@
 
 Reads every chat file SRC_DIR/*.jsonl ({"messages": [...]} rows, e.g. sft_clean/) and every neutral-record file given
 with --extra ({"kind": "flow"|"fix"|"clarify", ...}), and writes OUT_DIR/<same name>.jsonl in chat format:
-  - a row whose answer is a flow: the user turn gets the context (BM25 top-k actions for the request united with the
+  - a row whose answer is a flow: the user turn gets the context (ooa_format.context_actions, the same function the
+    server uses: BM25 top-k actions for the request, per-clause candidates for a long request, united with the
     gold flow's actions, gold always kept, order shuffled; 0-2 similar training requests with their action outline,
     never the row itself or a row with the same flow; the flow's input variables for --variables-rate of the rows,
     because Studio sends the open agent's variables) and the answer becomes plan + flow. The flow first gets
@@ -152,7 +153,10 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
     log(f"example index: {len(ex_index)} requests ({time.time() - t0:.0f}s)")
 
     report = {"settings": {"k": k, "seed": seed, "variables_rate": variables_rate, "reply_context": reply_context,
-                           "max_chars": max_chars, "max_tokens": max_tokens, "format": F.FORMAT_VERSION, "max_context_chars": F.MAX_CONTEXT_CHARS},
+                           "max_chars": max_chars, "max_tokens": max_tokens, "format": F.FORMAT_VERSION,
+                           "max_context_chars": F.context_for(F.window_of(max_tokens)),
+                           "clauses": {"min": F.CLAUSE_MIN, "k": F.CLAUSE_K, "votes": F.CLAUSE_VOTES,
+                                       "whole_votes": F.WHOLE_VOTES, "max_actions": F.MAX_CONTEXT_ACTIONS}},
               "files": {}, "examples": len(ex_index), "session_fixes": fixes[0]}
     for name, items, bad in loaded:
         rng = random.Random(f"{seed}:{name}")
@@ -178,8 +182,9 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
                         u = next(m for m in msgs if m.get("role") == "user")
                         if F.CONTEXT_HEADER not in str(u.get("content")):
                             exs = ex_index.search(it["request"], rng.choice((0, 1, 2)))     # as at serving
-                            acts, required = F.context_actions(it["request"], (), cat, index, k, rng, exs)
-                            u["content"] = F.build_user(it["request"], acts, exs, (), required=required)
+                            acts, required = F.context_actions(it["request"], (), cat, index, k, rng, exs, ex_index)
+                            u["content"] = F.build_user(it["request"], acts, exs, (), required=required,
+                                                        context_limit=F.context_for(F.window_of(max_tokens)))
                             row, kind = {**row, "messages": msgs}, "reply_with_context"
                 else:
                     c["skipped_unusable"] += 1

@@ -152,6 +152,133 @@ def test_long_plan_is_built_in_parts():
     assert not res["verified"] and any("Part 1 of 2" in p for p in res["problems"]), res["problems"]
 
 
+class PlanAware(Scripted):
+    """A backend that takes max_tokens and on_plan, as NanochatLocal does: an answer whose plan on_plan accepts is cut
+    after the plan (stop "plan: ..."); stops[i] forces the stop reason of call i (e.g. a loop)."""
+    def __init__(self, answer, stops=None):
+        super().__init__(answer)
+        self.options, self.stops, self.last_stats = [], dict(stops or {}), {}
+
+    def generate(self, prompt, attempt=0, max_tokens=2500, on_plan=None):
+        self.options.append({"max_tokens": max_tokens, "on_plan": on_plan is not None})
+        text = Scripted.generate(self, prompt, attempt)
+        a = F.parse_answer(text)
+        self.last_stats = {"stop": self.stops.get(len(self.prompts) - 1, "end")}
+        if on_plan is not None and a["plan"] and a["flow_text"] is not None and on_plan(a["plan"]):
+            self.last_stats = {"stop": "plan: build the flow in parts"}
+            return text.split("\nFlow:")[0] + "\nFlow:"
+        return text
+
+
+LOOP_WHOLE = {"kind": "TaskBot", "id": "cb", "name": "cb",
+              "variables": [{"name": "inbox", "type": "String", "direction": "input", "required": True},
+                            {"name": "files", "type": "List", "direction": "local"},
+                            {"name": "file", "type": "String", "direction": "local"},
+                            {"name": "text", "type": "String", "direction": "local"}],
+              "steps": [{"id": "s1", "action": "ooa.file/list", "description": "List the callback files",
+                         "args": {"folder": "$inbox$"}, "out": {"files": "files"}},
+                        {"id": "s2", "action": "core/loop", "description": "For each file",
+                         "args": {"iterator": "list", "over": "$files$", "as": "file"},
+                         "children": [
+                             {"id": "s3", "action": "ooa.file/read_text", "description": "Read the callback",
+                              "args": {"path": "$file$"}, "out": {"text": "text"}},
+                             {"id": "s4", "action": "core/log", "description": "Log the text",
+                              "args": {"message": "$text$"}},
+                             {"id": "s5", "action": "ooa.file/copy", "description": "Copy it to the archive",
+                              "args": {"source": "$file$", "target": "C:/archive"}},
+                             {"id": "s6", "action": "ooa.file/move", "description": "Move it to verified",
+                              "args": {"source": "$file$", "target": "C:/verified"}},
+                             {"id": "s7", "action": "core/log", "description": "Log the move",
+                              "args": {"message": "moved $file$"}}]},
+                        {"id": "s8", "action": "core/log", "description": "Log that it is done",
+                         "args": {"message": "done"}}]}
+LOOP_REQ = ("For each callback file in the inbox folder, read it, log the text, copy it to the archive and move it to "
+            "verified, log the move, then log that it is done")
+
+
+def _loop_parts():
+    """The part flows of LOOP_WHOLE as plan_parts cuts it: list + loop with its first 2 children; the last 3
+    children (inside the loop); the final log."""
+    w = json.loads(json.dumps(LOOP_WHOLE))
+    p1 = {**w, "id": "p1", "steps": [w["steps"][0], {**w["steps"][1], "children": w["steps"][1]["children"][:2]}]}
+    p2 = {**w, "id": "p2", "variables": [v for v in w["variables"] if v["name"] == "file"],
+          "steps": w["steps"][1]["children"][2:]}
+    p3 = {**w, "id": "p3", "variables": [], "steps": [w["steps"][2]]}
+    return p1, p2, p3
+
+
+def test_parts_first_stops_after_the_plan():
+    """A long plan: the first answer stops after its plan and the flow is built in parts at once (no whole flow is
+    written first); a long loop is cut, its last children built as a part that goes inside the loop."""
+    plan = F.plan_from_flow(LOOP_WHOLE, CAT)
+    parts = F.plan_parts(plan)
+    assert len(plan) == 8 and [p["inside"] for p in parts] == [False, True, False], parts
+    assert [sum(len(g) for g in p["chunk"]) for p in parts] == [4, 3, 1]
+    p1, p2, p3 = _loop_parts()
+    by_req = {F.chunk_request(parts[0]["chunk"]): p1, F.chunk_request(parts[2]["chunk"]): p3}
+
+    def answer(req, prompt, attempt):
+        if req == LOOP_REQ:
+            return plan_answer(LOOP_WHOLE)
+        if req.startswith("With the current file: "):
+            assert "file (Any)" in prompt or "file (String)" in prompt, prompt       # the loop's item is known
+            return plan_answer(p2)
+        return plan_answer(by_req[req])
+    m = PlanAware(answer)
+    res = router(m, local_retries=2).run(LOOP_REQ)
+    assert res["verified"] and res.get("built_in_parts"), res
+    assert m.options[0] == {"max_tokens": 2500, "on_plan": True} and len(m.prompts) == 4
+    assert all(o == {"max_tokens": 1500, "on_plan": False} for o in m.options[1:]), m.options
+    assert res["attempts"][0].get("plan_only") and [a.get("part") for a in res["attempts"][1:4]] == [1, 2, 3]
+    flow = json.loads(res["flow"])
+    assert F.outline(flow) == F.outline(LOOP_WHOLE), F.outline(flow)
+    # a short plan is answered whole, as before
+    m2 = PlanAware(lambda req, p, a: plan_answer(CSV_TO_EXCEL))
+    res = router(m2).run(CSV_REQ)
+    assert res["verified"] and not res.get("built_in_parts") and len(m2.prompts) == 1
+    # a long request (5+ clauses) is built in parts from a shorter plan too (long_plan_lines)
+    flat5 = [f"{i}. Log step {i} (core/log)" for i in range(1, 6)]
+    assert router(m2).parts_rule(LOOP_REQ)(flat5) and not router(m2).parts_rule(CSV_REQ)(flat5)
+    assert router(m2, parts_first=False).run(LOOP_REQ) and not m2.options[-1]["on_plan"]
+
+
+def test_parts_first_falls_back_to_whole_answers():
+    """Parts that do not pass: the next attempts are whole answers (no plan cut), with the parts' problems."""
+    def answer(req, prompt, attempt):
+        if req == LOOP_REQ:
+            return plan_answer(LOOP_WHOLE)
+        return "{\"steps\":[]}"
+    m = PlanAware(answer)
+    res = router(m, local_retries=1).run(LOOP_REQ)
+    assert res["verified"] and not res.get("built_in_parts"), res
+    assert m.options[0]["on_plan"] and not m.options[-1]["on_plan"] and m.options[-1]["max_tokens"] == 2500
+
+
+def test_looping_answer_is_a_failed_attempt():
+    """An answer the backend stopped as a loop counts as a failed attempt: the retry starts afresh (no previous flow
+    to correct) and the reason is kept."""
+    m = PlanAware(lambda req, p, a: plan_answer(CSV_TO_EXCEL) if a else
+                  "Plan:\n1. Read (ooa.csv/read)\nFlow:\n{\"steps\":[{\"id\":\"s1\"", {0: "loop: a 59-token pattern"})
+    res = router(m, local_retries=1).run(CSV_REQ)
+    assert res["verified"] and len(m.prompts) == 2 and F.PREVIOUS_HEADER not in m.prompts[1]
+    assert res["attempts"][0]["stop"].startswith("loop")
+    m = PlanAware(lambda req, p, a: "Plan:\n1. Read (ooa.csv/read)\nFlow:\n{", {0: "loop: x", 1: "loop: y"})
+    res = router(m, local_retries=1).run(CSV_REQ)
+    assert not res["verified"] and res["problems"][0] == S.LOOPED, res["problems"]
+
+
+def test_context_budget_follows_the_model_window():
+    long_req = ("Download the payment report from SFTP, read it as CSV, keep the rejected rows, for each one update "
+                "the database, then email the list to AP and post a message in Slack")
+    small = router(Scripted(lambda *a: "", info={"sequence_len": 2048}))
+    big = router(Scripted(lambda *a: "", info={"sequence_len": 4096}))
+    assert small.context_limit() == F.MAX_CONTEXT_CHARS < big.context_limit() == F.MAX_CONTEXT_CHARS_LONG
+    assert router(Scripted(lambda *a: "")).context_limit() == F.MAX_CONTEXT_CHARS          # window unknown
+    ps, pb = small.prompt(long_req), big.prompt(long_req)
+    assert len(F.request_clauses(long_req)) >= F.CLAUSE_MIN and pb.count("\n- ") >= ps.count("\n- ") >= F.MIN_ACTIONS
+    assert len(ps) - len(long_req) <= F.MAX_CONTEXT_CHARS + 1 and len(pb) - len(long_req) <= F.MAX_CONTEXT_CHARS_LONG + 1
+
+
 def test_safety_warnings_reach_the_client():
     flow = {"kind": "TaskBot", "id": "d", "name": "d",
             "variables": [{"name": "path", "type": "String", "direction": "input", "required": True}],

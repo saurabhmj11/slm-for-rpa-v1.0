@@ -125,6 +125,40 @@ def test_chunk_and_merge():
     assert F.actions_of(m) == ["ooa.csv/read", "core/loop", "core/log", "ooa.excel/open", "ooa.excel/close"]
 
 
+def test_plan_parts_cut_a_long_loop():
+    plan = ["1. List the files (ooa.file/list)", "2. For each file (core/loop)", "  3. Read it (ooa.file/read_text)",
+            "  4. Compute the HMAC (ooa.crypto/hmac)", "  5. Read the signature (ooa.file/read_text)",
+            "  6. If they match (core/if)", "    7. Move to verified (ooa.file/move)",
+            "    8. Otherwise: Move to quarantine (ooa.file/move)", "9. Email the summary (ooa.email/send)"]
+    assert len(F.chunk_plan(plan)) == 1                 # the loop is one group: chunk_plan cannot cut it
+    parts = F.plan_parts(plan)
+    assert [p["inside"] for p in parts] == [False, True, False], parts
+    assert [[i["line"].split(".")[0].strip() for g in p["chunk"] for i in g] for p in parts] == \
+        [["1", "2", "3", "4", "5"], ["6", "7", "8"], ["9"]]
+    assert F.chunk_request(parts[1]["chunk"]) == "If they match: Move to verified, otherwise: Move to quarantine."
+    assert F.chunk_actions(parts[0]["chunk"]) == ["ooa.file/list", "core/loop", "ooa.file/read_text", "ooa.crypto/hmac"]
+    # short plans and long non-loop groups are not cut
+    assert [p["inside"] for p in F.plan_parts(plan[:4])] == [False]
+    iff = ["1. If it is late (core/if)"] + [f"  {i}. Step {i} (core/log)" for i in range(2, 9)]
+    assert len(F.plan_parts(iff)) == 1
+    # merging: an inside part goes into the loop that ends the parts before it (also when it wrapped itself in the
+    # same loop again); ids stay unique
+    p1 = linear_flow(["ooa.file/list"], "a")
+    p1["steps"].append({"id": "s2", "action": "core/loop", "args": {"iterator": "list", "over": "$files$", "as": "file"},
+                        "children": [{"id": "s3", "action": "ooa.file/read_text"}]})
+    p2 = linear_flow(["ooa.file/move", "ooa.file/move"], "b")
+    p3 = linear_flow(["ooa.email/send"], "c")
+    m = F.merge_flows([p1, p2, p3], "whole", [False, True, False])
+    assert F.outline(m) == "ooa.file/list > [loop: ooa.file/read_text > ooa.file/move > ooa.file/move] > ooa.email/send"
+    ids = [s["id"] for s, _ in F.walk(m["steps"])]
+    assert len(ids) == len(set(ids)) == 6
+    wrapped = {"kind": "TaskBot", "id": "w", "name": "w", "steps": [{"id": "s1", "action": "core/loop",
+               "args": {"iterator": "list", "over": "$files$", "as": "file"}, "children": p2["steps"]}]}
+    m = F.merge_flows([p1, wrapped], None, [False, True])
+    assert F.outline(m) == "ooa.file/list > [loop: ooa.file/read_text > ooa.file/move > ooa.file/move]"
+    assert F.outline(F.merge_flows([p3, p2], None, [False, True])) == "ooa.email/send > ooa.file/move > ooa.file/move"
+
+
 def test_split_flow_parts_are_complete():
     flow = linear_flow(["ooa.csv/read", "ooa.datatable/filter", "ooa.datatable/sort", "ooa.excel/open",
                         "ooa.excel/write_table", "ooa.excel/close", "ooa.email/send"])
@@ -140,7 +174,7 @@ def test_split_flow_parts_are_complete():
 
 def test_context_actions_gold_and_core():
     rng = random.Random(3)
-    acts, req = F.context_actions("read invoices from csv and email them", ["ooa.csv/read", "ooa.pdf/merge"], CAT, INDEX, 12, rng)
+    acts, req = F.context_actions("read invoices from csv files", ["ooa.csv/read", "ooa.pdf/merge"], CAT, INDEX, 12, rng)
     ids = [e["id"] for e in acts]
     assert {"ooa.csv/read", "ooa.pdf/merge", "core/loop", "core/if"} <= set(ids) and len(ids) == 14
     assert set(req) == {"ooa.csv/read", "ooa.pdf/merge", "core/loop", "core/if"}
@@ -151,6 +185,56 @@ def test_context_actions_gold_and_core():
     assert serve[0]["id"] == "ooa.email/send" and len({e["id"] for e in serve}) == len(serve)     # examples' actions
     train, _ = F.context_actions("read invoices", ["ooa.pdf/merge"], CAT, INDEX, 12, random.Random(1), shown)
     assert {"ooa.email/send", "ooa.csv/read", "ooa.pdf/merge"} <= {e["id"] for e in train} and len(train) == 16
+
+
+LONG_REQUEST = ("For each new invoice PDF in the inbox folder, read the total; if it's over 10,000 forward it for "
+                "approval by email, otherwise send it to the department manager, then move the file to the archive folder.")
+
+
+def test_request_clauses():
+    cl = F.request_clauses(LONG_REQUEST)
+    assert cl[0] == "new invoice PDF in the inbox folder" and "read the total" in cl, cl
+    assert any("10,000" in c for c in cl) and cl[-1] == "move the file to the archive folder", cl   # 10,000 stays whole
+    assert F.request_clauses("Read a CSV file into a table") == ["Read a CSV file into a table"]
+    assert F.request_clauses("then and if") == [] and F.request_clauses("") == []
+
+
+def test_context_actions_per_clause():
+    """A long request gets per-clause candidates after the whole-request ones (votes from similar training requests
+    and BM25 per clause); a one-clause request gets exactly what it got before; training rows use the same function."""
+    flows = [("List the files in a folder and move each one to the archive folder",
+              linear_flow(["ooa.file/list", "core/loop", "ooa.file/move"], "mv")),
+             ("Send an email to the manager with the report", linear_flow(["ooa.email/send"], "em")),
+             ("Read the text of a PDF invoice", linear_flow(["ooa.pdf/extract_text"], "pdf"))]
+    ex = F.ExampleIndex.from_flows(flows)
+    assert ex.vote("move each file to the archive folder", 2) == ["ooa.file/list", "ooa.file/move"]
+    assert ex.vote("move each file to the archive folder", 2, exclude_sig=F.flow_signature(flows[0][1])) != \
+        ["ooa.file/list", "ooa.file/move"]
+    whole = [e["id"] for e in INDEX.search(LONG_REQUEST, 12)]
+    acts, req = F.context_actions(LONG_REQUEST, (), CAT, INDEX, 12, example_index=ex)
+    ids = [e["id"] for e in acts]
+    assert ids[:len(whole)] == list(dict.fromkeys(whole))[:len(whole)] or ids[:3] == whole[:3], ids
+    assert {"ooa.file/move", "ooa.email/send", "ooa.pdf/extract_text"} <= set(ids), ids
+    assert ids[-2:] == ["core/loop", "core/if"] and len(ids) <= F.MAX_CONTEXT_ACTIONS and len(set(ids)) == len(ids)
+    few, _ = F.context_actions(LONG_REQUEST, (), CAT, INDEX, 12, example_index=ex, max_actions=16)
+    assert len(few) == 16 and [e["id"] for e in few][-2:] == ["core/loop", "core/if"]
+    one, _ = F.context_actions("Read a CSV file into a table", (), CAT, INDEX, 12, example_index=ex)
+    old, _ = F.context_actions("Read a CSV file into a table", (), CAT, INDEX, 12)
+    assert [e["id"] for e in one] == [e["id"] for e in old]
+    # training: gold always in, the same per-clause candidates fill it up, the row itself never votes
+    train, required = F.context_actions(LONG_REQUEST, ["ooa.file/list", "ooa.file/move"], CAT, INDEX, 12,
+                                        random.Random(2), example_index=ex, exclude_request=LONG_REQUEST)
+    tids = {e["id"] for e in train}
+    assert {"ooa.file/list", "ooa.file/move", "core/loop", "core/if"} <= tids and len(train) > 16
+    assert set(required) == {"ooa.file/list", "ooa.file/move", "core/loop", "core/if"}
+    # the context budget: a 4096-token model gets the larger one and keeps the per-clause candidates
+    assert F.context_for(4096) == F.MAX_CONTEXT_CHARS_LONG and F.context_for(2048) == F.context_for(None) == F.MAX_CONTEXT_CHARS
+    have = {e["id"] for e in acts}
+    acts = acts + [e for e in INDEX.search("excel workbook sheet chart pivot table", 12) if e["id"] not in have]
+    small = F.build_user(LONG_REQUEST, acts, (), (), required=req)
+    big = F.build_user(LONG_REQUEST, acts, (), (), required=req, context_limit=F.context_for(4096))
+    assert small.count("\n- ") < big.count("\n- ") == len(acts)
+    assert len(F.request_of(big) + big.split(F.CONTEXT_HEADER, 1)[1]) <= len(LONG_REQUEST) + F.MAX_CONTEXT_CHARS_LONG + 2
 
 
 def test_render_chat_rows():

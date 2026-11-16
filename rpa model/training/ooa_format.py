@@ -55,6 +55,21 @@ MAX_EXAMPLE_REQUEST_CHARS = 140
 MAX_VARIABLES = 12
 MAX_PLAN_TEXT = 90            # longer step descriptions are replaced by the catalog name
 MIN_ACTIONS = 4               # trimming never goes below this many action lines (required ones always stay)
+# per-clause retrieval for long requests (context_actions): a whole business process names many apps and steps, and one
+# BM25 query over all of it finds the few words that dominate. So a request of CLAUSE_MIN clauses or more also gets, for
+# each clause (request_clauses), its BM25 top CLAUSE_K and the CLAUSE_VOTES actions most used by the training requests
+# most like it (ExampleIndex.vote), plus WHOLE_VOTES voted for the whole request. Measured recall of the needed actions in
+# the context (eval/plain_requests*.jsonl, sets 1 / 2 / 3, 4096-token budget): before 0.88 / 0.89 / 0.56 (18 actions
+# offered on set 3); top-3 per clause + each clause's most similar example 0.93 / 0.92 / 0.69 (34 actions); this
+# setting 0.98 / 0.92 / 0.75 (30 actions). A one-clause request gets exactly the context it got before.
+CLAUSE_MIN = 2                # requests with at least this many clauses get per-clause candidates
+CLAUSE_K = 2                  # BM25 hits per clause
+CLAUSE_VOTES = 3              # voted actions per clause
+WHOLE_VOTES = 4               # voted actions for the whole request
+VOTE_EXAMPLES = 20            # similar training requests that vote
+MAX_CONTEXT_ACTIONS = 40      # never more action lines than this (the context budget trims further)
+LONG_WINDOW = 4096            # a model with this sequence length or more gets the larger context budget:
+MAX_CONTEXT_CHARS_LONG = 4800 # characters of context for such a model (about 1,700 tokens, leaving 2,300 for the answer)
 
 # branches of a container step and the words a plan line starts with in that branch
 _BRANCH_WORDS = {"elseIf": "Else if: ", "else": "Otherwise: ", "catch": "On error: ", "finally": "Finally: ",
@@ -381,6 +396,75 @@ def chunk_plan(plan, min_size=2, max_size=4, max_lines=8):
     return chunks
 
 
+def _subgroups(group):
+    """The direct children of a group's first item, each with its own nested lines: [[child, grandchild ...], ...]."""
+    d, out = group[0]["depth"], []
+    for it in group[1:]:
+        if it["depth"] == d + 1 or not out:
+            out.append([it])
+        else:
+            out[-1].append(it)
+    return out
+
+
+def plan_parts(plan, max_lines=5, max_items=4):
+    """Parts to build a long plan in, smaller than chunk_plan's, that may also cut a loop's body: a list of
+    {"chunk": [groups], "inside": bool}. chunk is what chunk_request / chunk_actions read (groups as plan_groups);
+    inside=True means the part's steps go inside the loop that ends the parts before it (the loop's own line and its
+    first children are in the earlier part). Top-level groups are packed up to max_items items / max_lines lines; a
+    group longer than max_lines whose first item is a loop (core/loop) is cut about evenly: the loop line with its first
+    children, then the rest of its children (each child with its nested lines, never cut) packed the same way. Any other long
+    group (an if, a try) stays one part. A plan of one part comes back as one part."""
+    units = []                                        # (groups, inside)
+    for g in plan_groups(plan):
+        if len(g) <= max_lines or g[0]["action"] != "core/loop" or len(_subgroups(g)) < 2:
+            units.append(([g], False))
+            continue
+        subs = _subgroups(g)
+        target = -(-len(g) // -(-len(g) // max_lines))        # lines per piece when the loop is cut evenly
+        head, rest = [g[0]] + subs[0], subs[1:]
+        while len(rest) > 1 and len(head) + len(rest[0]) <= target:
+            head += rest.pop(0)
+        units.append(([head], False))
+        cur = []
+        for sg in rest:
+            if cur and (len(cur) >= max_items or sum(len(x) for x in cur) + len(sg) > max_lines):
+                units.append((cur, True))
+                cur = []
+            cur.append(sg)
+        if cur:
+            units.append((cur, True))
+    parts = []
+    for i, (groups, inside) in enumerate(units):
+        last = parts[-1] if parts else None
+        if (not inside and last is not None and not last["inside"] and not last["open"]
+                and len(last["chunk"]) + len(groups) <= max_items
+                and sum(len(x) for x in last["chunk"]) + sum(len(x) for x in groups) <= max_lines):
+            last["chunk"].extend(groups)
+        else:
+            parts.append({"chunk": list(groups), "inside": inside, "open": False})
+        # a cut loop's head ends its part: the inside part after it goes into that loop
+        parts[-1]["open"] = i + 1 < len(units) and units[i + 1][1]
+    return [{"chunk": p["chunk"], "inside": p["inside"]} for p in parts]
+
+
+def insert_into_last_loop(steps, part_steps):
+    """Add part_steps to the body of the last top-level step of steps (a loop cut by plan_parts). A part that wrapped
+    its steps in the same loop again (one core/loop over the same item) is unwrapped first. Returns False when the
+    last step is not a loop."""
+    if not steps or not isinstance(steps[-1], dict) or steps[-1].get("action") != "core/loop":
+        return False
+    loop = steps[-1]
+    body = part_steps
+    if (len(body) == 1 and isinstance(body[0], dict) and body[0].get("action") == "core/loop"
+            and isinstance(body[0].get("children"), list)
+            and (body[0].get("args") or {}).get("as") == (loop.get("args") or {}).get("as")):
+        body = body[0]["children"]
+    loop.setdefault("children", [])
+    loop["children"] = list(loop["children"]) + list(body)
+    return True
+
+
 def chunk_request(chunk):
     """Plain request text for one part: 'Read the CSV file, then for each row: send an email, then log it.'"""
     def item_text(group, i, depth):
@@ -392,8 +476,13 @@ def chunk_request(chunk):
             j += 1
         t = it["text"] or it["action"] or ""
         if kids:
-            t += ": " + ", then ".join(item_text(group, k, depth + 1) for k in kids)
+            t += ": " + "".join((", " if n else "") + _joined(group, k, depth + 1, n) for n, k in enumerate(kids))
         return t
+
+    def _joined(group, k, depth, n):
+        m = _BRANCH_PREFIX.match(_PLAN_LINE.match(group[k]["line"]).group("text") or "")
+        word = m.group(0).strip().lower() + " " if m else ("then " if n else "")
+        return word + item_text(group, k, depth)
 
     parts = [item_text(g, 0, g[0]["depth"]) for g in chunk if g]
     text = ", then ".join(p for p in parts if p)
@@ -404,16 +493,17 @@ def chunk_actions(chunk):
     return list(dict.fromkeys(it["action"] for g in chunk for it in g if it["action"]))
 
 
-def merge_flows(parts, description=None):
+def merge_flows(parts, description=None, inside=None):
     """Join part flows in order: steps appended, step ids made unique (a repeated id gets the next free sN), variables
-    united (the first declaration of a name wins)."""
+    united (the first declaration of a name wins). inside: one bool per part (plan_parts); a True part's steps go into
+    the loop that ends the steps so far (insert_into_last_loop), else after them."""
     if not parts:
         return None
     base = {k: v for k, v in parts[0].items() if k not in ("variables", "steps")}
     if description:
         base["description"] = description
     variables, names, steps, used = [], set(), [], set()
-    for p in parts:
+    for k, p in enumerate(parts):
         for v in p.get("variables") or []:
             if isinstance(v, dict) and v.get("name") not in names:
                 names.add(v.get("name"))
@@ -427,7 +517,8 @@ def merge_flows(parts, description=None):
                     n += 1
                 s["id"] = f"s{n}"
             used.add(s["id"])
-        steps.extend(new)
+        if not (inside and k < len(inside) and inside[k] and insert_into_last_loop(steps, new)):
+            steps.extend(new)
     return {**base, "variables": variables, "steps": steps}
 
 
@@ -632,12 +723,63 @@ def parse_answer(text):
 
 
 # ---------------------------------------------------------------------------------------------- retrieval context
-def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng=None, examples=()):
-    """Action entries for the context and the ids trimming must keep.
+_CLAUSE_SPLIT = re.compile(r"[;:]|,(?!\d)|\.(?!\w)|\b(?:then|and|if|for each|every|otherwise|else|after that)\b", re.I)
+
+
+def request_clauses(request, min_terms=2):
+    """The request cut into clauses (on , ; : . and the words then / and / if / for each / every / otherwise / else /
+    after that), each kept when it has at least min_terms search terms (retrieval.tokens): 'For each new invoice PDF
+    in the inbox folder, read the total; if it's over 10,000 email it' -> ['new invoice PDF in the inbox folder',
+    'read the total', "it's over 10,000 email it"] (10,000 stays whole)."""
+    out = []
+    for part in _CLAUSE_SPLIT.split(str(request or "")):
+        part = " ".join(part.split()).strip(" .,'\"")
+        if part and len(retrieval.tokens(part)) >= min_terms and part not in out:
+            out.append(part)
+    return out
+
+
+def window_of(max_row_tokens):
+    """The window (tokens) a training row limit is meant for: 4096 when the limit is over the 2048-token one."""
+    return LONG_WINDOW if max_row_tokens and max_row_tokens > 2048 else 2048
+
+
+def context_for(seq_len):
+    """Characters of context for a model with this sequence length (None: unknown -> the 2048-token budget)."""
+    return MAX_CONTEXT_CHARS_LONG if isinstance(seq_len, int) and seq_len >= LONG_WINDOW else MAX_CONTEXT_CHARS
+
+
+def _clause_ids(request, cat, index, example_index, clause_k, clause_votes, exclude_request, exclude_sig):
+    """Extra candidates of a request of CLAUSE_MIN clauses or more, best first: the actions voted for the whole request
+    (WHOLE_VOTES), then per clause in rounds (the clause's voted actions and its BM25 hits over the catalog, rank 1 of
+    every clause, then rank 2 ...). Empty for a shorter request."""
+    cl = request_clauses(request)
+    if index is None or len(cl) < CLAUSE_MIN:
+        return []
+    ex = dict(exclude_request=exclude_request, exclude_sig=exclude_sig)
+    ids = example_index.vote(request, WHOLE_VOTES, **ex) if example_index is not None else []
+    hits = [[e["id"] for e in index.search(c, clause_k)] if clause_k > 0 else [] for c in cl]
+    votes = [example_index.vote(c, clause_votes, **ex) if example_index is not None and clause_votes > 0 else []
+             for c in cl]
+    for r in range(max(clause_k, clause_votes)):
+        for h, v in zip(hits, votes):
+            ids += v[r:r + 1] + h[r:r + 1]
+    return [a for a in dict.fromkeys(ids) if a in cat]
+
+
+def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng=None, examples=(), example_index=None,
+                    clause_k=CLAUSE_K, clause_votes=CLAUSE_VOTES, exclude_request=None, exclude_sig=None,
+                    max_actions=MAX_CONTEXT_ACTIONS):
+    """Action entries for the context and the ids trimming must keep. Training and serving both call this, so the
+    model is trained on the context it gets.
     examples: the similar examples shown (dicts with "actions"); up to EXAMPLE_ACTIONS of their actions are added.
-    Serving (no gold): the examples' actions, BM25 top-k for the request, then CORE_ALWAYS. Training: the gold flow's
-    actions are always in (they are required), plus CORE_ALWAYS and the examples' actions, filled up with BM25
-    candidates to the same size, shuffled with rng so the position of an action says nothing."""
+    Serving (no gold), best first: the examples' actions, BM25 top-k for the request, then for a request of CLAUSE_MIN
+    clauses or more the actions voted for it and per clause clause_k BM25 hits and clause_votes voted actions (votes
+    need example_index; see _clause_ids), then CORE_ALWAYS; at most max_actions. Trimming (build_user)
+    drops from the end, so a smaller window loses the per-clause extras first. Training: the gold flow's actions are
+    always in (they are required), plus CORE_ALWAYS and the examples' actions, filled up with the serving candidates to
+    the same size, shuffled with rng so the position of an action says nothing. exclude_request / exclude_sig keep the
+    row itself out of the votes (training)."""
     cat = _as_dict(catalog) or (index.by_id if index is not None else {})
     gold = [a for a in dict.fromkeys(gold) if a in cat]
     found = [e["id"] for e in index.search(request, k)] if index is not None else []
@@ -647,16 +789,21 @@ def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng
         for a in x.get("actions") or [] if isinstance(x, dict) else []:
             if a in cat and a not in shown and a not in gold and a not in core and len(shown) < EXAMPLE_ACTIONS:
                 shown.append(a)
+    more = _clause_ids(request, cat, index, example_index, clause_k, clause_votes, exclude_request, exclude_sig)
     if gold:
         ids = list(dict.fromkeys(gold + core + shown))
-        cap = max(k + 2 + len(shown), len(ids))
-        for a in found:
+        pool = [a for a in dict.fromkeys(found + more) if a not in ids]
+        extra = len([a for a in dict.fromkeys(more) if a not in found and a not in shown and a not in core])
+        cap = max(min(k + 2 + len(shown) + extra, max_actions), len(ids))
+        for a in pool:
             if len(ids) >= cap:
                 break
-            if a not in ids:
-                ids.append(a)
+            ids.append(a)
     else:
         ids = list(dict.fromkeys(shown + found + core))
+        if more:
+            ids = [a for a in dict.fromkeys(shown + found + more) if a not in core]
+            ids = ids[:max(0, max_actions - len(core))] + core
     if rng is not None:
         rng.shuffle(ids)
     required = list(dict.fromkeys(gold + core))
@@ -713,6 +860,18 @@ class ExampleIndex:
     def __len__(self):
         return len(self.rows)
 
+    def vote(self, query, n, m=VOTE_EXAMPLES, exclude_request=None, exclude_sig=None):
+        """The n actions (not core/...) most used by the m requests most like query, each request's vote weighted
+        1 / (1 + 0.3 * rank): what flows for such a request are usually built from."""
+        if n <= 0:
+            return []
+        votes = Counter()
+        for r, x in enumerate(self.search(query, m, exclude_request, exclude_sig)):
+            for a in dict.fromkeys(x.get("actions") or []):
+                if isinstance(a, str) and not a.startswith("core/"):
+                    votes[a] += 1.0 / (1 + 0.3 * r)
+        return [a for a, _ in sorted(votes.items(), key=lambda kv: (-kv[1], kv[0]))[:n]]
+
     def search(self, query, n=MAX_EXAMPLES, exclude_request=None, exclude_sig=None):
         """Up to n {"request", "outline", "actions"} rows, best first, never the excluded request or flow signature, and never
         two with the same outline."""
@@ -750,17 +909,20 @@ def input_variables(flow):
 
 
 def render_chat(record, catalog, action_index, example_index=None, rng=None, k=DEFAULT_K, variables_rate=0.3,
-                max_chars=MAX_ROW_CHARS, max_tokens=MAX_ROW_TOKENS):
+                max_chars=MAX_ROW_CHARS, max_tokens=MAX_ROW_TOKENS, context_chars=None):
     """A neutral record -> {"messages": [user, assistant]} in this format (None when the record is unusable).
     record: {"kind": "flow", "request", "flow"} | {"kind": "fix", "request", "previous", "problems", "flow"} |
             {"kind": "clarify", "request", "question"}.
     The draws from rng are made in a fixed order (number of examples, variables, shuffle), so a seed reproduces a
     dataset.
     A row that does not fit (row_fits) is rendered again with a smaller context (down to the required actions only); the
-    caller still checks the final length."""
+    caller still checks the final length. context_chars: the context budget (default: context_for the window that
+    max_tokens implies, the same budget the server gives a model with that window)."""
     import random
     rng = rng or random.Random(0)
     cat = _as_dict(catalog)
+    if context_chars is None:
+        context_chars = context_for(window_of(max_tokens))
     kind, request = record.get("kind"), str(record.get("request") or "").strip()
     if not request or kind not in ("flow", "fix", "clarify"):
         return None
@@ -772,8 +934,9 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
         if not q:
             return None
         examples = example_index.search(request, n_ex, exclude_request=request) if example_index else []
-        actions, required = context_actions(request, (), cat, action_index, k, rng, examples)
-        user = build_user(request, actions, examples, (), required=required)
+        actions, required = context_actions(request, (), cat, action_index, k, rng, examples, example_index,
+                                            exclude_request=request)
+        user = build_user(request, actions, examples, (), required=required, context_limit=context_chars)
         return {"messages": [{"role": "user", "content": user}, {"role": "assistant", "content": QUESTION_HEAD + " " + q}]}
     flow = record.get("flow")
     if not isinstance(flow, dict) or not isinstance(flow.get("steps"), list) or not flow["steps"]:
@@ -781,7 +944,8 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
     flow = to_dollar_name_dollar(flow)              # the platform's notation: the model learns to write $name$
     examples = (example_index.search(request, n_ex, exclude_request=request, exclude_sig=flow_signature(flow))
                 if example_index else [])
-    actions, required = context_actions(request, actions_of(flow), cat, action_index, k, rng, examples)
+    actions, required = context_actions(request, actions_of(flow), cat, action_index, k, rng, examples, example_index,
+                                        exclude_request=request, exclude_sig=flow_signature(flow))
     # variables the request came with (Studio's open agent) always; else the flow's inputs for some rows
     variables = record.get("variables") or (input_variables(flow) if use_vars else ())
     previous = problems = None
@@ -791,7 +955,7 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
             return None
         previous = to_dollar_name_dollar(previous)  # as the server shows it (Router._previous)
     answer = render_flow_answer(flow, cat)
-    limits = (MAX_CONTEXT_CHARS, MAX_CONTEXT_CHARS // 2, 0)
+    limits = (context_chars, context_chars // 2, 0)
     if len(answer) > max_chars or (len(answer) * 10 > max_tokens * 16 and approx_tokens(answer) > max_tokens):
         limits = (0,)                    # cannot fit whatever the context: one render, the caller splits it
     for limit in limits:
