@@ -41,7 +41,8 @@ def test_plan_fills_the_budget_with_caps():
 
 def test_file_stats_and_plan_for_notebook():
     with tempfile.TemporaryDirectory() as d:
-        for name, n in (("long_train.jsonl", 10), ("train_catalog.jsonl", 20), ("val.jsonl", 5), ("catalog.jsonl", 9)):
+        for name, n in (("long_train.jsonl", 10), ("train_catalog.jsonl", 20), ("val.jsonl", 5), ("catalog.jsonl", 9),
+                        ("train.jsonl", 30), ("selfimprove_log.jsonl", 2), ("rl_train.jsonl", 4)):
             with open(os.path.join(d, name), "w") as f:
                 for i in range(n):
                     f.write(json.dumps({"messages": [{"role": "user", "content": "x" * 280},

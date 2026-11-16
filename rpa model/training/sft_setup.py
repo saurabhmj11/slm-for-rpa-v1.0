@@ -45,11 +45,14 @@ SKIP = ("catalog.jsonl", "examples.jsonl", "val.jsonl", "render_report.json", "r
 
 
 def file_stats(folder, names=None, chars_per_token=CHARS_PER_TOKEN):
-    """{file name: (rows, mean tokens per row)} for the .jsonl training files in folder (estimate from characters)."""
+    """{file name: (rows, mean tokens per row)} for the training files in folder: the files named in WANT and any other
+    *_train.jsonl (a new data file gets DEFAULT_WANT views). Tokens are estimated from characters."""
     out = {}
     for name in sorted(os.listdir(folder)):
         if not name.endswith(".jsonl") or name in SKIP or name.startswith(("val", "eval")):
             continue
+        if name not in WANT and not name.endswith("_train.jsonl"):
+            continue                       # train.jsonl (the union of the split files), logs, queues
         if names is not None and name not in names:
             continue
         rows = chars = 0

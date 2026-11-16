@@ -24,6 +24,7 @@ files = {
     "data_filter.py": (H / "data_filter.py").read_text(encoding="utf-8"),
     "ooa_format.py": (H / "ooa_format.py").read_text(encoding="utf-8"),
     "render_dataset.py": (H / "render_dataset.py").read_text(encoding="utf-8"),
+    "sft_setup.py": (H / "sft_setup.py").read_text(encoding="utf-8"),
     "safety.py": (H / "safety.py").read_text(encoding="utf-8"),
     "model_backend.py": (H.parent / "assistant/model_backend.py").read_text(encoding="utf-8"),
     "constrained.py": (H.parent / "assistant/constrained.py").read_text(encoding="utf-8"),
@@ -77,7 +78,7 @@ SFT_SEQ = 4096             # context window in tokens for SFT (was 2048): long f
 SFT_DEVICE_BATCH = 2       # rows per GPU step; 2 x 4096 = the same tokens as 4 x 2048. If the T4 runs out of memory, use 1
 ROW_CHARS = 6500 * SFT_SEQ // 2048    # longest training row in characters (filter and render)
 ROW_TOKENS = SFT_SEQ - 28             # longest training row in estimated tokens (render)
-SFT_EPOCHS = 2 if PROFILE == "smoke" else 6      # passes over the OOA data (the seed set is small)
+SFT_EPOCHS = 2 if PROFILE == "smoke" else 6      # only for the old cells 10 and 12 (cell 7 now plans the mixture by budget)
 NATURAL_REPEAT = 5         # passes over sft/natural_train.jsonl per epoch, if that file is in Drive (everyday wording)
 CORE_REPEAT = 5            # passes over sft/core_train.jsonl per epoch, if in Drive (everyday requests for the 65 most used actions)
 REBUILD_DATA = False       # cell 6 reuses the generated flows already in Drive (saves time); True = generate them again
@@ -94,7 +95,15 @@ SELF_IMPROVE_ROUNDS = 2
 SI_PROMPTS = 20 if PROFILE == "smoke" else 100     # fresh requests per self-improvement round
 SI_SAMPLES = 8
 EVAL_SOURCE = "sft"        # which model the test cell loads: "sft" or "rl"
-SFT_ITERS = 400 if PROFILE == "smoke" else 16000           # counted in MICRO-batches (4 per optimizer step): 16000 = 4000 steps, about 75 min on a T4 (was 10000: too short for long flows)
+SFT_ITERS = 400 if PROFILE == "smoke" else 32000           # counted in MICRO-batches (4 per optimizer step): 32000 = 8000 steps, about 2.5 h on a T4 (was 16000 = 4000 steps)
+SFT_STEPS = SFT_ITERS // 4                                   # optimizer steps (--total-batch-size = 4 micro-batches)
+ANSWER_FORMAT = "compact"  # cell 6d: answers carry only what the model decides (no variables list, step ids or descriptions);
+                           # the server and cell 8 rebuild the full flow (ooa_format.expand_flow). "full" = the old answers
+GOLD_DROPOUT = 0.5         # cell 6d: share of flow rows whose context misses 20-45% of the needed actions (retrieval misses
+                           # them at serving too); 0 = the needed actions are always listed (the old data)
+OLD_FORMAT_CELLS = False   # cells 9-13 (RL, self-improvement, autoresearch, whole-assistant demo) still use plain prompts and
+                           # plain-JSON answers capped at 1024 tokens: they must not run against a model trained on the new
+                           # format, so they are off. True runs them anyway (only for a model trained on the old format)
 CLEAN_DATA = True          # cell 6 runs the strict data filter (sft/ -> sft_clean/) and cell 7 trains on the cleaned data
 SCEN_REPEAT = 15           # whole business processes are long and few: weight them 3x the other files (CORE_REPEAT)
 RENDER = True              # cell 6d writes the data in the plan-first format with retrieval context (sft_render/); cell 7 trains on it
@@ -104,7 +113,8 @@ ASSISTANT_EVAL = True      # cell 8 also scores the full assistant (real action 
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
 MAX_FLOW_CHARS = 9000 * SFT_SEQ // 2048   # skip training flows longer than this (about SFT_SEQ tokens)
 print(PROFILE, P, "iterations:", NUM_ITERS)
-print("SFT settings -> SYNTH_TRAIN:", SYNTH_TRAIN, "| SFT_EPOCHS:", SFT_EPOCHS, "| SFT_ITERS cap:", SFT_ITERS, "| CLEAN_DATA:", CLEAN_DATA)
+print("SFT settings -> SYNTH_TRAIN:", SYNTH_TRAIN, "| SFT steps:", SFT_STEPS, f"({SFT_ITERS} micro-batches)", "| window:", SFT_SEQ,
+      "| answers:", ANSWER_FORMAT, "| gold dropout:", GOLD_DROPOUT, "| CLEAN_DATA:", CLEAN_DATA)
 ''')
 
 code('''
@@ -250,8 +260,12 @@ code('''
 #@title 6d. Write the data in the plan-first format (new): sft_clean + the new files -> sft_render
 import os, json
 # Every request gets a "### Context" block (the likely actions, 0-2 similar examples, sometimes the agent's variables)
-# and every answer becomes "Plan: 1. ... 2. ..." then "Flow: {...}". Flows too long for the 2048-token window are
-# written as their parts (window = SFT_SEQ tokens). Variables are written $name$ as the platform now saves them. About 3-5 minutes.
+# and every answer becomes "Plan: 1. ... 2. ..." then "Flow: {...}". Flows too long for the window are written as their
+# parts (window = SFT_SEQ tokens). Variables are written $name$ as the platform now saves them. About 10-20 minutes
+# (per-clause retrieval votes for long requests are the slow part).
+# ANSWER_FORMAT "compact": the flow after "Flow:" has no variables list, step ids or descriptions (about 45% fewer answer
+# tokens on long flows); code rebuilds them. GOLD_DROPOUT: half the flow rows miss 20-45% of the needed actions in the
+# context, as at serving, so the model learns to write an action it knows when it is not listed.
 import glob, shutil
 _src = f"{DRIVE_DIR}/sft_clean" if CLEAN_DATA and os.path.exists(f"{DRIVE_DIR}/sft_clean/filter_report.json") else f"{DRIVE_DIR}/sft"
 _extra = [f"{DRIVE_DIR}/sft/{f}" for f in NEW_FILES if os.path.exists(f"{DRIVE_DIR}/sft/{f}")]
@@ -264,7 +278,7 @@ if RENDER:
     if os.path.exists(f"{DRIVE_DIR}/sft_render"):
         shutil.rmtree(f"{DRIVE_DIR}/sft_render")
     _x = " ".join(_extra)
-    !cd /content/ooa && python render_dataset.py {_src} {DRIVE_DIR}/sft_render --catalog {DRIVE_DIR}/sft/catalog.jsonl --max-chars {ROW_CHARS} --max-tokens {ROW_TOKENS} --extra {_x}
+    !cd /content/ooa && python render_dataset.py {_src} {DRIVE_DIR}/sft_render --catalog {DRIVE_DIR}/sft/catalog.jsonl --max-chars {ROW_CHARS} --max-tokens {ROW_TOKENS} --answer-format {ANSWER_FORMAT} --gold-dropout {GOLD_DROPOUT} --extra {_x}
     # catalog question rows stay as they are
     shutil.copy(f"{_src}/train_catalog.jsonl", f"{DRIVE_DIR}/sft_render/train_catalog.jsonl")
     _r = json.load(open(f"{DRIVE_DIR}/sft_render/render_report.json"))
@@ -273,81 +287,35 @@ if RENDER:
 ''')
 
 code('''
-#@title 7. Patch nanochat SFT to use our data, then train
-import os, re, shutil
+#@title 7. Patch nanochat SFT (data mix by step budget, train with the 4096 window), then train
+import os, sys, shutil, time, importlib
+sys.path.insert(0, "/content/ooa")
+import sft_setup as _T
+importlib.reload(_T)
 SFT_DIR = f"{DRIVE_DIR}/sft_clean" if CLEAN_DATA and os.path.exists(f"{DRIVE_DIR}/sft_clean/filter_report.json") else f"{DRIVE_DIR}/sft"
 if RENDER and os.path.exists(f"{DRIVE_DIR}/sft_render/render_report.json"):
     SFT_DIR = f"{DRIVE_DIR}/sft_render"
 print("training data:", SFT_DIR)
 # always start from the pinned nanochat scripts, so an earlier patch can never hide the current data mix
 !cd /content/nanochat && git checkout -q -- scripts/chat_sft.py scripts/chat_cli.py
+!cp /content/ooa/ooa_task.py /content/nanochat/tasks/ooa.py
+# The data mix is planned for the real budget (SFT_STEPS optimizer steps x tokens per step), not "epochs x repeats":
+# every file gets a number of views per row; long / business rows at most 3, catalog questions at least 3.
+_tps = SFT_SEQ * SFT_DEVICE_BATCH * 4
+VIEWS, _stats, _budget, _lines = _T.plan_for_notebook(SFT_DIR, SFT_STEPS, _tps, smoltalk_rows=SMOLTALK_ROWS)
+print(f"SFT budget: {SFT_STEPS} steps x {_tps:,} tokens per step -> about {_budget/1e6:.0f}M tokens of conversations"
+      f" (+ {SMOLTALK_ROWS} SmolTalk rows). Planned views per row:")
+print("\\n".join(_lines))
+# The patch (sft_setup.patch_chat_sft; it stops if nanochat changed upstream):
+#  - the attention window: nanochat builds the SFT model from the BASE config (sequence 1024 on the t4 profile), so SFT
+#    used to train with a 1024 window while the checkpoint said 4096. Now the window is --max-seq-len (printed at the
+#    start as "SFT attention window: ...") and the checkpoint saves "trained_window" for the serving check.
+#  - the mix above; conversations longer than the window are skipped, never cut; at the end it prints how many rows
+#    of each file were actually read ("Training data actually read").
 p = "/content/nanochat/scripts/chat_sft.py"
-s = open(p).read()
-if "OOADialogues" not in s:
-    s = s.replace("from tasks.smoltalk import SmolTalk", "from tasks.smoltalk import SmolTalk\\nfrom tasks.ooa import OOADialogues")
-    a = s.index("train_tasks = [")
-    b = s.index("\\n", s.index("# total: 24K"))
-    new = f"""train_tasks = ([OOADialogues("{SFT_DIR}/train_flows.jsonl") for _ in range({FLOW_REPEAT})]
-               + [OOADialogues("{SFT_DIR}/train_catalog.jsonl"), OOADialogues("{SFT_DIR}/synth_train.jsonl"),
-                  OOADialogues("{SFT_DIR}/synth_pattern.jsonl")]) * {SFT_EPOCHS}
-import os as _os
-_extra = [OOADialogues("{SFT_DIR}/" + _f) for _f in ("self_improved.jsonl", "hard_fixed.jsonl", "feedback_train.jsonl")
-          if _os.path.exists("{SFT_DIR}/" + _f)]
-train_tasks += _extra * {SFT_EPOCHS}
-print0(f"extra self-learning files in the mix: {{len(_extra)}}")
-_nat = "{SFT_DIR}/natural_train.jsonl"     # everyday-wording requests for generated flows (upload to Drive sft/)
-if _os.path.exists(_nat):
-    train_tasks += [OOADialogues(_nat)] * ({NATURAL_REPEAT} * {SFT_EPOCHS})
-print0(f"natural-wording file in the mix: {{_os.path.exists(_nat)}}")
-_core = "{SFT_DIR}/core_train.jsonl"       # everyday requests for the most used actions (upload to Drive sft/)
-if _os.path.exists(_core):
-    train_tasks += [OOADialogues(_core)] * ({CORE_REPEAT} * {SFT_EPOCHS})
-print0(f"core-actions file in the mix: {{_os.path.exists(_core)}}")
-_chains = "{SFT_DIR}/chains_train.jsonl"   # everyday multi-step chains across tools (upload to Drive sft/)
-if _os.path.exists(_chains):
-    train_tasks += [OOADialogues(_chains)] * ({CORE_REPEAT} * {SFT_EPOCHS})
-print0(f"chains file in the mix: {{_os.path.exists(_chains)}}")
-_combos = "{SFT_DIR}/combos_train.jsonl"   # many different combinations, loops and conditions (upload to Drive sft/)
-if _os.path.exists(_combos):
-    train_tasks += [OOADialogues(_combos)] * ({CORE_REPEAT} * {SFT_EPOCHS})
-print0(f"combinations file in the mix: {{_os.path.exists(_combos)}}")
-_notask = "{SFT_DIR}/notask_train.jsonl"   # questions / chat / pasted errors -> short text reply, not a flow
-if _os.path.exists(_notask):
-    train_tasks += [OOADialogues(_notask)] * ({CORE_REPEAT} * {SFT_EPOCHS})
-print0(f"not-a-task file in the mix: {{_os.path.exists(_notask)}}")
-_tools = "{SFT_DIR}/tools_train.jsonl"   # business apps (Google, Microsoft 365, Asana, GitHub, Slack ...)
-if _os.path.exists(_tools):
-    train_tasks += [OOADialogues(_tools)] * ({CORE_REPEAT} * {SFT_EPOCHS})
-print0(f"business-apps file in the mix: {{_os.path.exists(_tools)}}")
-_scen = "{SFT_DIR}/scenarios_train.jsonl"   # whole business processes (3-8 steps, loops, conditions)
-if _os.path.exists(_scen):
-    train_tasks += [OOADialogues(_scen)] * ({SCEN_REPEAT} * {SFT_EPOCHS})
-print0(f"business-processes file in the mix: {{_os.path.exists(_scen)}}")
-for _f, _n in {NEW_FILES}.items():       # the new files: long processes, business areas, targeted, self-correction, questions
-    if _os.path.exists("{SFT_DIR}/" + _f):
-        train_tasks += [OOADialogues("{SFT_DIR}/" + _f)] * (_n * {SFT_EPOCHS})
-    print0(f"{{_f}} in the mix: {{_os.path.exists('{SFT_DIR}/' + _f)}}")
-if {SMOLTALK_ROWS} > 0:
-    train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
-train_dataset = TaskMixture(train_tasks)
-print0(f"OOA training mixture: {{len(train_dataset):,}} rows")
-val_dataset = TaskMixture([OOADialogues("{SFT_DIR}/val.jsonl")])"""
-    s = s[:a] + new + s[b:]
-    # never train on a cut-off flow: nanochat truncates conversations to 2048 tokens; skip ones longer than a row instead
-    old_r = "            ids, mask = tokenizer.render_conversation(conversation)\\n            conv_buffer.append((ids, mask))"
-    new_r = ("            ids, mask = tokenizer.render_conversation(conversation, max_tokens=10**9)\\n"
-             "            if len(ids) <= row_capacity:\\n"
-             "                conv_buffer.append((ids, mask))\\n"
-             "            else:\\n"
-             "                skipped_long[0] += 1")
-    assert old_r in s, "chat_sft.py loader changed upstream"
-    s = s.replace(old_r, new_r)
-    s = s.replace("last_step = False # we will toggle this", "skipped_long = [0]\\nlast_step = False # we will toggle this")
-    s = s.replace('print0(f"Total training time:', 'print0(f"Conversations skipped as longer than the window (not cut): {skipped_long[0]}")\\nprint0(f"Total training time:')
-    open(p, "w").write(s)
-    print("patched chat_sft.py")
+open(p, "w").write(_T.patch_chat_sft(open(p).read(), SFT_DIR, VIEWS, smoltalk_rows=SMOLTALK_ROWS))
+print("patched chat_sft.py")
 # keep the previous model: nanochat loads the highest step in chatsft_checkpoints, so move it aside (never deleted)
-import shutil, time
 _ck = os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatsft_checkpoints")
 if os.path.exists(_ck):
     _keep = _ck + "_before_" + time.strftime("%Y%m%d_%H%M%S")
@@ -374,18 +342,26 @@ sys.path.insert(0, "/content/nanochat")
 import torch
 from nanochat.checkpoint_manager import load_model as _load_model
 from nanochat.engine import Engine as _Engine
-_model, _tok, _ = _load_model(EVAL_SOURCE, torch.device("cuda"), phase="eval")
+_model, _tok, _meta = _load_model(EVAL_SOURCE, torch.device("cuda"), phase="eval")
 _engine = _Engine(_model, _tok)
 _stop = {_tok.encode_special("<|assistant_end|>"), _tok.get_bos_token_id()}
+from model_backend import window_check as _window_check, base_window as _base_window
+_tw, _ww = _window_check(_meta, _base_window(os.environ["NANOCHAT_BASE_DIR"]))
+print("attention window: served", _model.config.sequence_len, "| trained", _tw, "|", _ww or "OK (trained = served)")
+_last = {"ended": False, "tokens": 0, "json_stopped": False}
 def run_cli(prompt, max_tokens=3000):
-    """Same output shape as chat_cli ("Assistant: <answer>"), temperature 0.2, without reloading the model."""
+    """Same output shape as chat_cli ("Assistant: <answer>"), temperature 0.2, without reloading the model. This is the
+    BARE model (no loop guard, no catalog lock): _last says whether it ended on its own and how many tokens it wrote."""
     ids = [_tok.get_bos_token_id(), _tok.encode_special("<|user_start|>")] + _tok.encode(prompt) + \
           [_tok.encode_special("<|user_end|>"), _tok.encode_special("<|assistant_start|>")]
-    out = []
-    for col, _ in _engine.generate(ids, num_samples=1, max_tokens=max_tokens, temperature=0.2, top_k=50):
+    out, ended = [], False
+    _cap = max(64, min(max_tokens, _model.config.sequence_len - len(ids)))     # never past the window
+    for col, _ in _engine.generate(ids, num_samples=1, max_tokens=_cap, temperature=0.2, top_k=50):
         if col[0] in _stop:
+            ended = True
             break
         out.append(col[0])
+    _last.update(ended=ended, tokens=len(out))
     return "Assistant: " + _tok.decode(out)
 # the new model (trained on sft_render) reads each request with a "### Context" block and answers "Plan: ... Flow: {...}";
 # the prompt is built exactly as the server and Studio build it (serving/ooa_server.Router.prompt)
@@ -398,14 +374,23 @@ _prompter = _S.Router(f"{_EV_DIR}/catalog.jsonl", "/content/platform", _S.Policy
                       _EV_EXAMPLES, "context" if NEW_FORMAT else "plain")
 print("prompt format:", "context + plan (new)" if NEW_FORMAT else "plain request (old model)")
 _kinds = {}
+_cat_entries = {json.loads(l)["id"]: json.loads(l) for l in open(f"{_EV_DIR}/catalog.jsonl")}
 def ask(request):
-    """The model's flow JSON text for a plain request (plan stripped); questions / replies give their text."""
+    """The model's flow JSON text for a plain request (plan stripped); questions / replies give their text. A compact
+    answer (a model trained with ANSWER_FORMAT "compact") is expanded into the full flow the way the server does it
+    (ooa_format.expand_flow); a full answer (older models) is used as written. _last["json_stopped"]: the answer ended
+    on its own and its flow is one valid JSON object."""
     text = run_cli(_prompter.prompt(request) if NEW_FORMAT else request)
     text = text.split("Assistant:", 1)[-1].split("<|assistant_end|>")[0].strip()
     if not NEW_FORMAT:
+        _last["json_stopped"] = _last["ended"] and _F.flow_object(text) is not None
         return text
-    ans = _F.parse_answer(text)
+    ans = _F.parse_answer(text, expand=True, catalog=_cat_entries, request=request)
     _kinds[ans["kind"]] = _kinds.get(ans["kind"], 0) + 1
+    if ans.get("expanded"):
+        _kinds["expanded (compact answers)"] = _kinds.get("expanded (compact answers)", 0) + 1
+    _last["json_stopped"] = (_last["ended"] and ans["kind"] == "flow"
+                             and _F.flow_object(ans.get("compact_text") or ans.get("flow_text")) is not None)
     return ans.get("flow_text") or ans.get("text") or ""
 import jsonschema
 schema = json.load(open("/content/platform/contracts/flow-schema/flow.v1.json"))
@@ -477,10 +462,13 @@ for _f, _label in _sets:
         sc = RW.score(_txt)
         try: got = RW.actions_of(json.loads(RW.clean(_txt)))
         except Exception: got = []
-        pl.append((sc["valid"], sc["valid"] and _in_order(row["must"], got)))
-        print(("OK  " if pl[-1][1] else ("VALID" if pl[-1][0] else "FAIL ")), row["prompt"][:70], "->", got[:6])
-    _summary.append(f"{_label.split(':')[0]}: {sum(o for _, o in pl)}/{len(pl)} right ({sum(v for v, _ in pl)} pass every rule)")
-print("\\nplain-wording eval (bare model) | " + " | ".join(_summary))
+        pl.append((sc["valid"], sc["valid"] and _in_order(row["must"], got), _last["json_stopped"], _last["ended"], _last["tokens"]))
+        print(("OK  " if pl[-1][1] else ("VALID" if pl[-1][0] else "FAIL ")), f"{_last['tokens']:>5} tok",
+              "ended" if _last["ended"] else "CUT  ", row["prompt"][:56], "->", got[:6])
+    _summary.append(f"{_label.split(':')[0]}: {sum(x[1] for x in pl)}/{len(pl)} right ({sum(x[0] for x in pl)} pass every rule, "
+                    f"{sum(x[2] for x in pl)} valid JSON and stopped, {sum(not x[3] for x in pl)} cut at the token cap, "
+                    f"median {sorted(x[4] for x in pl)[len(pl) // 2]} answer tokens)")
+print("\\nplain-wording eval (BARE model: raw generation, no loop guard, no catalog lock, no repair) | " + " | ".join(_summary))
 if NEW_FORMAT:
     print("answer kinds (flow / question / reply):", _kinds)
 if ASSISTANT_EVAL:
@@ -518,23 +506,40 @@ print("\\nTry it yourself:")
 !cd /content/nanochat && python -m scripts.chat_cli -i sft -p "Which OOA action would I use to read a CSV file into a table?" -t 0.2
 ''')
 
+def gated(t):
+    """A cell that runs only when OLD_FORMAT_CELLS is True (cell 1): cells 9-13 still send plain prompts and read plain
+    JSON answers capped at 1024 tokens, so against a model trained on the context + plan (+ compact) format they would
+    score and train on the wrong thing. Off by default, with a clear note."""
+    lines = t.strip("\n").splitlines()
+    head = [lines[0]] if lines and lines[0].startswith("#@title") else []
+    body = lines[len(head):]
+    note = ('print("Skipped (OLD_FORMAT_CELLS = False in cell 1): this cell still uses plain prompts and plain-JSON answers '
+            'capped at 1024 tokens, but the model from cells 6d-7 is trained on the context + plan format with compact '
+            'answers. It must not run against that model. Set OLD_FORMAT_CELLS = True only for a model trained on the '
+            'old format.")')
+    code("\n".join(head + ["if not globals().get(\"OLD_FORMAT_CELLS\", False):", "    " + note, "else:"]
+                   + [("    " + l) if l.strip() else l for l in body]))
+
+
 import colab_rl_cells
-colab_rl_cells.build(md, code)
+colab_rl_cells.build(md, gated)
 
 import base64, zlib
 _frozen = {n: (H / "autoresearch/frozen" / n).read_text(encoding="utf-8") for n in ("frozen_eval.jsonl", "frozen_catalog.jsonl", "frozen_eval.sha256")}
 FROZEN_BLOB = base64.b64encode(zlib.compress(json.dumps(_frozen).encode(), 9)).decode()
 import colab_assistant_cell
-colab_assistant_cell.build(md, code)
+colab_assistant_cell.build(md, gated)
 import colab_ar_cells
-colab_ar_cells.build(md, code, FROZEN_BLOB)
+colab_ar_cells.build(md, gated, FROZEN_BLOB)
 
 md("""
 ## After this run
 - Checkpoints: `DRIVE_DIR/nanochat_base/base_checkpoints` (pretrained) and `chatsft_checkpoints` (OOA-trained).
 - Weak results on the held-out test are expected with the seed data. The next lever is more and better dialogues
   (edits, error fixing, missing-input questions), validated with the scorer in `eval/flow_check.py`.
-- Reinforcement layer: cells 9-10 (RL with the verifier as reward; self-improvement rounds). Feed real usage back with `ingest_feedback.py`.
+- Reinforcement layer: cells 9-10 (RL with the verifier as reward; self-improvement rounds). They, autoresearch (12) and the
+  whole-assistant demo (13) still use plain prompts and plain-JSON answers, so they are off (`OLD_FORMAT_CELLS = False`)
+  for models trained on the context + plan format. The full assistant is tested in cell 8. Feed real usage back with `ingest_feedback.py`.
 - For a stronger base, use `PROFILE = "t4"` and let it run (resume after disconnects), or an A100 on Colab Pro.
 """)
 
