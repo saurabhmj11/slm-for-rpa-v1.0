@@ -89,7 +89,10 @@ def main():
     ap.add_argument("platform")
     ap.add_argument("eval_dir", nargs="?", default=str(Path(__file__).resolve().parent.parent / "eval"))
     ap.add_argument("--cap", type=int, default=60, help="most rows kept per action sequence")
+    ap.add_argument("--max-chars", type=int, default=MAX_CHARS, help="longest row in characters (6500 for a 2048-token window)")
     a = ap.parse_args()
+    global MAX_CHARS
+    MAX_CHARS = a.max_chars
     sft, out = Path(a.sft), Path(a.out)
     catalog_path = sft / "catalog.jsonl"
     if not catalog_path.exists():

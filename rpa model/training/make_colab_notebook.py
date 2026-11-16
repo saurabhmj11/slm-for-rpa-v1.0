@@ -73,8 +73,10 @@ P = PROFILES[PROFILE]
 NUM_ITERS = P["tokens"] // P["total_batch"]
 
 # SFT (training on our use case)
-SFT_SEQ = 2048             # flows longer than this get cut; the T4 cannot afford much more
-SFT_DEVICE_BATCH = 4
+SFT_SEQ = 4096             # context window in tokens for SFT (was 2048): long flows fit whole instead of in parts
+SFT_DEVICE_BATCH = 2       # rows per GPU step; 2 x 4096 = the same tokens as 4 x 2048. If the T4 runs out of memory, use 1
+ROW_CHARS = 6500 * SFT_SEQ // 2048    # longest training row in characters (filter and render)
+ROW_TOKENS = SFT_SEQ - 28             # longest training row in estimated tokens (render)
 SFT_EPOCHS = 2 if PROFILE == "smoke" else 6      # passes over the OOA data (the seed set is small)
 NATURAL_REPEAT = 5         # passes over sft/natural_train.jsonl per epoch, if that file is in Drive (everyday wording)
 CORE_REPEAT = 5            # passes over sft/core_train.jsonl per epoch, if in Drive (everyday requests for the 65 most used actions)
@@ -100,7 +102,7 @@ NEW_FILES = {"long_train.jsonl": 15, "business2_train.jsonl": 15, "targeted_trai
              "fix_train.jsonl": 5, "clarify_train.jsonl": 5}                                     # -> times per epoch
 ASSISTANT_EVAL = True      # cell 8 also scores the full assistant (real action names only, repair, loop guard), as users get it
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
-MAX_FLOW_CHARS = 9000      # skip training flows longer than this (about SFT_SEQ tokens)
+MAX_FLOW_CHARS = 9000 * SFT_SEQ // 2048   # skip training flows longer than this (about SFT_SEQ tokens)
 print(PROFILE, P, "iterations:", NUM_ITERS)
 print("SFT settings -> SYNTH_TRAIN:", SYNTH_TRAIN, "| SFT_EPOCHS:", SFT_EPOCHS, "| SFT_ITERS cap:", SFT_ITERS, "| CLEAN_DATA:", CLEAN_DATA)
 ''')
@@ -241,14 +243,14 @@ if CLEAN_DATA:
     # strict filter: structure, length, leaked variable names, repeated clauses, platform rules (after adding missing
     # open/save steps), stale actions, wrong app, closeness to a test request, duplicates, conflicts, over-represented
     # action sequences. Report: sft_clean/filter_report.json
-    !python /content/ooa/data_filter.py {DRIVE_DIR}/sft {DRIVE_DIR}/sft_clean /content/platform /content/ooa --cap 60
+    !python /content/ooa/data_filter.py {DRIVE_DIR}/sft {DRIVE_DIR}/sft_clean /content/platform /content/ooa --cap 60 --max-chars {ROW_CHARS}
 ''' % json.dumps(files))
 
 code('''
 #@title 6d. Write the data in the plan-first format (new): sft_clean + the new files -> sft_render
 # Every request gets a "### Context" block (the likely actions, 0-2 similar examples, sometimes the agent's variables)
 # and every answer becomes "Plan: 1. ... 2. ..." then "Flow: {...}". Flows too long for the 2048-token window are
-# written as their parts. Variables are written $name$ as the platform now saves them. About 3-5 minutes.
+# written as their parts (window = SFT_SEQ tokens). Variables are written $name$ as the platform now saves them. About 3-5 minutes.
 import glob, shutil
 _src = f"{DRIVE_DIR}/sft_clean" if CLEAN_DATA and os.path.exists(f"{DRIVE_DIR}/sft_clean/filter_report.json") else f"{DRIVE_DIR}/sft"
 _extra = [f"{DRIVE_DIR}/sft/{f}" for f in NEW_FILES if os.path.exists(f"{DRIVE_DIR}/sft/{f}")]
@@ -261,7 +263,7 @@ if RENDER:
     if os.path.exists(f"{DRIVE_DIR}/sft_render"):
         shutil.rmtree(f"{DRIVE_DIR}/sft_render")
     _x = " ".join(_extra)
-    !cd /content/ooa && python render_dataset.py {_src} {DRIVE_DIR}/sft_render --catalog {DRIVE_DIR}/sft/catalog.jsonl --extra {_x}
+    !cd /content/ooa && python render_dataset.py {_src} {DRIVE_DIR}/sft_render --catalog {DRIVE_DIR}/sft/catalog.jsonl --max-chars {ROW_CHARS} --max-tokens {ROW_TOKENS} --extra {_x}
     # catalog question rows stay as they are
     shutil.copy(f"{_src}/train_catalog.jsonl", f"{DRIVE_DIR}/sft_render/train_catalog.jsonl")
     _r = json.load(open(f"{DRIVE_DIR}/sft_render/render_report.json"))
