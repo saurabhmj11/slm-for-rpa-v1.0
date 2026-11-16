@@ -83,6 +83,7 @@ def is_neutral(path):
 
 
 def main():
+    global MAX_CHARS
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sft")
     ap.add_argument("out")
@@ -91,7 +92,6 @@ def main():
     ap.add_argument("--cap", type=int, default=60, help="most rows kept per action sequence")
     ap.add_argument("--max-chars", type=int, default=MAX_CHARS, help="longest row in characters (6500 for a 2048-token window)")
     a = ap.parse_args()
-    global MAX_CHARS
     MAX_CHARS = a.max_chars
     sft, out = Path(a.sft), Path(a.out)
     catalog_path = sft / "catalog.jsonl"
