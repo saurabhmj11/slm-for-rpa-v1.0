@@ -38,7 +38,8 @@ The model format is defined in `training/ooa_format.py`; training data is render
 6. Decomposition (parts first): when the plan is over 6 lines (over 4 for a request of 5+ clauses) the first answer
    stops right after its plan and the flow is built in parts at once (`ooa_format.plan_parts`: up to 4 items / 5 plan
    lines each; a long loop is cut and its later children are built as parts that go inside it), each a short answer
-   (1,500 tokens), with the variables made so far; the merged flow must pass the checker. If the parts fail, the
+   (1,500 tokens) that starts with the part's own plan lines (given as the answer's start, so the model writes only
+   the flow), with the variables made so far; the merged flow must pass the checker. If the parts fail, the
    remaining attempts are whole answers. A backend without `on_plan` gets the old order (one whole attempt first).
 7. Escalation (only when allowed): after the local attempts fail, or at once when the plan is over 12 lines.
 8. Safety: `training/safety.py` warnings for destructive steps go into notes, `warnings` and the `ooa` field.

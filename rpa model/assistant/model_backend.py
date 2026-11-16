@@ -102,13 +102,13 @@ class AnswerWatch:
       - one step id is written max_same_id times (ids are unique in every training flow).
     on_plan(plan_lines) -> bool is called once, when the plan is complete ("Flow:" starts): True stops the answer there
     (reason "plan": the caller builds the flow in parts from the plan instead). self.reason says why it stopped;
-    self.kind is "loop" or "plan"."""
+    self.kind is "loop" or "plan". prefix: text the answer was started with (given, not generated)."""
 
-    def __init__(self, decode, on_plan=None, max_plan_lines=40, max_same_line=12, max_same_id=3, every=8):
+    def __init__(self, decode, on_plan=None, max_plan_lines=40, max_same_line=12, max_same_id=3, every=8, prefix=""):
         self.decode, self.on_plan = decode, on_plan
         self.max_plan_lines, self.max_same_line, self.max_same_id, self.every = (max_plan_lines, max_same_line,
                                                                                   max_same_id, every)
-        self.text, self.flow_at, self.plan_lines, self.n = "", -1, None, 0
+        self.text, self.flow_at, self.plan_lines, self.n = prefix or "", -1, None, 0
         self.reason = self.kind = None
         self._lines_seen = defaultdict(int)
         self._done_lines = 0
@@ -253,14 +253,17 @@ class NanochatLocal:
             return max(MIN_ANSWER, min(max_tokens, self.sequence_len - len(prompt_ids) - 1))
         return max_tokens
 
-    def _run(self, text, max_tokens, temperature, seed, guard=None, on_token=None, attempt=0, flow=False, on_plan=None):
+    def _run(self, text, max_tokens, temperature, seed, guard=None, on_token=None, attempt=0, flow=False, on_plan=None,
+             prefix=None):
         """Stream one reply. Returns the decoded text; details go to self.last_stats (stop: "end", "max_tokens",
-        "loop: <why>", "plan: <why>" when on_plan asked to stop after the plan, "not a flow")."""
+        "loop: <why>", "plan: <why>" when on_plan asked to stop after the plan, "not a flow"). prefix: the start of the
+        reply, given (e.g. a plan and "Flow:"): the model continues it, and the text returned starts with it."""
         use_guard = self.guard_enabled if guard is None else guard
-        g = Guards(RepetitionGuard(), AnswerWatch(self._decode1, on_plan)) if use_guard else (
-            Guards(AnswerWatch(self._decode1, on_plan, max_plan_lines=10 ** 6, max_same_line=10 ** 6,
+        prefix = prefix or ""
+        g = Guards(RepetitionGuard(), AnswerWatch(self._decode1, on_plan, prefix=prefix)) if use_guard else (
+            Guards(AnswerWatch(self._decode1, on_plan, prefix=prefix, max_plan_lines=10 ** 6, max_same_line=10 ** 6,
                                max_same_id=10 ** 6)) if on_plan is not None else None)
-        prompt = self._prompt(text)
+        prompt = self._prompt(text) + (self.tok.encode(prefix) if prefix else [])
         max_tokens = self.token_budget(prompt, max_tokens)
         out, reason, t0 = [], "max_tokens", time.time()
         if self.constraint is not None and on_token is None:
@@ -273,7 +276,7 @@ class NanochatLocal:
                 reason = "plan: " + g.reason
             self.last_stats = {"tokens": len(ids), "stop": reason, "seconds": round(time.time() - t0, 2), "ids": ids,
                                "names_locked": ncon, "names_corrected": nch, "max_tokens": max_tokens}
-            return self.tok.decode(ids)
+            return prefix + self.tok.decode(ids)
         stream = self.engine.generate(prompt, num_samples=1, max_tokens=max_tokens,
                                       temperature=temperature, top_k=50, seed=seed)
         for column, _ in stream:
@@ -295,17 +298,18 @@ class NanochatLocal:
         stream.close()
         self.last_stats = {"tokens": len(out), "stop": reason, "seconds": round(time.time() - t0, 2), "ids": out,
                            "max_tokens": max_tokens}
-        return self.tok.decode(out)
+        return prefix + self.tok.decode(out)
 
     def count_tokens(self, text):
         """Tokens in text with the model's own tokenizer (for the usage numbers of the OpenAI-style answer)."""
         return len(self.tok.encode(text))
 
-    def generate(self, request, attempt=0, max_tokens=MAX_ANSWER, on_plan=None):
+    def generate(self, request, attempt=0, max_tokens=MAX_ANSWER, on_plan=None, prefix=None):
         """One answer. max_tokens is cut to what the window leaves (token_budget); on_plan(plan_lines) -> True stops
-        the answer when its plan is complete (last_stats["stop"] then starts with "plan:")."""
+        the answer when its plan is complete (last_stats["stop"] then starts with "plan:"); prefix: the answer's
+        start, given (the server gives a part its plan lines and "Flow:", so only the flow JSON is written)."""
         return self._run(request, max_tokens, 0.2 + 0.3 * attempt, 1000 + attempt, attempt=attempt, flow=True,
-                         on_plan=on_plan)
+                         on_plan=on_plan, prefix=prefix)
 
     def ask(self, question):
         return self._run(question, 300, 0.2, 1000).strip()
@@ -383,8 +387,9 @@ class FakeModel:
             return F.render_flow_answer(flow, self.catalog)
         return json.dumps(flow, separators=(",", ":"))
 
-    def generate(self, request, attempt=0, max_tokens=2500, on_plan=None):
-        """on_plan as NanochatLocal: a plan-first answer whose plan it accepts is cut after the plan (stop "plan")."""
+    def generate(self, request, attempt=0, max_tokens=2500, on_plan=None, prefix=None):
+        """on_plan as NanochatLocal: a plan-first answer whose plan it accepts is cut after the plan (stop "plan").
+        prefix: the answer starts with it and goes on with the flow JSON of its canned answer."""
         self.calls.append((request, attempt))
         if self.script:
             text = self.script[min(len(self.calls), len(self.script)) - 1]
@@ -396,6 +401,8 @@ class FakeModel:
         if on_plan is not None and ans["plan"] and ans["flow_text"] is not None and on_plan(ans["plan"]):
             text = text[:text.index("\n" + F.FLOW_HEAD) + 1] + F.FLOW_HEAD
             self.last_stats = {"tokens": len(text) // 3, "stop": "plan: build the flow in parts", "seconds": 0.0}
+        if prefix:
+            text = prefix + (ans["flow_text"] if ans["flow_text"] is not None else text)
         return text
 
     def ask(self, question):

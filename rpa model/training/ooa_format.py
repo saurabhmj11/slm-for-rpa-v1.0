@@ -493,6 +493,26 @@ def chunk_request(chunk):
     return (text[:1].upper() + text[1:]).rstrip(".") + "."
 
 
+def chunk_plan_lines(chunk):
+    """The plan lines of one part, as plan_from_flow writes a part flow's plan: numbered from 1, indented from the
+    part's own top level, branch words and action ids kept ("Otherwise: Move it (ooa.file/move)")."""
+    items = [it for g in chunk for it in g]
+    if not items:
+        return []
+    base = min(it["depth"] for it in items)
+    out = []
+    for n, it in enumerate(items, 1):
+        m = _BRANCH_PREFIX.match(_PLAN_LINE.match(it["line"]).group("text") or "")
+        text = (m.group(0) if m else "") + (it["text"] or it["action"] or "")
+        out.append("  " * (it["depth"] - base) + f"{n}. {text}" + (f" ({it['action']})" if it["action"] else ""))
+    return out
+
+
+def answer_prefix(plan_lines):
+    """The start of a plan-first answer given its plan: "Plan:\n<lines>\nFlow:\n" (the model writes the flow)."""
+    return PLAN_HEAD + "\n" + "\n".join(plan_lines) + "\n" + FLOW_HEAD + "\n"
+
+
 def chunk_actions(chunk):
     return list(dict.fromkeys(it["action"] for g in chunk for it in g if it["action"]))
 

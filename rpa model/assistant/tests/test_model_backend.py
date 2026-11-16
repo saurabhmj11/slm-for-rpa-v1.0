@@ -127,6 +127,19 @@ def test_answer_watch_on_plan_stops_after_the_plan():
     assert _watch_feed(g, PLAN3 + "{", pieces=1) and g.kind == "plan"
 
 
+def test_answer_watch_with_given_plan():
+    """A part's answer starts with its plan (prefix, given): the watch knows the plan before the first token."""
+    w = AnswerWatch(lambda piece: piece, prefix=PLAN3)
+    bad = '{"kind":"TaskBot","steps":[' + "".join(_step(i) for i in range(1, 30))
+    assert _watch_feed(w, bad) is not None and "for a plan of 3 lines" in w.reason
+    w = AnswerWatch(lambda piece: piece, prefix=PLAN3)
+    assert _watch_feed(w, '{"kind":"TaskBot","steps":[' + _step(1) + _step(2) + _step(3) + "]}") is None
+    m = FakeModel(style="plan", catalog={})
+    req = "Read a CSV file into a table, then write the table to an Excel sheet"
+    out = m.generate(req, prefix=PLAN3)
+    assert out.startswith(PLAN3) and out[len(PLAN3):].startswith("{")
+
+
 def test_fake_model_on_plan():
     F = _fmt()
     m = FakeModel(style="plan", catalog={})

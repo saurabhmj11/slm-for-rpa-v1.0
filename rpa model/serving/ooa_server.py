@@ -62,6 +62,7 @@ class Policy:
     long_plan_lines: int = 4             # ... is built in parts when its plan is longer than this
     max_tokens: int = 2500               # tokens for a whole answer (the backend also keeps it inside its window)
     part_max_tokens: int = 1500          # tokens for the answer of one part
+    part_plan_given: bool = True         # a part's answer starts with its plan lines (backends that take prefix)
     part_lines: int = 5                  # plan lines per part (ooa_format.plan_parts; a long loop's body is cut too)
 
     @classmethod
@@ -119,7 +120,7 @@ def parse_messages(messages):
 
 def call_generate(model, prompt, attempt=0, **options):
     """model.generate(prompt, attempt, **options) with only the options its generate takes (all of them when it takes
-    **kwargs): max_tokens and on_plan are newer than some backends (serving/backends.py, test doubles)."""
+    **kwargs): max_tokens, on_plan and prefix are newer than some backends (serving/backends.py, test doubles)."""
     fn = model.generate
     try:
         params = inspect.signature(fn).parameters
@@ -305,7 +306,7 @@ class Router:
 
     # -- the local model's layers ------------------------------------------------------------------------
     def generate(self, prompt, attempt, **options):
-        """The local model's answer; options (max_tokens, on_plan) only when its generate takes them. Returns
+        """The local model's answer; options (max_tokens, on_plan, prefix) only when its generate takes them. Returns
         (text, stop) where stop is the backend's last_stats["stop"] ("end", "max_tokens", "loop: ...", "plan: ...")
         or None when it does not say."""
         raw = call_generate(self.local, prompt, attempt, **options)
@@ -424,12 +425,15 @@ class Router:
                     known.append({"name": item, "type": "Any", "direction": "local"})
                 creq = f"With the current {item}: {creq[:1].lower() + creq[1:]}"
             part, prev, probs = None, None, None
+            prefix = F.answer_prefix(F.chunk_plan_lines(chunk)) if self.policy.part_plan_given else None
             for attempt in range(max(1, self.policy.part_attempts)):
                 if late():
                     return None, [OUT_OF_TIME]
                 prompt = self.prompt(creq, known, prev, probs, required=need) if fmt == "context" else creq
                 try:
-                    raw, stop = self.generate(prompt, attempt, max_tokens=self.policy.part_max_tokens)
+                    # the part's plan is known: give it as the answer's start, so the model writes only the flow
+                    raw, stop = self.generate(prompt, attempt, max_tokens=self.policy.part_max_tokens,
+                                              prefix=prefix if fmt == "context" else None)
                 except Exception as ex:
                     return None, [f"local model error: {ex}"]
                 ans = F.parse_answer(raw)

@@ -137,6 +137,11 @@ def test_plan_parts_cut_a_long_loop():
         [["1", "2", "3", "4", "5"], ["6", "7", "8"], ["9"]]
     assert F.chunk_request(parts[1]["chunk"]) == "If they match: Move to verified, otherwise: Move to quarantine."
     assert F.chunk_actions(parts[0]["chunk"]) == ["ooa.file/list", "core/loop", "ooa.file/read_text", "ooa.crypto/hmac"]
+    assert F.chunk_plan_lines(parts[1]["chunk"]) == ["1. If they match (core/if)", "  2. Move to verified (ooa.file/move)",
+                                                     "  3. Otherwise: Move to quarantine (ooa.file/move)"]
+    pre = F.answer_prefix(F.chunk_plan_lines(parts[0]["chunk"]))
+    assert pre.startswith("Plan:\n1. List the files (ooa.file/list)\n2. For each file (core/loop)\n  3. Read it")
+    assert pre.endswith("\nFlow:\n") and F.parse_answer(pre + "{}")["plan"] == F.chunk_plan_lines(parts[0]["chunk"])
     # short plans and long non-loop groups are not cut
     assert [p["inside"] for p in F.plan_parts(plan[:4])] == [False]
     iff = ["1. If it is late (core/if)"] + [f"  {i}. Step {i} (core/log)" for i in range(2, 9)]

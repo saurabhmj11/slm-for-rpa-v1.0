@@ -159,10 +159,13 @@ class PlanAware(Scripted):
         super().__init__(answer)
         self.options, self.stops, self.last_stats = [], dict(stops or {}), {}
 
-    def generate(self, prompt, attempt=0, max_tokens=2500, on_plan=None):
+    def generate(self, prompt, attempt=0, max_tokens=2500, on_plan=None, prefix=None):
         self.options.append({"max_tokens": max_tokens, "on_plan": on_plan is not None})
+        self.prefixes = getattr(self, "prefixes", []) + [prefix]
         text = Scripted.generate(self, prompt, attempt)
         a = F.parse_answer(text)
+        if prefix:
+            return prefix + (a["flow_text"] or "")
         self.last_stats = {"stop": self.stops.get(len(self.prompts) - 1, "end")}
         if on_plan is not None and a["plan"] and a["flow_text"] is not None and on_plan(a["plan"]):
             self.last_stats = {"stop": "plan: build the flow in parts"}
@@ -230,6 +233,10 @@ def test_parts_first_stops_after_the_plan():
     assert m.options[0] == {"max_tokens": 2500, "on_plan": True} and len(m.prompts) == 4
     assert all(o == {"max_tokens": 1500, "on_plan": False} for o in m.options[1:]), m.options
     assert res["attempts"][0].get("plan_only") and [a.get("part") for a in res["attempts"][1:4]] == [1, 2, 3]
+    # each part's answer starts with its own plan lines (renumbered, de-indented), the model writes only the flow
+    assert m.prefixes[0] is None and m.prefixes[2] == ("Plan:\n1. Copy it to the archive (ooa.file/copy)\n"
+                                                       "2. Move it to verified (ooa.file/move)\n"
+                                                       "3. Log the move (core/log)\nFlow:\n"), m.prefixes
     flow = json.loads(res["flow"])
     assert F.outline(flow) == F.outline(LOOP_WHOLE), F.outline(flow)
     # a short plan is answered whole, as before
