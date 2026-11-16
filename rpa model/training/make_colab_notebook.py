@@ -22,6 +22,9 @@ files = {
     "retrieval.py": (H / "retrieval.py").read_text(encoding="utf-8"),
     "repair.py": (H / "repair.py").read_text(encoding="utf-8"),
     "data_filter.py": (H / "data_filter.py").read_text(encoding="utf-8"),
+    "ooa_format.py": (H / "ooa_format.py").read_text(encoding="utf-8"),
+    "render_dataset.py": (H / "render_dataset.py").read_text(encoding="utf-8"),
+    "safety.py": (H / "safety.py").read_text(encoding="utf-8"),
     "model_backend.py": (H.parent / "assistant/model_backend.py").read_text(encoding="utf-8"),
     "constrained.py": (H.parent / "assistant/constrained.py").read_text(encoding="utf-8"),
     "serving/ooa_server.py": (H.parent / "serving/ooa_server.py").read_text(encoding="utf-8"),
@@ -92,6 +95,9 @@ EVAL_SOURCE = "sft"        # which model the test cell loads: "sft" or "rl"
 SFT_ITERS = 400 if PROFILE == "smoke" else 16000           # counted in MICRO-batches (4 per optimizer step): 16000 = 4000 steps, about 75 min on a T4 (was 10000: too short for long flows)
 CLEAN_DATA = True          # cell 6 runs the strict data filter (sft/ -> sft_clean/) and cell 7 trains on the cleaned data
 SCEN_REPEAT = 15           # whole business processes are long and few: weight them 3x the other files (CORE_REPEAT)
+RENDER = True              # cell 6d writes the data in the plan-first format with retrieval context (sft_render/); cell 7 trains on it
+NEW_FILES = {"long_train.jsonl": 15, "business2_train.jsonl": 15, "targeted_train.jsonl": 8,   # new files in Drive sft/
+             "fix_train.jsonl": 5, "clarify_train.jsonl": 5}                                     # -> times per epoch
 ASSISTANT_EVAL = True      # cell 8 also scores the full assistant (real action names only, repair, loop guard), as users get it
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
 MAX_FLOW_CHARS = 9000      # skip training flows longer than this (about SFT_SEQ tokens)
@@ -239,9 +245,36 @@ if CLEAN_DATA:
 ''' % json.dumps(files))
 
 code('''
+#@title 6d. Write the data in the plan-first format (new): sft_clean + the new files -> sft_render
+# Every request gets a "### Context" block (the likely actions, 0-2 similar examples, sometimes the agent's variables)
+# and every answer becomes "Plan: 1. ... 2. ..." then "Flow: {...}". Flows too long for the 2048-token window are
+# written as their parts. Variables are written $name$ as the platform now saves them. About 3-5 minutes.
+import glob, shutil
+_src = f"{DRIVE_DIR}/sft_clean" if CLEAN_DATA and os.path.exists(f"{DRIVE_DIR}/sft_clean/filter_report.json") else f"{DRIVE_DIR}/sft"
+_extra = [f"{DRIVE_DIR}/sft/{f}" for f in NEW_FILES if os.path.exists(f"{DRIVE_DIR}/sft/{f}")]
+for f in NEW_FILES:
+    if not os.path.exists(f"{DRIVE_DIR}/sft/{f}"):
+        print("MISSING in Drive sft/ (upload it):", f)
+for f in glob.glob(f"{DRIVE_DIR}/sft/* (*).jsonl"):
+    print("WARNING: Drive copy with (n) in the name, delete it and keep one file:", f)
+if RENDER:
+    if os.path.exists(f"{DRIVE_DIR}/sft_render"):
+        shutil.rmtree(f"{DRIVE_DIR}/sft_render")
+    _x = " ".join(_extra)
+    !cd /content/ooa && python render_dataset.py {_src} {DRIVE_DIR}/sft_render --catalog {DRIVE_DIR}/sft/catalog.jsonl --extra {_x}
+    # catalog question rows stay as they are
+    shutil.copy(f"{_src}/train_catalog.jsonl", f"{DRIVE_DIR}/sft_render/train_catalog.jsonl")
+    _r = json.load(open(f"{DRIVE_DIR}/sft_render/render_report.json"))
+    print("rendered from", _src, "+", len(_extra), "new files ->", f"{DRIVE_DIR}/sft_render")
+    print(json.dumps({k: v for k, v in _r.items() if not isinstance(v, (dict, list))}, indent=1))
+''')
+
+code('''
 #@title 7. Patch nanochat SFT to use our data, then train
 import re, shutil
 SFT_DIR = f"{DRIVE_DIR}/sft_clean" if CLEAN_DATA and os.path.exists(f"{DRIVE_DIR}/sft_clean/filter_report.json") else f"{DRIVE_DIR}/sft"
+if RENDER and os.path.exists(f"{DRIVE_DIR}/sft_render/render_report.json"):
+    SFT_DIR = f"{DRIVE_DIR}/sft_render"
 print("training data:", SFT_DIR)
 # always start from the pinned nanochat scripts, so an earlier patch can never hide the current data mix
 !cd /content/nanochat && git checkout -q -- scripts/chat_sft.py scripts/chat_cli.py
@@ -287,6 +320,10 @@ _scen = "{SFT_DIR}/scenarios_train.jsonl"   # whole business processes (3-8 step
 if _os.path.exists(_scen):
     train_tasks += [OOADialogues(_scen)] * ({SCEN_REPEAT} * {SFT_EPOCHS})
 print0(f"business-processes file in the mix: {{_os.path.exists(_scen)}}")
+for _f, _n in {NEW_FILES}.items():       # the new files: long processes, business areas, targeted, self-correction, questions
+    if _os.path.exists("{SFT_DIR}/" + _f):
+        train_tasks += [OOADialogues("{SFT_DIR}/" + _f)] * (_n * {SFT_EPOCHS})
+    print0(f"{{_f}} in the mix: {{_os.path.exists('{SFT_DIR}/' + _f)}}")
 if {SMOLTALK_ROWS} > 0:
     train_tasks.append(SmolTalk(split="train", stop={SMOLTALK_ROWS}))
 train_dataset = TaskMixture(train_tasks)
