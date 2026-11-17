@@ -1339,6 +1339,21 @@ GOLD_DROPOUT_FRAC = (0.2, 0.45)  # share of the needed actions such a row misses
 NEVER_DROPPED = CORE_ALWAYS      # core/loop and core/if are always offered at serving too
 
 
+def hide_in_example(example, withheld):
+    """The example with every withheld action id replaced by '...' in its outline and left out of its actions, so
+    gold dropout really hides those actions from the whole prompt."""
+    gone = set(withheld)
+    if isinstance(example, dict):
+        ol = str(example.get("outline", ""))
+        acts = [a for a in example.get("actions") or [] if a not in gone]
+        req = example.get("request", "")
+    else:
+        req, ol, acts = example[0], str(example[1]), []
+    for a in sorted(gone, key=len, reverse=True):
+        ol = re.sub(r"(?<![\w./])" + re.escape(a) + r"(?![\w/])", "...", ol)
+    return {**example, "outline": ol, "actions": acts} if isinstance(example, dict) else {"request": req, "outline": ol, "actions": acts}
+
+
 def drop_gold(gold, rng, rate=GOLD_DROPOUT, frac=GOLD_DROPOUT_FRAC):
     """Gold dropout for one training row: the needed actions the context will NOT list. At serving, retrieval offers
     only part of the needed actions (56% on whole business processes), but a model trained with every needed action
@@ -1398,9 +1413,12 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
     flow = to_dollar_name_dollar(flow)              # the platform's notation: the model learns to write $name$
     examples = (example_index.search(request, n_ex, exclude_request=request, exclude_sig=flow_signature(flow))
                 if example_index else [])
-    withheld = drop_gold(actions_of(flow), rng, gold_dropout, dropout_frac)
+    # fix rows show the previous flow in full, so hiding its actions from the list would hide nothing
+    withheld = drop_gold(actions_of(flow), rng, gold_dropout, dropout_frac) if kind != "fix" else []
     actions, required = context_actions(request, actions_of(flow), cat, action_index, k, rng, examples, example_index,
                                         exclude_request=request, exclude_sig=flow_signature(flow), withheld=withheld)
+    if withheld:                         # a withheld action must not be visible in the similar examples either
+        examples = [hide_in_example(x, withheld) for x in examples]
     # variables the request came with (Studio's open agent) always; else the flow's inputs for some rows
     variables = record.get("variables") or (input_variables(flow) if use_vars else ())
     previous = problems = None

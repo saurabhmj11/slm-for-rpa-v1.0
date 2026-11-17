@@ -27,14 +27,17 @@ def test_plan_fills_the_budget_with_caps():
     v = T.plan_mixture(STATS, b)
     assert abs(_tokens(v) - b) / b < 0.01, (_tokens(v), b)
     for n in T.LONG_FILES:
-        assert v[n] <= T.LONG_CAP + 1e-9, (n, v[n])
+        cap = T.PROCESS_CAP if n in T.PROCESS_FILES else T.LONG_CAP
+        assert v[n] <= cap + 1e-9, (n, v[n])
+    for n in T.PROCESS_FILES:                                 # the failing business processes get more practice
+        assert v[n] > T.LONG_CAP, (n, v[n])
     assert v["train_catalog.jsonl"] >= T.CATALOG_MIN
     assert min(v.values()) >= 1.0, v                         # nothing is left mostly unseen any more
     assert v["synth_train.jsonl"] < v["targeted_train.jsonl"]
     small = T.plan_mixture(STATS, b // 10)                   # a small budget: the floor and the scale still hold
     assert small["train_catalog.jsonl"] >= T.CATALOG_MIN and small["synth_train.jsonl"] < 1
     big = T.plan_mixture(STATS, b * 4)                      # more budget than the caps allow: never runs out
-    assert abs(_tokens(big) - b * 4) / (b * 4) < 0.01 and big["long_train.jsonl"] <= T.LONG_CAP
+    assert abs(_tokens(big) - b * 4) / (b * 4) < 0.01 and big["long_train.jsonl"] <= T.PROCESS_CAP
     lines = T.mixture_table(STATS, v, b)
     assert "views" in lines[0] and "fits" in lines[-1]
 

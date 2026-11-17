@@ -28,12 +28,16 @@ WANT = {
     "synth_pattern.jsonl": 1.5,      # long generated flows following real-flow patterns
     "natural_train.jsonl": 3, "core_train.jsonl": 3, "chains_train.jsonl": 3, "combos_train.jsonl": 3,
     "notask_train.jsonl": 3, "tools_train.jsonl": 3,
-    "scenarios_train.jsonl": 3, "long_train.jsonl": 2.5, "business2_train.jsonl": 2.5,
+    "scenarios_train.jsonl": 3, "long_train.jsonl": 5.5, "business2_train.jsonl": 5.5,
     "targeted_train.jsonl": 3, "fix_train.jsonl": 2, "clarify_train.jsonl": 3,
     "self_improved.jsonl": 2, "hard_fixed.jsonl": 2, "feedback_train.jsonl": 3,
 }
 LONG_FILES = ("long_train.jsonl", "business2_train.jsonl", "scenarios_train.jsonl", "synth_pattern.jsonl")
 LONG_CAP = 3.0
+# the business processes the model fails on get more practice than the other long files (compact answers made
+# them about 45% shorter, so this costs fewer tokens than before); the 4000-step run had seen them ~4.6 times
+PROCESS_FILES = ("long_train.jsonl", "business2_train.jsonl")
+PROCESS_CAP = 5.5
 CATALOG_MIN = 3.0
 MAX_VIEWS = 8.0
 DEFAULT_WANT = 2.0
@@ -75,6 +79,8 @@ def plan_mixture(stats, budget_tokens, want=None, long_cap=LONG_CAP, catalog_min
     fixed, views = {}, {n: float(want.get(n, DEFAULT_WANT)) for n in stats}
 
     def cap(n):
+        if n in PROCESS_FILES:
+            return max(long_cap, PROCESS_CAP)
         return long_cap if n in LONG_FILES else max_views
 
     def floor(n):
