@@ -15,10 +15,10 @@
 {"prompt": "publish the new price list - put prices.xlsx up on our google drive", "kind": "flow", "must": ["ooa.google/drive_upload"], "ask_about": [], "style": ["business"]}
 {"prompt": "hand out the payslips: staff.csv has each person's email, mail everyone their payslip", "kind": "flow", "must": ["ooa.csv/read", "core/loop", "ooa.email/send"], "ask_about": [], "style": ["business"]}
 {"prompt": "tidy the client list in clients.csv, there are the same people in it twice, keep one of each and save it", "kind": "flow", "must": ["ooa.csv/read", "ooa.datatable/remove_duplicates", "ooa.csv/write"], "ask_about": [], "style": ["business"]}
-{"prompt": "keep an eye on our intranet server intranet.local, ping it and note in the log whether it answers", "kind": "flow", "must": ["ooa.network/ping"], "ask_about": [], "style": ["business"]}
+{"prompt": "keep an eye on our intranet server intranet.local, ping it and note in the log whether it answers", "kind": "flow", "must": [["ooa.network/ping", "ooa.network/host_reachable"]], "ask_about": [], "style": ["business"]}
 {"prompt": "pdf to text pls, file is notes.pdf", "kind": "flow", "must": ["ooa.pdf/extract_text"], "ask_about": [], "style": ["casual", "short"]}
 {"prompt": "how many rows does data.csv have", "kind": "flow", "must": ["ooa.csv/read", "ooa.datatable/row_count"], "ask_about": [], "style": ["casual", "short"]}
-{"prompt": "print invoice.pdf for me", "kind": "flow", "must": ["ooa.printer/print_file"], "ask_about": [], "style": ["casual", "short"]}
+{"prompt": "print invoice.pdf for me", "kind": "flow", "must": [["ooa.printer/print_file", "ooa.file/print_files"]], "ask_about": [], "style": ["casual", "short"]}
 {"prompt": "open up backup.zip onto the desktop", "kind": "flow", "must": ["ooa.file/unzip"], "ask_about": [], "style": ["casual", "short"]}
 {"prompt": "summary of minutes.pdf pls, keep it short", "kind": "flow", "must": ["ooa.pdf/extract_text", "ooa.genai/summarize"], "ask_about": [], "style": ["casual", "short"]}
 {"prompt": "letter.txt but in hindi", "kind": "flow", "must": ["ooa.file/read_text", "ooa.genai/translate"], "ask_about": [], "style": ["casual", "short"]}
@@ -47,7 +47,7 @@
 {"prompt": "Sir wants report.docx in PDF format today itself, please convert", "kind": "flow", "must": ["ooa.word/open", "ooa.word/save_as"], "ask_about": [], "style": ["indian_english"]}
 {"prompt": "I am having one excel of vendors (vendors.xlsx), for each vendor create one account record in salesforce", "kind": "flow", "must": ["ooa.excel/get_all_cells", "core/loop", "ooa.salesforce/create_record"], "ask_about": [], "style": ["indian_english"]}
 {"prompt": "Kindly save the attachments of all unread mails in inbox to D:\\Mails and mark them as read also", "kind": "flow", "must": ["ooa.email/list", "core/loop", "ooa.email/save_attachments", "ooa.email/mark"], "ask_about": [], "style": ["indian_english"]}
-{"prompt": "Please put today's date in cell A1 of attendance.xlsx and save it, thanks in advance", "kind": "flow", "must": ["ooa.excel/open", "ooa.excel/set_cell", "ooa.excel/save"], "ask_about": [], "style": ["indian_english"]}
+{"prompt": "Please put today's date in cell A1 of attendance.xlsx and save it, thanks in advance", "kind": "flow", "must": ["ooa.excel/open", "ooa.excel/set_cell", ["ooa.excel/save", "ooa.excel/close"]], "ask_about": [], "style": ["indian_english"]}
 {"prompt": "ok so um basically i have this excel staff.xlsx with everyones birthday and like i want a happy birthday email going out to each person on their birthday you know", "kind": "flow", "must": ["ooa.excel/get_all_cells", "core/loop", "core/if", "ooa.email/send"], "ask_about": [], "style": ["voice"]}
 {"prompt": "so what i do every day is i check the shared folder if theres a file called orders dot csv and if its there i copy it into my Orders folder thats basically it", "kind": "flow", "must": ["core/if", "ooa.file/copy"], "ask_about": [], "style": ["voice"]}
 {"prompt": "hey so the thing is my manager wants weekly_report.pdf every friday can you just like email it to her priya at company dot com", "kind": "flow", "must": ["ooa.email/send"], "ask_about": [], "style": ["voice"]}
@@ -69,7 +69,7 @@
 {"prompt": "copy the important ones over to the other folder", "kind": "question", "must": [], "ask_about": ["important", "which files", "folder"], "style": ["vague", "missing_detail"]}
 {"prompt": "filter the list and send it", "kind": "question", "must": [], "ask_about": ["filter", "condition", "rule", "who", "list"], "style": ["short", "missing_detail"]}
 {"prompt": "remind people about the deadline", "kind": "question", "must": [], "ask_about": ["who", "people", "deadline", "email"], "style": ["business", "missing_detail"]}
-{"prompt": "save all the attachments for me", "kind": "question", "must": [], "ask_about": ["mailbox", "inbox", "emails", "folder", "which email"], "style": ["casual", "missing_detail"]}
+{"prompt": "save all the attachments for me", "kind": "flow", "must": ["ooa.email/save_all_attachments"], "ask_about": [], "style": ["casual", "short"]}
 {"prompt": "jo bhi naya aaye usko process kar dena", "kind": "question", "must": [], "ask_about": ["folder", "process", "where", "kind of file", "new"], "style": ["hinglish", "missing_detail"]}
 {"prompt": "put todays entries into the tracker", "kind": "question", "must": [], "ask_about": ["tracker", "entries", "sheet", "file"], "style": ["casual", "missing_detail"]}
 {"prompt": "approve the small ones automatically", "kind": "question", "must": [], "ask_about": ["small", "amount", "limit", "approve", "rule"], "style": ["business", "missing_detail"]}

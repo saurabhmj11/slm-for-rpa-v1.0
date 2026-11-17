@@ -12,7 +12,7 @@ ROWS = B.load(os.path.join(HERE, "beginner_requests.jsonl"))
 def test_the_set_is_valid():
     assert B.validate(ROWS, IDS) == []
     kinds = [r["kind"] for r in ROWS]
-    assert len(ROWS) == 80 and kinds.count("flow") == 60 and kinds.count("question") == 20
+    assert len(ROWS) == 80 and kinds.count("flow") == 61 and kinds.count("question") == 19
     styles = {s for r in ROWS for s in r["style"]}
     assert {"vague", "business", "casual", "typo", "hinglish", "indian_english", "voice", "story", "missing_detail"} <= styles
     assert all("missing_detail" in r["style"] for r in ROWS if r["kind"] == "question")
@@ -31,6 +31,28 @@ def test_word_overlap():
     assert B.word_overlap("a b c d", "a b x y") == 2 / 6
     reqs = ["zip the reports folder", "send an email", "read a csv file"]
     assert B.closest("pls zip my reports folder", reqs, B.overlap_index(reqs))[1] == "zip the reports folder"
+
+
+def test_must_alternatives():
+    need = ["ooa.excel/open", "ooa.excel/set_cell", ["ooa.excel/save", "ooa.excel/close"]]
+    assert B.in_order(need, ["ooa.excel/open", "ooa.excel/set_cell", "ooa.excel/close"])
+    assert B.in_order(need, ["ooa.excel/open", "ooa.excel/set_cell", "ooa.excel/save", "ooa.excel/close"])
+    assert not B.in_order(need, ["ooa.excel/open", "ooa.excel/close", "ooa.excel/set_cell"])
+    assert B.validate([{"prompt": "p", "kind": "flow", "must": [["ooa.excel/save", "ooa.nope/x"]], "style": []}], IDS) \
+        == ["row 0: unknown action ooa.nope/x"]
+    row = next(r for r in ROWS if r["prompt"].startswith("Please put today's date in cell A1"))
+    assert B.score(row, "flow", True, ["ooa.excel/open", "ooa.excel/set_cell", "ooa.excel/close"])["right"]
+
+
+def test_containment_catches_a_close_paraphrase():
+    test = "Kindly save the attachments of all unread mails in inbox to D:\\Mails and mark them as read also"
+    train = "As discussed, kindly save the attachments of each new mail in Inbox to Exports and mark them read pls"
+    assert B.word_overlap(test, train) <= B.MAX_OVERLAP and B.too_close(test, train)[0]
+    assert not B.too_close(test, "Save the attachments of new mail to a folder, then post a summary to the team "
+                                 "channel, archive the mail and log how many there were")[0]
+    assert B.containment("rename them properly", "rename them properly now") == 0.0     # too few content words
+    reqs = [train, "send an email"]
+    assert B.closest_contained(test, reqs, B.overlap_index(reqs))[1] == train
 
 
 def test_scoring_rules():
