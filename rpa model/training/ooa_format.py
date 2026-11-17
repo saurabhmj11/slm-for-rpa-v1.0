@@ -296,10 +296,10 @@ def _var(v):
     return m.group(1) if m else None
 
 
-def step_text(step, cat=None):
-    """Plain words for one step: its description when that is short plain text, else words built from a loop's
-    arguments, else the catalog name, else the action id."""
-    t = _plain(step.get("description"))
+def step_text(step, cat=None, describe=True):
+    """Plain words for one step: its description when that is short plain text (describe=False: never), else words
+    built from a loop's arguments, else the catalog name, else the action id."""
+    t = _plain(step.get("description")) if describe else None
     if t:
         return t
     a, args = step.get("action") or "?", step.get("args") if isinstance(step.get("args"), dict) else {}
@@ -364,28 +364,71 @@ def _lower_first(t):
     return t[:1].lower() + t[1:] if t[:2] != t[:2].upper() else t
 
 
-def clear_request(flow, catalog=None, limit=MAX_CLEAR_CHARS):
-    """One clear sentence naming a flow's steps, for the "Clear request:" line: the steps' plain words (step_text) in
-    order, closing / disconnecting steps left out, a loop's or condition's steps after it ("for each row in rows:
-    create the ticket and log it"; "if amount > 1000: email it, otherwise: log it"). Longer than limit: the steps
-    inside loops and conditions are left out (below the first level, then all), then the sentence is cut at a step
-    boundary."""
+# apps a step description may name; a restatement never names one the request does not (clear_step_ok)
+_APPS = re.compile(r"\b(onedrive|sharepoint|outlook|gmail|slack|microsoft teams|jira|servicenow|salesforce|zendesk|asana|"
+                   r"hubspot|freshdesk|dropbox|google drive|google sheets|workday|quickbooks|trello|whatsapp|"
+                   r"azure devops|confluence|notion|docusign|okta|sap)\b", re.I)
+
+
+def _catalog_copy(text, entry):
+    """True when a step description is (the start of) its action's catalog description: generic tool text."""
+    d = " ".join(str((entry or {}).get("description") or "").split()).lower().rstrip(".")
+    t = " ".join(str(text or "").split()).lower().rstrip(".")
+    return bool(d and t) and (t == d or t[:40] == d[:40] or (len(t) >= 25 and d.startswith(t)))
+
+
+def clear_step_ok(step, cat=None, request=None):
+    """True when a step's description can stand in a restatement: short plain text (step_text), not a copy of the
+    catalog's description, and naming no app the request does not name (request given)."""
+    t = _plain(step.get("description"))
+    if not t or _catalog_copy(t, _as_dict(cat).get(step.get("action"))):
+        return False
+    if request is not None:
+        said = {m.lower() for m in _APPS.findall(str(request))}
+        if any(m.lower() not in said for m in _APPS.findall(t)):
+            return False
+    return True
+
+
+def clear_request(flow, catalog=None, limit=MAX_CLEAR_CHARS, request=None):
+    """One clear sentence naming a flow's steps, for the "Clear request:" line: the steps' plain words in order
+    (step_text; a description that copies the catalog's or names an app the request does not name, clear_step_ok,
+    gives way to the catalog name), closing / disconnecting steps left out, a loop's or condition's steps after it
+    ("for each row in rows: create the ticket and log it"; "if amount > 1000: email it, otherwise: log it"). Longer
+    than limit: the bodies of loops and conditions are cut to their first step (below the first level, then all:
+    "for each row: create the ticket"), never to nothing; then the sentence is cut at a step boundary."""
     cat = _as_dict(catalog)
 
-    def phrases(steps, deep):           # deep: how many levels of loop / condition bodies are named
+    def text_of(s):
+        return _lower_first(step_text(s, cat, describe=clear_step_ok(s, cat, request)))
+
+    def real(steps):
+        return [s for s in steps if isinstance(s, dict) and not _HOUSEKEEPING.search(str(s.get("action") or ""))] \
+            if isinstance(steps, list) else []
+
+    def gist(s, levels=2):              # a container named with the first step of its first non-empty body
+        for name, body in branches(s):
+            first = real(body)[:1]
+            if first:
+                word = "" if name == "children" else _BRANCH_WORDS.get(name, "").strip().lower() + " "
+                inner = gist(first[0], levels - 1) if levels > 1 else ""
+                return ": " + word + text_of(first[0]) + inner
+        return ""
+
+    def phrases(steps, deep):           # deep: how many levels of loop / condition bodies are named in full
         out = []
-        for s in steps if isinstance(steps, list) else []:
-            if not isinstance(s, dict) or _HOUSEKEEPING.search(str(s.get("action") or "")):
-                continue
-            t = _lower_first(step_text(s, cat))
-            inner = []
+        for s in real(steps):
+            t = text_of(s)
             if deep > 0:
+                inner = []
                 for name, body in branches(s):
                     sub = phrases(body, deep - 1)
                     if sub:
                         word = "" if name == "children" else _BRANCH_WORDS.get(name, "").strip().lower() + " "
                         inner.append(word + " and ".join(sub))
-            out.append(t + (": " + ", ".join(inner) if inner else ""))
+                out.append(t + (": " + ", ".join(inner) if inner else ""))
+            else:
+                out.append(t + gist(s))
         return out
 
     steps = flow.get("steps") if isinstance(flow, dict) else flow

@@ -9,23 +9,33 @@ the chat rows with flow answers in ft/clean, turned into neutral flow records), 
                  tidy / sort out -> move / rename, tally / reconcile -> compare / filter, ...)
   casual         lower case, short forms (pls, u, thx), no punctuation
   typo           realistic slips: keyboard neighbours, dropped / doubled / swapped letters, phonetic misspellings; an
-                 action-critical noun (pdf, excel, email, folder ...) gets at most one slip
+                 action-critical noun (pdf, excel, email, folder ...) gets at most one slip; never in a name or value
+                 (file names, paths, addresses, quoted text, capitalised names, and the words of the flow's own short
+                 literal values: folder, sheet, filter values ...), since the flow keeps them as written
   hinglish       Hindi-English mix: verbs moved to the end of each clause and said in Hindi, postpositions (se, me, ko),
                  connectors (aur, phir, agar ... to, nahi to), time words (roz subah, har hafte); HINGLISH_* tables
   indian_english Kindly / do the needful / itself / only / I am having
   voice          dictated speech: fillers (um, like, you know), no punctuation, "dot csv", "at" for @
   story          first person, the steps told as what I do ("First I open ..., then I ...") and a question at the end
 Each is a "rewrite" record (ooa_format.render_chat): the answer first restates the request in tool words
-("Clear request: <clear>", clear = ooa_format.clear_request(flow)), then the usual plan and flow.
+("Clear request: <clear>", clear = ooa_format.clear_request(flow, request=...)), then the usual plan and flow. A step
+description that copies the catalog's description or names an app the request does not name never goes into the
+restatement (ooa_format.clear_step_ok): the request itself is used when it is short clear English, else the catalog
+names. Flows whose requests are catalog descriptions strung together (synth_pattern) are not used.
 
 Clarify records (beginner tone): a request whose key detail was taken out and replaced by a reference only the user
-can resolve ("the usual folder", "the usual people", "the big ones", "our system", "that file"); the answer is one
-short, friendly question about that detail (SLOTS: folder, recipient, condition, app, file). A detail that is merely
-not given (no folder named at all) stays a flow input, as in the other data; only the vague reference is asked about.
+can resolve ("the usual folder", "the usual people", "the big ones", "our system", "the file I always use"); the
+answer is one short, friendly question about that detail (SLOTS: folder, recipient, condition, app, file).
+The rule, the same in all the data (gen_clarify.py) and in the beginner test set: ASK when the request points at a
+particular thing only the user knows ("the usual ...", "the right ...", "our system", "the important ones", "them" /
+"it" with nothing named) or leaves the action itself unclear (what to check, which format); BUILD, with the detail as
+a flow input, when the action is clear and a detail is merely not given or only pointed at plainly ("send a mail",
+"unzip this file", "save all the attachments", "my downloads folder"). So "that file" / "my file" are never used as
+the vague reference here: gen_clarify's counter rows build flows for "this file".
 
 Every flow passes the repo checker (gen_targeted.Checker: repair + ooa_reward.problems == []). Requests are
-deduplicated (normalised text) and nothing is close to a test prompt (any eval/*.jsonl prompt: difflib ratio over 0.8
-or word overlap over 0.6, beginner_score.word_overlap).
+deduplicated (normalised text) and nothing is close to a test prompt (any eval/*.jsonl prompt: difflib ratio over 0.8,
+word overlap over 0.6, or content-word containment, beginner_score.too_close).
 
 Writes NEUTRAL records, one per line:
   {"kind": "rewrite", "request", "clear", "flow", "style": [...], "source": "beginner:<style>:<origin>"}
@@ -56,10 +66,12 @@ STYLES = ("vague", "business", "casual", "typo", "hinglish", "indian_english", "
 STYLE_WEIGHTS = {"vague": 1.0, "business": 1.3, "casual": 1.0, "typo": 1.0, "hinglish": 1.3, "indian_english": 0.8,
                  "voice": 1.0, "story": 1.0}
 # how many flows of each origin (share of --flows); the rest of each file is not used
-ORIGIN_SHARE = {"long": 0.17, "business2": 0.15, "targeted": 0.24, "clarify_counter": 0.04, "chains": 0.08,
-                "combos": 0.11, "tools": 0.10, "scenarios": 0.05, "train_flows": 0.02, "synth_pattern": 0.04}
+# (synth_pattern is left out: its requests are catalog descriptions strung together, not words people use)
+ORIGIN_SHARE = {"long": 0.17, "business2": 0.15, "targeted": 0.25, "clarify_counter": 0.04, "chains": 0.09,
+                "combos": 0.12, "tools": 0.11, "scenarios": 0.05, "train_flows": 0.02}
 CHAT_FILES = ("chains_train.jsonl", "combos_train.jsonl", "tools_train.jsonl", "scenarios_train.jsonl",
-              "train_flows.jsonl", "synth_pattern.jsonl")
+              "train_flows.jsonl")
+STRICT_HINGLISH = ("long", "business2")     # long processes: a Hinglish clause without a verb is dropped (to_hinglish)
 MAX_REQUEST = 900
 
 # ------------------------------------------------------------------------------------------------ cleaning
@@ -158,12 +170,44 @@ def _slip(w, rng):
     return w[:j] + w[j + 1:]
 
 
-def add_typos(text, rng, n=None):
-    """1-3 realistic slips outside protected tokens; an action-critical noun gets at most one slip."""
+def value_words(flow):
+    """Lower-cased words of a flow's short literal argument values (folder, sheet and filter values, names): a typo in
+    one of them would teach the model to correct the user's data silently."""
+    out = set()
+
+    def go(v):
+        if isinstance(v, str):
+            if len(v.split()) <= 4 and "$" not in v:
+                out.update(w.lower() for w in re.findall(r"[A-Za-z]{3,}", v))
+        elif isinstance(v, dict):
+            for x in v.values():
+                go(x)
+        elif isinstance(v, list):
+            for x in v:
+                go(x)
+    for s, _ in F.walk((flow or {}).get("steps")):
+        go(s.get("args"))
+    return out
+
+
+def name_words(text):
+    """Capitalised words that are not the first word of a sentence (names: Reports, Purchase Orders, Pending)."""
+    out = set()
+    for m in re.finditer(r"[A-Z][a-z]+", text):
+        before = text[:m.start()].rstrip()
+        if m.start() and text[m.start() - 1].isspace() and before and before[-1] not in ".!?:":
+            out.add(m.group(0).lower())
+    return out
+
+
+def add_typos(text, rng, n=None, protect=()):
+    """1-3 realistic slips outside protected tokens and outside the words in protect (lower case: names and the flow's
+    values, value_words / name_words); an action-critical noun gets at most one slip."""
     n = n or rng.choice([1, 1, 2, 2, 3])
     spans = _protected_spans(text)
+    protect = {w.lower() for w in protect} | name_words(text)
     words = [(m.start(), m.end(), m.group(0)) for m in re.finditer(r"[A-Za-z]{5,}", text)
-             if not any(a < m.end() and m.start() < b for a, b in spans)]
+             if not any(a < m.end() and m.start() < b for a, b in spans) and m.group(0).lower() not in protect]
     rng.shuffle(words)
     done, critical_used, out = 0, False, text
     edits = []
@@ -260,7 +304,8 @@ PHRASEBOOK = [
     (r"\bthe recipient\b", ["the person"]),
     (r"\battachments?\b", ["attached files", "files that came with it"]),
 ]
-GOALS = [  # (keywords, goal phrases): vague goal said first
+GOALS = [  # (keywords, goal phrases): vague goal said first; the tool goals (files, mail, sheets ...) are picked from
+           # the flow's actions instead (ACTION_GOALS) when the flow is known
     (("invoice", "bill"), ["sort out my invoices", "keep the bills under control", "stop chasing invoices by hand"]),
     (("unpaid", "overdue", "payment", "outstanding"), ["chase the money people owe us", "get paid on time",
                                                          "stay on top of payments"]),
@@ -277,6 +322,18 @@ GOALS = [  # (keywords, goal phrases): vague goal said first
     (("pdf", "scan", "ocr"), ["deal with all these pdfs", "get through the scanned papers"]),
     (("website", "portal", "browser", "site"), ["stop checking the site by hand", "save time on the portal"]),
 ]
+# tool goals: (action id pattern, goal phrases); a goal about files / mail / sheets only for a flow that does that
+ACTION_GOALS = [
+    (r"^ooa\.(?:file|folder)/(?:zip|unzip)|/backup|/archive", ["keep my files safe", "clean up old stuff"]),
+    (r"^ooa\.(?:file|folder)/(?:move|rename|copy|delete|create)", ["tidy up my files", "sort out my folders",
+                                                                    "keep the folders neat"]),
+    (r"^ooa\.(?:email|outlook|gmail|imap|exchange)/|^ooa\.microsoft365/(?:mail|send_mail|list_mail|get_mail)",
+     ["keep on top of my emails", "sort out my mailbox stuff"]),
+    (r"^ooa\.(?:excel|excel_desktop|csv|datatable|google_sheets)/", ["sort out this spreadsheet", "clean up the data"]),
+    (r"^ooa\.(?:pdf|ocr)/", ["deal with all these pdfs", "get through the scanned papers"]),
+    (r"^ooa\.browser/", ["stop checking the site by hand", "save time on the portal"]),
+]
+_TOOL_GOALS = {g for _, gs in ACTION_GOALS for g in gs}
 GENERIC_GOALS = ["save some time every day", "stop doing this by hand", "make my day easier", "automate a boring job"]
 VAGUE_FRAMES = ["{g}. basically {r}", "i want to {g} - {r}", "help me {g}: {r}", "{g}, so {r}", "trying to {g}. {r}",
                 "need to {g}... {r}", "{r}. just want to {g}"]
@@ -304,8 +361,12 @@ HINGLISH_VERBS = {
     "extract": ["nikal lo", "nikaalo", "extract karo"], "compare": ["match karo", "milao", "compare karo"],
     "zip": ["zip kar do", "zip bana do"], "unzip": ["unzip kar do", "khol do"], "convert": ["convert karo", "badal do"],
     "export": ["export kar do", "nikal do"], "update": ["update kar do", "update karo"],
-    "connect": ["connect karo", "se jud jao"], "sign": ["sign in karo", "login karo"], "login": ["login karo"],
-    "log in": ["login karo", "log in karo"], "list": ["list nikalo", "list bana do"], "get": ["le lo", "nikal lo", "le aao"],
+    "connect": ["connect karo", "se jud jao"], "sign": ["sign kar do"], "login": ["login karo"],
+    "log in": ["login karo", "log in karo"], "sign in": ["login karo", "sign in karo"],
+    # signing out is one phrase: "sign out" must never become "out ... login karo"
+    "sign out / disconnect": ["logout kar do", "disconnect kar do"], "sign out": ["logout kar do", "sign out kar do"],
+    "log out": ["logout kar do"], "logout": ["logout kar do"], "log off": ["logout kar do"],
+    "disconnect": ["disconnect kar do", "connection band kar do"], "list": ["list nikalo", "list bana do"], "get": ["le lo", "nikal lo", "le aao"],
     "fetch": ["le aao", "nikal lo"], "pull": ["nikal lo", "kheench lo"], "take": ["le lo", "utha lo"],
     "grab": ["utha lo", "le lo"], "insert": ["daal do", "insert karo"], "fill": ["bhar do", "fill karo"],
     "type": ["type karo", "likho"], "click": ["click karo", "daba do"], "go": ["jao", "chale jao"],
@@ -425,17 +486,36 @@ def clauses_of(r):
     return out
 
 
-def to_hinglish(r, rng):
+# a clause that hangs on its neighbour ("before emailing it", "unless ..."): joined with a comma, never with a
+# sequence word ("uske baad"), which would reverse the order of the steps
+_SUBORDINATE = re.compile(r"(?i)^(?:before|after|until|unless|because|so that|while|once|but|or|as long as|in case)\b")
+# clauses that need no verb of their own (conditions, loops, timing)
+_NO_VERB_OK = re.compile(r"(?i)^(?:if|when|whenever|for each|for every|each|every|otherwise|else|only|before|after|until|"
+                         r"unless|because|so that|while|once|but|or|then|daily|weekly|monthly|at)\b")
+
+
+def _has_verb(c):
+    lc = c.strip().lower()
+    return any(lc.startswith(v + " ") or lc == v for v in HINGLISH_VERBS)
+
+
+def to_hinglish(r, rng, strict=False):
+    """The request in Hindi-English. strict (long processes): None when a clause has no verb to move to its end (it
+    would come out as English words in a garbled order)."""
     parts, n = [], 0
-    for c in clauses_of(r):
+    cl = clauses_of(r)
+    if strict and any(not _has_verb(c) and not _NO_VERB_OK.match(c) for c in cl):
+        return None
+    for c in cl:
         h, k = _hinglish_clause(c, rng)
         parts.append(h)
         n += k
     if n < 3 or len(parts) == 0:
         return None
     out = parts[0]
-    for p in parts[1:]:
-        out += rng.choice(HINGLISH_JOINS) + p
+    for i in range(1, len(parts)):
+        sub = _SUBORDINATE.match(cl[i]) or _SUBORDINATE.match(cl[i - 1])
+        out += (", " if sub else rng.choice(HINGLISH_JOINS)) + parts[i]
     return _lower_keep(out) + rng.choice(HINGLISH_ENDS)
 
 
@@ -454,17 +534,23 @@ def to_business(r, rng):
     return out[:1].lower() + out[1:] if rng.random() < 0.6 else out
 
 
-def goal_for(r, rng):
+def goal_for(r, rng, flow=None):
+    """A vague goal for the request: a business goal from its words (invoices, payments, tickets ...); a tool goal
+    (files, mail, spreadsheet, pdfs, site) only when the flow's actions do that (flow given; else from the words)."""
     lr = r.lower()
     hits = [g for keys, gs in GOALS if any(k in lr for k in keys) for g in gs]
+    if flow is not None:
+        acts = [str(s.get("action") or "") for s, _ in F.walk(flow.get("steps"))]
+        hits = [g for g in hits if g not in _TOOL_GOALS]
+        hits += [g for pat, gs in ACTION_GOALS if any(re.search(pat, a) for a in acts) for g in gs]
     return rng.choice(hits) if hits else rng.choice(GENERIC_GOALS)
 
 
-def to_vague(r, rng):
+def to_vague(r, rng, flow=None):
     base = to_business(r, rng) if rng.random() < 0.5 and not is_hinglish(r) else None
     base = base or r
     base = base[:1].lower() + base[1:]
-    return rng.choice(VAGUE_FRAMES).format(g=goal_for(r, rng), r=base)
+    return rng.choice(VAGUE_FRAMES).format(g=goal_for(r, rng, flow), r=base)
 
 
 CASUAL_SUBS = [(r"\bplease\b", ["pls", "plz"]), (r"\byou\b", ["u"]), (r"\byour\b", ["ur"]), (r"\bthanks\b", ["thx"]),
@@ -599,12 +685,14 @@ TRANSFORMS = {"vague": to_vague, "business": to_business, "casual": to_casual, "
               "hinglish": to_hinglish, "indian_english": to_indian, "voice": to_voice, "story": to_story}
 
 
-def beginner_versions(request, rng, k):
+def beginner_versions(request, rng, k, flow=None, origin=None):
     """Up to k beginner requests for one clear request: [(style list, text)], distinct styles, ~1 in 4 also gets a
-    typo (then "typo" is in its style list)."""
+    typo (then "typo" is in its style list). flow: the request's flow (typos spare its values and the request's names;
+    the vague goal fits its actions); origin: its source file (long processes get strict Hinglish)."""
     base = clean_request(request)
     if not base:
         return []
+    protect = value_words(flow) | name_words(base) if flow else name_words(base)
     styles = list(STYLES) if not is_hinglish(base) else list(HINGLISH_OK)
     rng.shuffle(styles)
     styles.sort(key=lambda s: -STYLE_WEIGHTS[s] * rng.random())
@@ -613,14 +701,21 @@ def beginner_versions(request, rng, k):
         if len(out) >= k:
             break
         try:
-            t = TRANSFORMS[st](base, rng)
+            if st == "typo":
+                t = add_typos(base, rng, protect=protect)
+            elif st == "vague":
+                t = to_vague(base, rng, flow)
+            elif st == "hinglish":
+                t = to_hinglish(base, rng, strict=origin in STRICT_HINGLISH)
+            else:
+                t = TRANSFORMS[st](base, rng)
         except (IndexError, ValueError):
             t = None
         if not t:
             continue
         tags = [st]
         if st not in ("typo",) and rng.random() < 0.25:
-            t2 = add_typos(t, rng, 1)
+            t2 = add_typos(t, rng, 1, protect=protect)
             if t2:
                 t, tags = t2, tags + ["typo"]
         t = " ".join(t.split())
@@ -642,7 +737,8 @@ SLOTS = {
                 "Happy to help. Which folder should I use? A name or a path like D:\\Reports is fine.",
                 "Got it. What is the folder called, and where is it on your computer?",
                 "Which folder is the usual one? Please give me its name or full path."]),
-    "recipient": (r"\b((?i:e-?mail|mail|send|forward|share)\b[^.;:]{0,40}?) (?i:to) (?:[\w.+-]+@[\w-]+\.[\w.]+|(?:the |my |our )?(?:(?:\w+ ){0,2}(?:team|manager|boss|auditors|client|lead|head|approver|desk)|[A-Z][a-z]+))\b",
+    # a sending verb (e-mail / mail only as a verb: not "each new email in X", "emails from X"), then "to" someone
+    "recipient": (r"\b((?:(?i:send|forward|share)|(?<!\bnew )(?<!\bthe )(?<!\beach )(?<!\bevery )(?<!\bunread )(?<!\bthis )(?<!\bthat )(?<!\ban )(?<!\ball )(?<!\bany )(?<!\bhis )(?<!\bher )(?<!\bour )(?<!\bmy )(?<!\bNew )(?<!\bThe )(?<!\bEach )(?<!\bEvery )(?<!\bUnread )(?<!\bThis )(?<!\bThat )(?<!\bAn )(?<!\bAll )(?<!\bAny )(?<!\bHis )(?<!\bHer )(?<!\bOur )(?<!\bMy )(?i:e-?mail|mail)(?!s)(?! (?i:in|from|on|into|inside|with|of|that|which|older|newer|box|folder)\b))\b[^.;:]{0,40}?) (?i:to) (?:[\w.+-]+@[\w-]+\.[\w.]+|(?:the |my |our )?(?:(?:\w+ ){0,2}(?:team|manager|boss|auditors|client|lead|head|approver|desk)|[A-Z][a-z]+))\b",
                   {"to": ["to the usual people", "to the right person", "to the people who need it", "to the usual guys"]},
                   ["Sure! Who should get it? Please give me their name or email address.",
                    "Who are the usual people? Please share their email addresses.",
@@ -662,7 +758,7 @@ SLOTS = {
              "Happy to help. Which tool is 'our system' - for example Outlook, Gmail, Jira or Salesforce?",
              "What is the name of the app you use for this?"]),
     "file": (r"\b[\w-]+\.(?:csv|xlsx|xls|docx|pdf|txt|json)\b",
-             {"": ["that file", "the usual file", "the sheet I always use", "my file"]},
+             {"": ["the usual file", "the sheet I always use", "the file we always use", "the same file as last time"]},
              ["Which file do you mean? Please tell me its name and which folder it is in.",
               "Sure! What is the file called, and where is it saved?",
               "Which file should I use? A full path like C:\\Data\\orders.xlsx is perfect.",
@@ -674,7 +770,21 @@ SLOT_STYLES = ["casual", "casual", "plain", "plain", "hinglish", "indian_english
 def take_out(request, slot, rng):
     """The request with one detail of this slot replaced by a vague reference, or None when it has none."""
     pat, repl, _ = SLOTS[slot]
-    m = re.search(pat, request, flags=re.I if slot == "file" else 0)
+    m = None
+    for c in re.finditer(pat, request, flags=re.I if slot == "file" else 0):
+        if slot == "recipient":
+            clause = re.split(r"[.;,]", request[:c.start()])[-1]
+            mail_noun = re.match(r"(?i)e-?mail|mail", c.group(1)) and re.search(
+                r"(?i)\b(?:save|move|copy|archive|download|put|upload|file)\b", clause)
+            if (re.search(r"(?i)\b(?:save|move|copy|archive|download|file|put|upload)\b", c.group(1)) or mail_noun
+                    or re.search(r"(?i)\b(?:in|from|into|inside|of)\s+(?:the\s+)?(?:\w+\s+){0,2}$", clause)
+                    and re.match(r"(?i)e-?mail|mail", c.group(1))
+                    or re.match(r"(?i)\s*(?:-|folder\b|sub-?folder\b|directory\b)", request[c.end():])):
+                continue       # "save the attachments ... to Finance", "in Supplier Mail to X", "to Unpaid-paid": a folder
+        m = c
+        break
+    if slot == "recipient" and m is not None and re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", request[m.end():]):
+        return None            # the address is still given ("to Finance at accounts@...")
     if not m:
         return None
     word = m.group(1).lower() if slot == "folder" else ("to" if slot == "recipient" else "")
@@ -736,7 +846,8 @@ def clarify_records(sources, n, rng, guard, seen):
 
 # ------------------------------------------------------------------------------------------------ sources and guard
 class Guard:
-    """Never close to a test prompt: any eval/*.jsonl prompt with difflib ratio over 0.8 or word overlap over 0.6."""
+    """Never close to a test prompt: any eval/*.jsonl prompt with difflib ratio over 0.8, word overlap over 0.6 or
+    content-word containment of 0.7 or more (beginner_score.containment)."""
 
     def __init__(self, eval_dir=None, ratio=0.8, overlap=BS.MAX_OVERLAP):
         ev = Path(eval_dir) if eval_dir else HERE.parent / "eval"
@@ -756,6 +867,12 @@ class Guard:
         o, _ = BS.closest(request, self.raw, self.index)
         if o > self.overlap:
             self.dropped += 1
+            return True
+        ids = set()
+        for w in BS.words(request):
+            ids.update(self.index.get(w, ()))
+        if any(BS.containment(self.raw[i], request) >= BS.MAX_CONTAIN for i in ids):
+            self.dropped += 1             # a close paraphrase of a test prompt (most of its content words)
             return True
         return False
 
@@ -807,22 +924,24 @@ def clarify_sources(src):
             for r, _ in src.get(origin, [])]
 
 
-def described(flow):
-    """True when every step (closing steps aside) has a short plain description, so clear_request reads well."""
-    return all(F._plain(s.get("description")) for s, _ in F.walk(flow.get("steps"))
+def described(flow, cat=None, request=None):
+    """True when every step (closing steps aside) has a description fit for a restatement (ooa_format.clear_step_ok:
+    short plain text, not the catalog's own description, no app the request does not name)."""
+    return all(F.clear_step_ok(s, cat, request) for s, _ in F.walk(flow.get("steps"))
                if not F._HOUSEKEEPING.search(str(s.get("action") or "")))
 
 
 def clear_for(request, flow, cat):
     """The "Clear request" line: the flow's steps in plain words (ooa_format.clear_request) when every step is
-    described; else the original request when it is short, clear English (catalog names make poor sentences)."""
-    if described(flow):
-        return F.clear_request(flow, cat)
+    described in its own words; else the original request when it is short, clear English (catalog text makes poor
+    sentences); else clear_request with the catalog names for the steps whose descriptions do not fit."""
+    if described(flow, cat, request):
+        return F.clear_request(flow, cat, request=request)
     base = clean_request(request)
     if base and len(base) <= 240 and not is_hinglish(base):
         base = base[:1].upper() + base[1:]
         return base if base.endswith((".", "?", "!")) else base + "."
-    return F.clear_request(flow, cat)
+    return F.clear_request(flow, cat, request=request)
 
 
 def generate(src, catalog_path, schema_path, n_flows=2300, n_clarify=1800, seed=41, guard=None, log=print):
@@ -854,7 +973,7 @@ def generate(src, catalog_path, schema_path, n_flows=2300, n_clarify=1800, seed=
             clear = clear_for(req, fixed, cat)
             if not clear:
                 continue
-            versions = beginner_versions(req, rng, rng.choice([3, 4, 4, 5]))
+            versions = beginner_versions(req, rng, rng.choice([3, 4, 4, 5]), fixed, origin)
             made = 0
             for tags, text in versions:
                 key = norm(text)

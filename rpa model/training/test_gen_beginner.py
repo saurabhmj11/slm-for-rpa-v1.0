@@ -63,6 +63,70 @@ def test_take_out_leaves_a_vague_reference():
     assert G.take_out("Move the files to the Reports folder", "recipient", rng) is None
 
 
+def test_recipient_slot_needs_a_sending_verb():
+    rng = random.Random(0)
+    for req in ("save the attachments of each new email in Support to Finance",
+                "Save the attachments of each new email in Inbox to the Exports folder",
+                "move the email to Unpaid-paid folder", "copy the emails from Billing to Archive",
+                "save the attachments of each new email in Supplier Mail to Contracts",
+                "Forward this email in Outlook to Finance at accounts@contoso.com"):
+        assert G.take_out(req, "recipient", rng) is None, req
+    r = G.take_out("Check each new email in Support and forward it to Priya", "recipient", rng)
+    assert r and "Priya" not in r and r.startswith("Check each new email in Support and forward it to "), r
+
+
+def test_file_slot_points_at_a_file_only_the_user_knows():
+    for _ in range(20):
+        r = G.take_out("Read orders.csv and keep the unpaid rows", "file", random.Random(_))
+        assert re.search(r"usual|always use|last time", r) and "that file" not in r and "my file" not in r, r
+
+
+def test_hinglish_keeps_sign_out_and_the_order():
+    for i in range(30):
+        rng = random.Random(i)
+        out = G.to_hinglish("Read the report, email it to the finance team, then sign out / disconnect at the end", rng)
+        assert out and not re.search(r"login karo|sign in karo|log in karo", out) and "logout" in out or \
+            "disconnect kar do" in out, out
+        out = G.to_hinglish("Before emailing the HR report outside the company, encrypt it into a new protected file", rng)
+        assert out is None or (out.startswith("before emailing") and "uske baad" not in out and "phir" not in out), out
+    # long processes: a clause without a verb is not turned into garbled Hinglish
+    long = "Broken links hurt our search ranking, so crawl the entire website for dead links and email the web team"
+    assert G.to_hinglish(long, random.Random(1), strict=True) is None
+    assert G.to_hinglish("Read the alerts, but only when count is above zero, and log the rest", random.Random(1),
+                         strict=True)
+
+
+def test_typos_spare_the_flows_values_and_names():
+    flow = {"steps": [{"action": "ooa.file/list", "args": {"folder": "Scans"}},
+                      {"action": "ooa.excel/read_sheet", "args": {"sheet": "Purchase Orders"}},
+                      {"action": "ooa.ad/search", "args": {"filter": "(description=Pending start)"}}]}
+    prot = G.value_words(flow)
+    assert {"scans", "purchase", "orders", "pending", "start"} <= prot
+    req = "for each pdf in scans read the purchase orders sheet and find users marked pending start"
+    for i in range(100):
+        t = G.add_typos(req, random.Random(i), 3, protect=prot)
+        if t:
+            for w in ("scans", "purchase", "orders", "pending", "start"):
+                assert w in t.split(), (w, t)
+    for i in range(50):        # beginner_versions passes them on to every style (casual lower-cases first)
+        for tags, t in G.beginner_versions("For each PDF in the Scans folder, read the Purchase Orders sheet", random.Random(i),
+                                           5, flow):
+            if "typo" in tags:
+                assert re.search(r"(?i)\bscans\b", t) and re.search(r"(?i)purchase orders", t), (tags, t)
+
+
+def test_vague_goal_fits_the_flows_actions():
+    ad = {"steps": [{"action": "ooa.ad/create_user"}, {"action": "ooa.ad/move_user"}]}
+    mail = {"steps": [{"action": "ooa.email/send"}]}
+    tidy = {"tidy up my files", "sort out my folders", "keep the folders neat"}
+    for i in range(40):
+        rng = random.Random(i)
+        assert G.goal_for("move new accounts to the holding OU and copy their groups", rng, ad) not in tidy
+        assert G.goal_for("read the payslip table from SQL", rng, {"steps": [{"action": "ooa.database/query"}]}) \
+            not in {"keep on top of my emails", "sort out my mailbox stuff"}
+        assert G.goal_for("send the note", rng, mail) in {"keep on top of my emails", "sort out my mailbox stuff"}
+
+
 def test_clear_line_prefers_plain_step_words():
     from gen_targeted import FlowBuilder, load_catalog
     from gen_clarify import c_csv_excel
@@ -71,6 +135,9 @@ def test_clear_line_prefers_plain_step_words():
     assert G.described(flow) and G.clear_for(req, flow, cat) == F.clear_request(flow, cat)
     bare = {**flow, "steps": [{k: v for k, v in s.items() if k != "description"} for s in flow["steps"]]}
     assert not G.described(bare) and G.clear_for("convert my csv to excel", bare, cat) == "Convert my csv to excel."
+    copied = {**flow, "steps": [{**s, "description": cat[s["action"]]["description"]} for s in flow["steps"]]}
+    assert not G.described(copied, cat) and G.clear_for("convert my csv to excel", copied, cat) == "Convert my csv to excel."
+    assert "synth_pattern" not in G.ORIGIN_SHARE and "synth_pattern.jsonl" not in G.CHAT_FILES
 
 
 def test_generate_end_to_end():

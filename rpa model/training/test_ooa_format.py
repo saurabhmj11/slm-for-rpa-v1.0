@@ -580,6 +580,25 @@ def test_clear_request_names_the_steps():
     long = linear_flow(["ooa.csv/read"] * 40)
     c = F.clear_request(long, CAT, limit=120)
     assert len(c) <= 121 and c.endswith("and more."), c
+    # a body that does not fit is cut to its first step, never to nothing
+    c = F.clear_request(LOOP_FLOW, CAT, limit=90)
+    assert c.endswith("then for each file in files: only for .png files: zip."), c
+    loop = {"steps": [{"action": "core/loop", "description": "Repeat for each item", "args": {"over": "$rows", "as": "row"},
+                       "children": [{"action": "ooa.salesforce/create_record", "description": "Create a Salesforce task"}]
+                       + [{"action": "core/log", "description": "Log step %d of the row" % i} for i in range(30)]}]}
+    c = F.clear_request(loop, CAT, limit=100)
+    assert c.startswith("Repeat for each item: create a Salesforce task"), c
+    # a description copied from the catalog gives way to the catalog name; one naming an app the request does not
+    # name too
+    e = CAT["ooa.csv/read"]
+    flow = {"steps": [{"action": "ooa.csv/read", "description": e["description"]}]}
+    assert not F.clear_step_ok(flow["steps"][0], CAT)
+    assert F.clear_request(flow, CAT) == e["name"][:1].upper() + e["name"][1:].rstrip(".") + "."
+    up = {"action": "ooa.microsoft365/upload_file", "description": "Upload the report to SharePoint"}
+    assert F.clear_step_ok(up, CAT) and F.clear_step_ok(up, CAT, "put it on SharePoint")
+    assert not F.clear_step_ok(up, CAT, "Put the CSV on OneDrive under Reports")
+    c = F.clear_request({"steps": [up]}, CAT, request="Put the CSV on OneDrive under Reports")
+    assert "Upload the report to SharePoint" not in c, c
 
 
 def test_rewrite_answer_parses_back():

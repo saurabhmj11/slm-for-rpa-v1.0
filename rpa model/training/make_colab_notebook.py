@@ -476,9 +476,10 @@ print("\\nplain-wording eval (BARE model: raw generation, no loop guard, no cata
 if NEW_FORMAT:
     print("answer kinds (flow / question / reply):", _kinds)
 # Beginner set: 80 requests the way people with no IT background write them (vague goals, business words, casual,
-# typos, Hinglish, Indian English, voice, story). 60 must be built (right = passes every rule + has the must actions
-# in order), 20 miss a key detail and must be ASKED about (right = a Question naming that detail; a flow built on a
-# guess counts as "assumed", not right). Scored per kind and per style (eval/beginner_score.py).
+# typos, Hinglish, Indian English, voice, story). 61 must be built (right = passes every rule + has the must actions
+# in order; a must entry may list ids that do the same job), 19 point at something only the user knows and must be
+# ASKED about (right = a Question naming that detail; a flow built on a guess counts as "assumed", not right). Scored
+# per kind and per style (eval/beginner_score.py).
 _BEG = "/content/ooa/beginner_requests.jsonl"
 if NEW_FORMAT and os.path.exists(_BEG):
     import beginner_score as _B
