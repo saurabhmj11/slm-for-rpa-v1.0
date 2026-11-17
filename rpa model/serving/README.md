@@ -71,6 +71,12 @@ A client picks how hard the assistant works on a request. The modes are `Policy`
 | `ultra` | understander, planner, best-of-4 answers, parallel builders (2 samples per part), checker, fixer, critic, reporter | 3 retries, 3 fixer rounds, parts from plans of 5+ lines; no new attempt after 120 s, a running generation cut at 150 s (Studio waits 180 s) |
 | `auto` (default) | picks one per request (`choose_mode`) | |
 
+Best-of-N keeps the first verified sample; a sample's question ends the request only when no sample of its batch
+verified (and never on a fixer retry once a plan exists), so `ultra` never answers with a question where `fast` would
+have built the flow. The caller's deadline (the PC app sets it when the request arrives, so queue time counts) also
+caps the cut of a running generation: never more than `HARD_GRACE` (30 s) after it. That cut needs a backend with
+`generate_batch(deadline=)` (`NanochatLocal`); other backends only stop starting new attempts.
+
 Auto's rule (`choose_mode`, from `ooa_format.request_features`): **ultra** for a long process (5+ clauses or more
 than 60 words); for a vague request that names no file, folder, app or data, **ultra** when the model was trained to
 restate requests (rewrite rows), else **smart**; **fast** for 2 clauses or fewer, 25 words or fewer, no loop words

@@ -112,6 +112,11 @@ MODES = {
                   understander=True, critic=True, best_of=4, part_best_of=2, sample_temperature=0.25,
                   decompose_lines=4, long_plan_lines=3, part_lines=4, stop_after=120.0, time_limit=150.0),
 }
+# A caller's deadline (Router.run deadline=, e.g. the PC app's: arrival + its time budget, queue wait included) also
+# caps time_limit: a running generation is cut at most HARD_GRACE seconds after it. The cut needs a backend with
+# generate_batch(deadline=) (NanochatLocal); other backends (generate() only, models without plans) are only stopped
+# from starting new attempts at the deadline.
+HARD_GRACE = 30.0
 MODE_NAMES = ("auto", "fast", "smart", "ultra")
 MODE_LABELS = {"auto": "Auto", "fast": "Fast", "smart": "Smart", "ultra": "Ultra"}
 AUTO_LONG_CLAUSES, AUTO_LONG_WORDS = 5, 60        # a long process
@@ -667,19 +672,18 @@ class Router:
             understander = any(it.get("prefix") for it in items)
             self._agent(("understander + planner" if understander else "planner") if first else "fixer", t,
                         samples=len(items), attempt=attempt)
-            plan_stop, fail = None, None
+            plan_stop, fail, asked = None, None, None
             t = time.time()
             for (raw, stop), it in zip(outs, items):
                 ans = F.parse_answer(raw)
-                if ans["kind"] == "question" and not it.get("prefix"):
-                    tried.append({"source": "local", "ok": True, "kind": "question"})
-                    self._agent("understander" if understander else "planner", t, asked=True)
-                    return {"question": ans["question"], "plan": [], "clear": ans.get("clear")}
-            for raw, stop in outs:
-                ans = F.parse_answer(raw)
                 clear = ans.get("clear") or clear
                 if ans["kind"] == "question":
-                    continue                       # a question after a restatement start: the free sample decides
+                    # a question counts only from a sample without a restatement start (the free one), and only when
+                    # no sample of the batch verifies and none stops after a plan (decided below): best-of-N never
+                    # trades a verified flow for a question. A fixer retry never asks once a plan exists.
+                    if asked is None and not it.get("prefix") and not (attempt and plan):
+                        asked = ans
+                    continue
                 if stop and stop.startswith("plan") and ans["plan"]:
                     tried.append({"source": "local", "ok": True, "plan_lines": len(ans["plan"]), "plan_only": True})
                     plan_stop = plan_stop or ans["plan"]
@@ -696,6 +700,10 @@ class Router:
                 if fail is None:
                     fail = (raw, stop, ans, info)
             self._agent("checker", t, ok=False)
+            if asked is not None and plan_stop is None:
+                tried.append({"source": "local", "ok": True, "kind": "question"})
+                self._agent("understander" if understander else "planner", t, asked=True)
+                return {"question": asked["question"], "plan": [], "clear": asked.get("clear")}
             if plan_stop is not None:
                 plan = plan_stop
                 if can_escalate and len(plan) > p.escalate_plan_lines:
@@ -905,9 +913,14 @@ class Router:
     def _run(self, request, system=None, assistant=False, existing=None, full_user=None, deadline=None):
         t0, tried, errors, plan = time.time(), [], [], []
         p = self.policy
+        asked_by = deadline                     # the caller's own deadline (set when the request arrived)
         if p.stop_after:
             deadline = min(deadline, t0 + p.stop_after) if deadline is not None else t0 + p.stop_after
         hard = t0 + p.time_limit if p.time_limit else None
+        if hard is not None and asked_by is not None:
+            # the caller's deadline was set when the request arrived (time spent queued for the model counts): a
+            # running generation is never cut later than HARD_GRACE seconds after it (Studio waits 180 s)
+            hard = min(hard, asked_by + HARD_GRACE)
         late = lambda: deadline is not None and tried and time.time() >= deadline
         can_escalate = self.cloud is not None and p.allow_escalation
         simple = p.local_first or (clauses(request) <= p.max_clauses_local and len(request) <= 500)

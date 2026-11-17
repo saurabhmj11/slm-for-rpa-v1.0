@@ -244,6 +244,38 @@ def test_understander():
     assert res["question"] == "Which folder are the invoices in?" and not res["verified"]
 
 
+def test_best_of_never_trades_a_verified_flow_for_a_question():
+    """A batch with one verified flow and questions in the other samples returns the flow (ultra is never worse than
+    fast); a question ends the request only when no sample of the batch verified, also without the understander."""
+    q = "Question: Which CSV file should I read?"
+
+    def mixed(req, prompt, attempt, n=[0]):
+        n[0] += 1
+        return plan_answer(CSV_TO_EXCEL) if n[0] == 1 else q
+    m = BatchAware(mixed)
+    res = router(m, mode="ultra").run(CSV_REQ)
+    assert res["verified"] and not res.get("question") and m.batches[0] == 4, res
+
+    def late_flow(req, prompt, attempt, n=[0]):
+        n[0] += 1
+        return plan_answer(CSV_TO_EXCEL) if n[0] == 4 else q
+    m = BatchAware(late_flow)
+    res = router(m, mode="ultra").run(CSV_REQ)
+    assert res["verified"] and not res.get("question"), res
+    m = BatchAware(lambda r, p, a: q)
+    res = router(m, mode="ultra").run(CSV_REQ)
+    assert res["question"] == "Which CSV file should I read?" and not res["verified"]
+    m = BatchAware(lambda r, p, a: q)
+    assert router(m, mode="fast").run(CSV_REQ)["question"] == "Which CSV file should I read?"
+
+    def fixer_asks(req, prompt, attempt, n=[0]):        # a retry after a planned but broken flow never asks
+        n[0] += 1
+        return "Plan:\n1. Read the CSV (ooa.csv/read)\nFlow:\n{bad" if n[0] == 1 else q
+    m = BatchAware(fixer_asks)
+    res = router(m, mode="smart").run(CSV_REQ)
+    assert not res.get("question") and not res["verified"] and len(m.prompts) == 3, (res, len(m.prompts))
+
+
 EMAIL = {"kind": "TaskBot", "id": "mail", "name": "mail",
          "variables": [{"name": "manager", "type": "String", "direction": "input", "required": True}],
          "steps": [{"id": "s1", "action": "ooa.email/send", "description": "Email the sheet to the manager",
@@ -315,13 +347,24 @@ def test_old_backends_keep_working():
 
 
 def test_time_limits():
-    """stop_after: no new attempt starts after it; time_limit: the deadline given to a running batch."""
-    m = BatchAware(lambda r, p, a: "Plan:\n1. Log it (core/log)\nFlow:\n{bad")
+    """stop_after: no new attempt starts after it; time_limit: the deadline given to a running batch, never more than
+    HARD_GRACE seconds after the caller's deadline (a request that waited in the queue has less time left)."""
+    bad = lambda r, p, a: "Plan:\n1. Log it (core/log)\nFlow:\n{bad"
+    m = BatchAware(bad)
     rt = router(m, mode="smart")
     t = time.time()
-    res = rt.run(CSV_REQ, deadline=time.time() - 1)
+    res = rt.run(CSV_REQ)
+    assert not res["verified"] and t + 139 < m.deadlines[0] <= time.time() + 140      # no caller deadline
+    m = BatchAware(bad)
+    rt = router(m, mode="smart")
+    dl = time.time() - 1                                  # e.g. 121 s spent waiting for the model
+    res = rt.run(CSV_REQ, deadline=dl)
     assert not res["verified"] and len(m.prompts) == 1 and S.OUT_OF_TIME in res["problems"]
-    assert t + 139 < m.deadlines[0] <= time.time() + 140
+    assert m.deadlines[0] == dl + S.HARD_GRACE, (m.deadlines[0], dl)
+    m = BatchAware(bad)
+    dl = time.time() + 120 - 60                           # arrived 60 s ago with a 120 s budget
+    router(m, mode="ultra").run(CSV_REQ, deadline=dl)
+    assert m.deadlines[0] == dl + S.HARD_GRACE and m.deadlines[0] - (dl - 120) < 180     # inside Studio's 180 s
 
 
 def test_end_to_end_server():
