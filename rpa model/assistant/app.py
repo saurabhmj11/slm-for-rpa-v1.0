@@ -38,7 +38,7 @@ sys.path.insert(0, str(ROOT / "training"))
 from knowledge import Knowledge              # noqa: E402
 from runner_bridge import RunnerBridge       # noqa: E402
 from ooa_server import (Router, Policy, chat_completion, quick_reply, openai_error, feedback_row, make_cloud,  # noqa: E402
-                        MODEL_ID, call_generate)
+                        MODEL_ID, call_generate, models_list, MODE_NAMES, MODE_HEADER)
 import ooa_reward                            # noqa: E402
 
 STATIC = HERE / "static"
@@ -144,13 +144,34 @@ class _StatsRecorder:
             st.setdefault("seconds", round(time.time() - t0, 2))
             self.stats.append(st)
 
+    @property
+    def last_batch_stats(self):
+        return getattr(self.model, "last_batch_stats", None)
+
+    def __getattr__(self, name):
+        # generate_batch (the agent team's parallel builders) only when the model has it: the Router checks
+        if name == "generate_batch" and callable(getattr(self.model, "generate_batch", None)):
+            return self._generate_batch
+        raise AttributeError(name)
+
+    def _generate_batch(self, items, deadline=None):
+        t0 = time.time()
+        try:
+            return self.model.generate_batch(items, deadline=deadline)
+        finally:
+            for st in list(getattr(self.model, "last_batch_stats", None) or []):
+                st = dict(st)
+                st.pop("ids", None)
+                st.setdefault("seconds", round(time.time() - t0, 2))
+                self.stats.append(st)
+
 
 class Assistant:
     """Everything the routes need, wired once."""
 
     def __init__(self, catalog: str, platform: str, data_dir: str, model, max_waiting: int = MAX_WAITING,
                  time_budget: float = TIME_BUDGET, policy: Policy | None = None, cloud=None, examples: str | None = None,
-                 prompt_format: str = "auto"):
+                 prompt_format: str = "auto", mode: str | None = None):
         """model may be None while it loads (main() loads it after the server is up): /ready says so and the
         model routes answer 503 until set_model() is called.
         policy / cloud: escalation (off by default: Policy(allow_escalation=False)); examples: the example index of
@@ -175,7 +196,8 @@ class Assistant:
             found = Path(self.catalog).parent / "examples.jsonl"
             examples = str(found) if found.is_file() else None
         self.router = Router(self.catalog, self.platform, policy or Policy(allow_escalation=False, local_retries=1),
-                             local=self.recorder, cloud=cloud, examples=examples, prompt_format=prompt_format)
+                             local=self.recorder, cloud=cloud, examples=examples, prompt_format=prompt_format,
+                             mode=mode)
         self.catalog_sha256, self.schema_sha256 = _sha256(self.catalog), _sha256(self.schema)
         self.model_lock = threading.Lock()      # one generation at a time
         self.wait_lock = threading.Lock()
@@ -236,8 +258,9 @@ class Assistant:
                 "contract": CONTRACT, "model_step": info.get("step"), "catalog_actions": len(self.router.cat),
                 "catalog_sha256": self.catalog_sha256, "schema_sha256": self.schema_sha256}
 
-    def chat(self, body):
-        """POST /v1/chat/completions -> (status, body). A probe or a refused request never waits for the model."""
+    def chat(self, body, mode_header=None):
+        """POST /v1/chat/completions -> (status, body). A probe or a refused request never waits for the model.
+        mode_header: the X-OOA-Mode header (see ooa_server.request_mode)."""
         counter = getattr(self.model, "count_tokens", None)      # the real tokenizer; None: characters / 4
         v = self.version()
         version = {"version": v["version"], "model_step": v["model_step"], "catalog_sha256": v["catalog_sha256"]}
@@ -245,7 +268,7 @@ class Assistant:
         if quick is not None:
             return quick
         with self.generation() as deadline:
-            return chat_completion(self.router, body, counter, version, deadline)
+            return chat_completion(self.router, body, counter, version, deadline, mode_header)
 
     # ------------------------------------------------------------------ status / build
     def status(self):
@@ -259,9 +282,12 @@ class Assistant:
 
     def build(self, body):
         request = _text(body, "request", MAX_REQUEST)
+        mode = body.get("mode") or None
+        if mode is not None and mode not in MODE_NAMES:
+            raise ApiError(400, "mode must be one of " + ", ".join(MODE_NAMES))
         with self.generation() as deadline:
             self.recorder.stats = []
-            res = self.router.run(request, deadline=deadline)
+            res = self.router.run(request, deadline=deadline, mode=mode)
             stats = self.recorder.stats
         attempts = [dict(a) for a in res.get("attempts", [])]
         if not res.get("verified") and not attempts:
@@ -279,7 +305,8 @@ class Assistant:
                "repairs": res.get("repairs", []) if flow is not None else [], "seconds": res.get("seconds"),
                "attempts": attempts, "model_tried": True, "reason": res.get("reason"), "explanation": None, "can_run": None,
                "plan": res.get("plan", []), "warnings": res.get("warnings", []), "question": res.get("question"),
-               "source": res.get("source")}
+               "source": res.get("source"), "mode": res.get("mode"), "report": res.get("report"),
+               "agents": res.get("agents", [])}
         if flow is not None:
             out["explanation"] = self.knowledge.explain_flow(flow)
             out["can_run"] = self.runner.can_run(flow)
@@ -521,8 +548,7 @@ def make_handler(app: Assistant, token: str | None = None, allowed_hosts=()):
                 if path.startswith("/static/"):
                     return self._static(path[len("/static/"):])
                 if path == "/v1/models":          # OpenAI-compatible model list (for model connection set-up screens)
-                    return self._send(200, {"object": "list", "data": [{"id": MODEL_ID, "object": "model",
-                                                                        "owned_by": "local"}]})
+                    return self._send(200, models_list())
                 k = app.knowledge
                 if path == "/api/status":
                     return self._send(200, app.status())
@@ -568,7 +594,7 @@ def make_handler(app: Assistant, token: str | None = None, allowed_hosts=()):
             if not isinstance(body, dict):
                 raise ApiError(400, "the body must be a JSON object")
             if path == "/v1/chat/completions":
-                return self._send(*app.chat(body))    # one generation at a time, like the Build tab
+                return self._send(*app.chat(body, self.headers.get(MODE_HEADER)))   # one generation at a time
             if path == "/v1/feedback":
                 return self._send(200, app.program_feedback(body))
             routes = {
@@ -680,6 +706,11 @@ def parse_args(argv=None):
                     help="environment variable holding the API key for --escalate-url (default OOA_ESCALATE_API_KEY)")
     ap.add_argument("--escalate-plan-lines", type=int, default=12,
                     help="a failed flow whose plan has more lines goes to --escalate-url at once (default 12)")
+    ap.add_argument("--mode", default="auto", choices=list(MODE_NAMES) + ["none"],
+                    help="assistant mode when a request names none: auto (default) picks per request; fast (one "
+                         "attempt, simple requests), smart (checks and fixes its work, long plans in parts), ultra "
+                         "(several tries, for long processes); none: the settings before modes. Studio picks one with "
+                         "the model name ooa-flow-assistant[-fast|-smart|-ultra]; the Build tab has its own menu")
     ap.add_argument("--no-catalog-lock", action="store_true",
                     help="let the model write any action / input name (default: only real catalog names, see constrained.py)")
     return ap.parse_args(argv)
@@ -703,7 +734,7 @@ def main(argv=None):
     catalog = args.catalog or default_catalog(args.model_dir)
     policy = policy_from_args(args)
     app = Assistant(catalog, args.platform, args.data_dir, None, args.max_waiting, args.time_budget, policy,
-                    make_cloud(policy), args.examples, args.prompt_format)
+                    make_cloud(policy), args.examples, args.prompt_format, None if args.mode == "none" else args.mode)
     srv = make_server(app, args.port, args.host, token, args.allowed_hosts)
     failed = []
 

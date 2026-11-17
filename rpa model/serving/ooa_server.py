@@ -8,19 +8,23 @@
                     endpoint: escalate_url) -> repair -> verify (one retry with the errors)
         verified -> safety warnings for destructive steps (notes, "warnings", the ooa field)
         nothing verified -> honest error (never returns an unchecked flow as if it were fine)
-   POST /v1/chat/completions   OpenAI-style; the last user message is the request; the answer is the flow JSON
+   POST /v1/chat/completions   OpenAI-style; the last user message is the request; the answer is the flow JSON.
+                               Mode (MODES: fast / smart / ultra, or auto): model name ooa-flow-assistant[-fast|
+                               -smart|-ultra], a "mode" field or the X-OOA-Mode header; else the server's --mode
+   GET  /v1/models             ooa-assistant (the server's default mode) and one name per mode
    POST /v1/feedback           {"request","flow","verdict": inserted|discarded|edited,"edited_flow"} (or the older
                                {"prompt","flow","accepted"}) -> feedback.jsonl (only if the policy allows)
    GET  /health
 
 Run:  python ooa_server.py --catalog catalog.jsonl --platform PLATFORM_REPO --policy policy.json [--local nanochat]
                            [--examples examples.jsonl] [--prompt-format auto|plain|context] [--port 8080]
+                           [--mode auto|fast|smart|ultra|none]
 Local backend: any object with generate(prompt, attempt) -> str (see backends.py). Escalation: Anthropic Messages API
 (env ANTHROPIC_API_KEY) or an OpenAI-compatible endpoint (policy escalate_url / escalate_model / escalate_key_env).
 Default policy is LOCAL-ONLY and stores nothing.
 """
-import argparse, inspect, json, os, re, sys, time, threading
-from dataclasses import dataclass, asdict
+import argparse, copy, inspect, json, os, re, sys, time, threading
+from dataclasses import dataclass, asdict, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -64,11 +68,74 @@ class Policy:
     part_max_tokens: int = 1500          # tokens for the answer of one part
     part_plan_given: bool = True         # a part's answer starts with its plan lines (backends that take prefix)
     part_lines: int = 5                  # plan lines per part (ooa_format.plan_parts; a long loop / try / if is cut too)
+    # the agent team (Router._team), used when a mode is chosen (MODES); empty mode: the layers above, as before
+    mode: str = ""                       # fast | smart | ultra (set by Policy.for_mode; "" = no mode)
+    use_parts: bool = True               # a long plan may be built in parts at all
+    parallel_parts: bool = True          # build the parts at once in one batched generation (backend generate_batch)
+    fixer_rounds: int = 1                # rounds that rebuild only the failed parts, each seeing its own problems
+    understander: bool = False           # ask for "Clear request: ..." first (models trained with rewrite rows only)
+    critic: bool = False                 # coverage check against the request's clauses; a missing piece is built once
+    best_of: int = 1                     # answers sampled at once per attempt; the first verified one is kept
+    part_best_of: int = 1                # the same per part
+    sample_temperature: float = 0.25     # temperature of the extra samples (best_of > 1)
+    stop_after: float = 0.0              # seconds after which no new attempt starts (0: only the caller's deadline)
+    time_limit: float = 0.0              # seconds after which a generation still running is stopped (0: none)
 
     @classmethod
     def load(cls, path=None):
         d = json.load(open(path)) if path else {}
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+    def for_mode(self, mode):
+        """These settings with a mode's preset on top (MODES); the client's data settings (escalation, masking,
+        logs, context) stay as they are. An unknown mode raises ValueError."""
+        if mode not in MODES:
+            raise ValueError(f"unknown mode {mode!r}: one of {', '.join(MODE_NAMES)}")
+        return replace(self, mode=mode, **MODES[mode])
+
+
+# The assistant's modes: Policy presets on top of the client's policy (the only place they are defined). Studio and
+# OpenAI-style clients pick one by model name (MODEL_NAMES), a "mode" field or the X-OOA-Mode header; auto (the server
+# default) picks fast, smart or ultra per request (choose_mode).
+#   fast   planner + one builder + checker: one attempt, no parts, no self-correction (simple requests, 1-5 s on CPU)
+#   smart  the agent team without the critic: planner, parallel builders for long plans, checker, fixer (2 rounds),
+#          reporter; whole answers get 2 self-correction retries
+#   ultra  the whole team: understander (restatement first, when the model was trained for it), best-of-4 answers,
+#          parts from shorter plans, parallel builders (2 samples each), fixer (3 rounds), critic, reporter; stops
+#          starting attempts after 120 s and cuts a generation still running at 150 s (Studio waits 180 s)
+MODES = {
+    "fast": dict(local_retries=0, use_parts=False, parts_first=False, fixer_rounds=0, understander=False, critic=False,
+                 best_of=1, part_best_of=1, stop_after=0.0, time_limit=60.0),
+    "smart": dict(local_retries=2, use_parts=True, parts_first=True, parallel_parts=True, fixer_rounds=2,
+                  understander=False, critic=False, best_of=1, part_best_of=1, stop_after=100.0, time_limit=140.0),
+    "ultra": dict(local_retries=3, use_parts=True, parts_first=True, parallel_parts=True, fixer_rounds=3,
+                  understander=True, critic=True, best_of=4, part_best_of=2, sample_temperature=0.25,
+                  decompose_lines=4, long_plan_lines=3, part_lines=4, stop_after=120.0, time_limit=150.0),
+}
+MODE_NAMES = ("auto", "fast", "smart", "ultra")
+MODE_LABELS = {"auto": "Auto", "fast": "Fast", "smart": "Smart", "ultra": "Ultra"}
+AUTO_LONG_CLAUSES, AUTO_LONG_WORDS = 5, 60        # a long process
+AUTO_FAST_CLAUSES, AUTO_FAST_WORDS = 2, 25        # short and simple
+
+
+def choose_mode(request, rewrite=False):
+    """Auto's choice for one request -> (mode, reason in plain words). From ooa_format.request_features:
+      1. ultra  a long process: 5+ clauses or more than 60 words
+      2. vague  no file, folder, app or data named at all: ultra when the model can restate a request
+                (rewrite rows in its training: the understander then runs), else smart
+      3. fast   2 clauses or fewer, 25 words or fewer, no loop words (each, every, repeat ...) and no condition words
+                (if, when, otherwise, only ...)
+      4. smart  everything else (a loop, a condition, 3-4 clauses, a longer sentence)"""
+    f = F.request_features(request)
+    if f["clauses"] >= AUTO_LONG_CLAUSES or f["words"] > AUTO_LONG_WORDS:
+        return "ultra", f"a long process of {f['clauses']} parts"
+    if not f["has_thing"]:
+        return ("ultra" if rewrite else "smart"), "no file, app or data is named"
+    if (f["clauses"] <= AUTO_FAST_CLAUSES and f["words"] <= AUTO_FAST_WORDS and not f["loop"]
+            and not f["condition"]):
+        return "fast", "a short, simple request"
+    why = "a loop" if f["loop"] else "a condition" if f["condition"] else f"{f['clauses']} parts"
+    return "smart", why
 
 
 PII = [(re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "[EMAIL]"),
@@ -153,7 +220,9 @@ class Router:
     -> safety warnings on the verified flow. A model trained before context and plans (prompt_format "plain") gets
     the request only and answers with flow JSON; that path works as before."""
 
-    def __init__(self, catalog, platform, policy, local=None, cloud=None, examples=None, prompt_format=None):
+    def __init__(self, catalog, platform, policy, local=None, cloud=None, examples=None, prompt_format=None, mode=None):
+        """mode: the mode a request runs in when it names none (auto | fast | smart | ultra; None: the policy's own
+        settings, without the agent team, as before modes existed)."""
         os.environ["OOA_CATALOG"] = catalog
         os.environ["OOA_SCHEMA"] = str(Path(platform) / "contracts/flow-schema/flow.v1.json")
         R.configure()
@@ -169,6 +238,11 @@ class Router:
         self.trained_context = self._trained_context(examples) if self.examples is not None else None
         self.prompt_format = prompt_format or policy.prompt_format
         self.lock = threading.Lock()
+        if mode is not None and mode not in MODE_NAMES:
+            raise ValueError(f"unknown mode {mode!r}: one of {', '.join(MODE_NAMES)}")
+        self.default_mode = mode
+        self.trained_rewrite = self._trained_rewrite(examples) if self.examples is not None else False
+        self._agents = None          # per request (a copy of the router runs each moded request): the agents that ran
 
     # -- prompt format ------------------------------------------------------------------------------
     def format(self):
@@ -225,6 +299,25 @@ class Router:
             return None
         return n if isinstance(n, int) and n > 0 else None
 
+    @staticmethod
+    def _trained_rewrite(examples):
+        """True when the model pack's training data had restatement rows ("Clear request: ...", render_report.json
+        totals.rewrite beside the example index)."""
+        f = Path(examples).resolve().parent / "render_report.json"
+        try:
+            n = json.loads(f.read_text(encoding="utf-8"))["totals"].get("rewrite", 0)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False
+        return isinstance(n, int) and n > 0
+
+    def supports_rewrite(self):
+        """Whether the local model writes "Clear request: ..." when asked: the backend says so (info["rewrite"]) or
+        its training data had rewrite rows. Older models skip the understander."""
+        info = getattr(self.local, "info", None)
+        if isinstance(info, dict) and isinstance(info.get("rewrite"), bool):
+            return info["rewrite"]
+        return bool(self.trained_rewrite)
+
     # -- one answer: parse -> repair -> verify -------------------------------------------------------
     def verify(self, text, existing=None, plan=None, request=None):
         """Flow text -> (flow dict, repair notes) when it passes, else (None, problems). plan: the answer's plan
@@ -258,13 +351,14 @@ class Router:
         # the platform writes variables $name$ (Studio saves them so, and only $name$ is replaced inside text)
         return F.to_dollar_name_dollar(flow, names | {v.get("name") for v in extra}), notes
 
-    def answer_text(self, flow, existing=None, assistant=False, warnings=(), understood=None):
+    def answer_text(self, flow, existing=None, assistant=False, warnings=(), understood=None, report=None):
         """The verified flow as the client reads it: Studio's {variables, steps, notes, warnings}, or the flow JSON.
-        understood: the model's restatement of the request; Studio shows it first in notes ("I understood: ...")."""
+        understood: the model's restatement of the request; Studio shows it first in notes ("I understood: ...").
+        report: the reporter's summary (modes), last in notes."""
         if assistant:
             have = {v.get("name") for v in (existing or []) if isinstance(v, dict)}
             said = [UNDERSTOOD + understood.rstrip(".") + "."] if understood else []
-            notes = " ".join(said + [STUDIO_NOTE] + list(warnings))
+            notes = " ".join(said + [STUDIO_NOTE] + list(warnings) + ([report] if report else []))
             out = {"variables": [v for v in flow.get("variables", []) if v.get("name") not in have], "steps": flow["steps"],
                    "notes": notes, "warnings": list(warnings)}
             return json.dumps(out, separators=(",", ":"), ensure_ascii=False)
@@ -485,20 +579,349 @@ class Router:
             return None, ["The flow built in parts did not pass the checker: " + "; ".join(info[:2])]
         return flow, info + [f"built in {len(parts)} parts from the plan"]
 
-    def run(self, request, system=None, assistant=False, existing=None, full_user=None, deadline=None):
-        """deadline: time.time() value after which no further attempt (retry or cloud call) starts."""
-        t0, tried, errors, plan = time.time(), [], [], []
-        late = lambda: deadline is not None and tried and time.time() >= deadline
+    # -- the agent team (modes) ----------------------------------------------------------------------------
+    # One model plays every role with a different prompt:
+    #   understander  "Clear request: ..." first (ultra, models trained with rewrite rows); a question ends the request
+    #   planner       the plan; stops at "Flow:" when the plan is long enough to build in parts (parts_rule), else it
+    #                 goes on and writes the flow itself (the single builder)
+    #   builders      every part of a long plan at once, in ONE batched generation (backend generate_batch); a part
+    #                 inside a loop / try / if waits for the part that writes it (ooa_format.part_dependencies)
+    #   assembler     links variables the parts named differently (ooa_format.link_part_variables), merges them
+    #   checker       repair + verify per answer, per part and for the merged flow
+    #   fixer         rebuilds only the failed parts (batched too), each with its own problems; whole answers get
+    #                 self-correction retries
+    #   critic        request clauses no step covers (ooa_format.uncovered_clauses) are built once as new parts
+    #   reporter      a plain-English summary in the notes: mode, what the flow does, inputs to fill in, agents, time
+    def _agent(self, name, t0, **info):
+        if self._agents is not None:
+            self._agents.append({"agent": name, "seconds": round(time.time() - t0, 2), **info})
+
+    def can_batch(self):
+        return callable(getattr(self.local, "generate_batch", None))
+
+    def generate_many(self, items, hard=None):
+        """Answers for several prompts: one batched generation when the backend has generate_batch, else one call
+        after another (backends without it, e.g. an older serving/backends.py: same results, no speed-up). items as
+        NanochatLocal.generate_batch takes them. hard: time.time() after which a running generation is cut.
+        Returns [(text, stop)]."""
+        if self.can_batch() and (len(items) > 1 or hard is not None):
+            fn = self.local.generate_batch
+            try:
+                takes = "deadline" in inspect.signature(fn).parameters
+            except (TypeError, ValueError):
+                takes = False
+            texts = fn(items, deadline=hard) if takes else fn(items)
+            stats = getattr(self.local, "last_batch_stats", None)
+            stats = stats if isinstance(stats, list) and len(stats) == len(texts) else [{}] * len(texts)
+            return [(t, st.get("stop") if isinstance(st, dict) and isinstance(st.get("stop"), str) else None)
+                    for t, st in zip(texts, stats)]
+        return [self.generate(it["prompt"], it.get("attempt", 0), max_tokens=it.get("max_tokens"),
+                              on_plan=it.get("on_plan"), prefix=it.get("prefix")) for it in items]
+
+    def _samples(self, base, n, attempt):
+        """n copies of a generation item: the first as given, the others at the policy's sample temperature with
+        their own seeds (best-of-N). A backend without generate_batch gets one."""
+        n = max(1, n) if self.can_batch() else 1
+        out = [dict(base)]
+        for k in range(1, n):
+            out.append({**base, "temperature": self.policy.sample_temperature, "seed": 7000 + 101 * attempt + k})
+        return out
+
+    def _team(self, request, existing, tried, late, can_escalate, hard):
+        """The agent team's attempts (see above). Same result shape as _local. A model that gets plain prompts (older
+        than context and plans) runs the old layers."""
+        if self.format() != "context":
+            t = time.time()
+            out = self._local(request, existing, tried, late, can_escalate)
+            self._agent("builder (flow only, a model without plans)", t, attempts=len(tried))
+            return out
+        out = self._team_answer(request, existing, tried, late, can_escalate, hard)
+        if out.get("flow") is not None and self.policy.critic and not late():
+            out = self._critic(request, out, existing, tried, late, hard)
+        return out
+
+    def _team_answer(self, request, existing, tried, late, can_escalate, hard):
         p = self.policy
+        rewrite = p.understander and self.supports_rewrite()
+        rule = self.parts_rule(request, can_escalate) if p.use_parts and p.parts_first else None
+        prev = probs = None
+        plan, errors, decomposed, clear = [], [], False, None
+        for attempt in range(1 + max(0, p.local_retries)):
+            if late():
+                return {"errors": list(errors) + [OUT_OF_TIME], "plan": plan}
+            prompt = self.prompt(request, existing, prev, probs)
+            base = {"prompt": prompt, "attempt": attempt, "max_tokens": p.max_tokens,
+                    "on_plan": rule if not decomposed else None}
+            items = self._samples(base, p.best_of, attempt)
+            if rewrite and prev is None and clear is None and len(items) > 1:
+                # the understander: every sample but the last starts with "Clear request: "; the last is free, so the
+                # model can still ask a question (a restatement start never turns into one)
+                for it in items[:-1]:
+                    it["prefix"] = F.CLEAR_HEAD + " "
+            t = time.time()
+            try:
+                outs = self.generate_many(items, hard)
+            except Exception as ex:
+                return {"errors": [f"local model error: {ex}"], "plan": plan}
+            first = attempt == 0
+            understander = any(it.get("prefix") for it in items)
+            self._agent(("understander + planner" if understander else "planner") if first else "fixer", t,
+                        samples=len(items), attempt=attempt)
+            plan_stop, fail = None, None
+            t = time.time()
+            for (raw, stop), it in zip(outs, items):
+                ans = F.parse_answer(raw)
+                if ans["kind"] == "question" and not it.get("prefix"):
+                    tried.append({"source": "local", "ok": True, "kind": "question"})
+                    self._agent("understander" if understander else "planner", t, asked=True)
+                    return {"question": ans["question"], "plan": [], "clear": ans.get("clear")}
+            for raw, stop in outs:
+                ans = F.parse_answer(raw)
+                clear = ans.get("clear") or clear
+                if ans["kind"] == "question":
+                    continue                       # a question after a restatement start: the free sample decides
+                if stop and stop.startswith("plan") and ans["plan"]:
+                    tried.append({"source": "local", "ok": True, "plan_lines": len(ans["plan"]), "plan_only": True})
+                    plan_stop = plan_stop or ans["plan"]
+                    continue
+                flow, info = self.verify(ans["flow_text"] if ans["kind"] == "flow" else raw, existing, ans["plan"],
+                                         request)
+                tried.append({"source": "local", "ok": flow is not None})
+                if stop:
+                    tried[-1]["stop"] = stop
+                if flow is not None:
+                    self._agent("checker", t, ok=True)
+                    return {"flow": flow, "notes": info, "plan": ans["plan"], "clear": clear}
+                tried[-1]["preview"] = (raw or "")[:300]
+                if fail is None:
+                    fail = (raw, stop, ans, info)
+            self._agent("checker", t, ok=False)
+            if plan_stop is not None:
+                plan = plan_stop
+                if can_escalate and len(plan) > p.escalate_plan_lines:
+                    return {"errors": ["a long process: the plan has %d lines" % len(plan)], "plan": plan}
+                decomposed = True
+                flow, info = self._build_parts(request, plan, existing, tried, late, hard)
+                if flow is not None:
+                    return {"flow": flow, "notes": info, "plan": plan, "parts": True, "clear": clear}
+                errors = info
+                continue
+            if fail is None:
+                continue
+            raw, stop, ans, info = fail
+            looped = bool(stop and stop.startswith("loop"))
+            if ans["plan"] and not (looped and ans["flow_text"] is None):
+                plan = ans["plan"]
+            errors = ([LOOPED] if looped else []) + list(info)
+            if ans["kind"] == "reply":
+                return {"errors": [NOT_A_TASK], "plan": plan}
+            prev = None if looped else self._previous(ans["flow_text"], request, ans["plan"], existing)
+            probs = None if looped else info
+            if plan and can_escalate and len(plan) > p.escalate_plan_lines:
+                return {"errors": errors, "plan": plan}
+            if p.use_parts and not decomposed and len(plan) > p.decompose_lines and len(self.parts_of(plan)) >= 2:
+                break
+        if p.use_parts and plan and not decomposed and len(self.parts_of(plan)) >= 2 and not late():
+            flow, info = self._build_parts(request, plan, existing, tried, late, hard)
+            if flow is not None:
+                return {"flow": flow, "notes": info, "plan": plan, "parts": True, "clear": clear}
+            errors = list(errors) + info
+        elif plan and late():
+            errors = list(errors) + [OUT_OF_TIME]
+        return {"errors": errors, "plan": plan}
+
+    def _part_spec(self, i, chunks, built, base, deps):
+        """(request, known variables, required actions) for part i, or None when the container it goes into is not
+        there. Known: the open agent's variables, those of the parts before it built so far, and the items of the
+        loops it is inside."""
+        ch = chunks[i]
+        creq, need = F.chunk_request(ch["chunk"]), F.chunk_actions(ch["chunk"])
+        known = list(base)
+        for j in range(i):
+            if built[j] is not None:
+                names = {v.get("name") for v in known}
+                known += [v for v in built[j].get("variables", []) if isinstance(v, dict) and v.get("name") not in names]
+        if ch["inside"]:
+            upto = deps[i] if deps[i] is not None else i - 1
+            prior = [(built[j], chunks[j]["inside"]) for j in range(upto + 1) if built[j] is not None]
+            so_far = F.merge_flows([b for b, _ in prior], inside=[x for _, x in prior]) or {}
+            path = F.container_path(so_far.get("steps") or [], ch["inside"])
+            if not path:
+                return None
+            items = [b["args"]["as"] for b in path if b.get("action") == "core/loop"
+                     and isinstance((b.get("args") or {}).get("as"), str)]
+            for item in items:
+                if item not in {v.get("name") for v in known}:
+                    known.append({"name": item, "type": "Any", "direction": "local"})
+            if items:
+                creq = f"With the current {items[-1]}: {creq[:1].lower() + creq[1:]}"
+        return creq, known, need
+
+    def _build_parts(self, request, plan, existing, tried, late, hard):
+        """Builders + assembler + fixer for a long plan: every part at once in one batched generation (parts inside a
+        container wait for the part that writes it), the failed ones rebuilt with their problems for fixer_rounds
+        rounds, then variables linked and the parts merged; the merged flow must pass the checker and cover the plan.
+        Without generate_batch (or parallel_parts off) the parts are built one after another (_decompose).
+        Returns (flow, notes) or (None, problems)."""
+        p = self.policy
+        chunks = self.parts_of(plan)
+        n = len(chunks)
+        if n < 2:
+            return None, []
+        if not (p.parallel_parts and self.can_batch()):
+            t = time.time()
+            res = self._decompose(request, plan, existing, tried, late)
+            self._agent("builders (one after another)", t, parts=n)
+            return res
+        deps = F.part_dependencies(chunks)
+        base = [dict(v) for v in existing or [] if isinstance(v, dict)]
+        built, last, problems, reqs = [None] * n, [(None, None)] * n, [[] for _ in range(n)], [None] * n
+        for rnd in range(1 + max(0, p.fixer_rounds)):
+            todo = [i for i in range(n) if built[i] is None]
+            if not todo:
+                break
+            while todo:
+                if late():
+                    return None, [OUT_OF_TIME]
+                ready = [i for i in todo if deps[i] is None or built[deps[i]] is not None]
+                if not ready:
+                    break
+                items, owner = [], []
+                for i in ready:
+                    spec = self._part_spec(i, chunks, built, base, deps)
+                    if spec is None:
+                        problems[i] = ["it goes inside a loop, try or if, but the parts before it did not end with one"]
+                        continue
+                    creq, known, need = spec
+                    reqs[i] = (creq, known)
+                    prev, probs = last[i]
+                    prompt = self.prompt(creq, known, prev, probs, required=need)
+                    prefix = F.answer_prefix(F.chunk_plan_lines(chunks[i]["chunk"])) if p.part_plan_given else None
+                    for it in self._samples({"prompt": prompt, "attempt": rnd, "max_tokens": p.part_max_tokens,
+                                             "prefix": prefix}, p.part_best_of, rnd * 31 + i):
+                        items.append(it)
+                        owner.append(i)
+                todo = [i for i in todo if i not in ready]
+                if not items:
+                    continue
+                t = time.time()
+                try:
+                    outs = self.generate_many(items, hard)
+                except Exception as ex:
+                    return None, [f"local model error: {ex}"]
+                self._agent("builders" if rnd == 0 else "fixer", t, parts=len(set(owner)), batch=len(items), round=rnd)
+                t = time.time()
+                for i, (raw, stop) in zip(owner, outs):
+                    if built[i] is not None:
+                        continue
+                    creq, known = reqs[i]
+                    ans = F.parse_answer(raw)
+                    text = ans["flow_text"] if ans["kind"] == "flow" else raw
+                    part, info = self.verify(text, known, ans["plan"], creq)
+                    tried.append({"source": "local", "part": i + 1, "of": n, "ok": part is not None, "round": rnd})
+                    if chunks[i]["inside"]:
+                        tried[-1]["inside"] = int(chunks[i]["inside"])
+                    if stop and stop != "end":
+                        tried[-1]["stop"] = stop
+                    if part is not None:
+                        built[i] = part
+                        continue
+                    problems[i] = info
+                    looped = bool(stop and stop.startswith("loop"))
+                    last[i] = (None, None) if looped else (self._previous(text, creq, ans["plan"], known), info)
+                self._agent("checker", t, parts=len(set(owner)))
+        missing = [i for i in range(n) if built[i] is None]
+        if missing:
+            i = missing[0]
+            creq = reqs[i][0] if reqs[i] else F.chunk_request(chunks[i]["chunk"])
+            return None, [f"Part {i + 1} of {n} ('{creq[:80]}') did not pass the checker: " + "; ".join(problems[i][:2])]
+        t = time.time()
+        parts, links = F.link_part_variables(built, base)
+        merged = F.merge_flows(parts, request, [ch["inside"] for ch in chunks])
+        flow, info = self.verify(F.compact(merged), existing, plan)
+        self._agent("assembler", t, parts=n, linked=len(links), ok=flow is not None)
+        tried.append({"source": "local", "merged_parts": n, "ok": flow is not None})
+        if flow is None:
+            return None, ["The flow built in parts did not pass the checker: " + "; ".join(info[:2])]
+        return flow, info + [f"built in {n} parts from the plan, at once"] + [
+            f"part {k}: '{a}' is '{b}' of an earlier part" for k, a, b in links]
+
+    def _critic(self, request, out, existing, tried, late, hard):
+        """Coverage check of a verified flow against the request (ooa_format.uncovered_clauses: a clause that names
+        something to do and that no step covers). Each such clause is built once as a new part (one batch) and
+        added after the steps; the result must pass the checker again, else the flow stays as it was and the notes
+        say what may be missing."""
+        t = time.time()
+        flow = out["flow"]
+        missing = F.uncovered_clauses(request, flow, self.index, plan=out.get("plan"))
+        self._agent("critic", t, missing=len(missing))
+        if not missing:
+            return out
+        known = [v for v in flow.get("variables", []) if isinstance(v, dict)]
+        items = [{"prompt": self.prompt(c, known), "attempt": 0, "max_tokens": self.policy.part_max_tokens}
+                 for c in missing[:3]]
+        t = time.time()
+        try:
+            outs = self.generate_many(items, hard)
+        except Exception:
+            outs = []
+        self._agent("builders (critic)", t, parts=len(items))
+        added, names = [], []
+        for c, (raw, _stop) in zip(missing, outs):
+            ans = F.parse_answer(raw)
+            if ans["kind"] != "flow":
+                continue
+            part, _ = self.verify(ans["flow_text"], known, ans["plan"], c)
+            tried.append({"source": "local", "critic": True, "ok": part is not None})
+            if part is not None:
+                added.append(part)
+                names.append(c)
+        notes = list(out.get("notes") or [])
+        if added:
+            parts, _links = F.link_part_variables([flow] + added, existing or ())
+            merged, info = self.verify(F.compact(F.merge_flows(parts, flow.get("description"))), existing, out.get("plan"))
+            if merged is not None:
+                return {**out, "flow": merged, "notes": notes + info + [
+                    "the critic added steps for: " + "; ".join(names)], "critic_added": names}
+        return {**out, "notes": notes, "critic_missing": missing}
+
+    def run(self, request, system=None, assistant=False, existing=None, full_user=None, deadline=None, mode=None):
+        """deadline: time.time() value after which no further attempt (retry or cloud call) starts.
+        mode: auto | fast | smart | ultra (None: the router's default mode; without one the policy's own settings run,
+        as before modes). A moded request runs on a copy of the router with the mode's policy (Policy.for_mode), so
+        requests in different modes never share settings; auto picks the mode (choose_mode). The result says which
+        mode ran ("mode", "mode_asked", "mode_reason") and which agents ran, with their times ("agents")."""
+        mode = mode or self.default_mode
+        if mode:
+            if mode not in MODE_NAMES:
+                raise ValueError(f"unknown mode {mode!r}: one of {', '.join(MODE_NAMES)}")
+            chosen, why = choose_mode(request, self.supports_rewrite()) if mode == "auto" else (mode, "chosen")
+            r = copy.copy(self)
+            r.policy, r.default_mode, r._agents = self.policy.for_mode(chosen), None, []
+            r._mode = {"mode": chosen, "asked": mode, "why": why}
+            return r._run(request, system, assistant, existing, full_user, deadline)
+        return self._run(request, system, assistant, existing, full_user, deadline)
+
+    def _run(self, request, system=None, assistant=False, existing=None, full_user=None, deadline=None):
+        t0, tried, errors, plan = time.time(), [], [], []
+        p = self.policy
+        if p.stop_after:
+            deadline = min(deadline, t0 + p.stop_after) if deadline is not None else t0 + p.stop_after
+        hard = t0 + p.time_limit if p.time_limit else None
+        late = lambda: deadline is not None and tried and time.time() >= deadline
         can_escalate = self.cloud is not None and p.allow_escalation
         simple = p.local_first or (clauses(request) <= p.max_clauses_local and len(request) <= 500)
         if not can_escalate:
             simple = True      # no cloud fallback: always let the local model try instead of failing unseen
         if self.local is not None and simple:
-            out = self._local(request, existing, tried, late, can_escalate)
+            if p.mode:
+                out = self._team(request, existing, tried, late, can_escalate, hard)
+            else:
+                out = self._local(request, existing, tried, late, can_escalate)
             if out.get("flow") is not None:
                 return self.done(request, out["flow"], "local", tried, out["notes"], t0, assistant, existing,
-                                 plan=out["plan"], parts=out.get("parts", False), understood=out.get("clear"))
+                                 plan=out["plan"], parts=out.get("parts", False), understood=out.get("clear"),
+                                 critic=out)
             if out.get("question"):
                 return self.done(request, None, "local", tried, [], t0, assistant, existing, reason=ASKED,
                                  question=out["question"])
@@ -535,14 +958,27 @@ class Router:
                          plan=plan)
 
     def done(self, request, flow, source, tried, info, t0, assistant=False, existing=None, reason=None, plan=None,
-             question=None, parts=False, understood=None):
+             question=None, parts=False, understood=None, critic=None):
         """flow: the verified flow dict or None. The result's "flow" is the text the client gets (answer_text).
-        understood: the model's restatement of the request (result "understood"; Studio's notes start with it)."""
+        understood: the model's restatement of the request (result "understood"; Studio's notes start with it).
+        In a mode, the reporter's summary (report) ends Studio's notes and is the result's "report"."""
         warnings = safety.warnings(flow, self.cat) if flow is not None else []
-        text = self.answer_text(flow, existing, assistant, warnings, understood) if flow is not None else None
+        mode = getattr(self, "_mode", None) if self.policy.mode else None
+        report = None
+        if mode:
+            t = time.time()
+            report = self.report(flow, existing, understood, time.time() - t0, critic or {}, question is not None)
+            self._agent("reporter", t)
+        text = self.answer_text(flow, existing, assistant, warnings, understood, report) if flow is not None else None
         res = {"flow": text, "source": source, "verified": flow is not None, "attempts": tried,
                "repairs" if flow is not None else "problems": info, "seconds": round(time.time() - t0, 3),
                "plan": list(plan or []), "warnings": warnings}
+        if mode:
+            res.update(mode=mode["mode"], mode_asked=mode["asked"], mode_reason=mode["why"], report=report,
+                       agents=list(self._agents or []))
+            for k in ("critic_added", "critic_missing"):
+                if (critic or {}).get(k):
+                    res[k] = critic[k]
         if parts:
             res["built_in_parts"] = True
         if understood and flow is not None:
@@ -554,8 +990,51 @@ class Router:
         if self.policy.store_logs:
             self.log("requests.jsonl", {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "request": mask(request),
                                         "source": source, "verified": res["verified"], "flow": text,
-                                        "question": question, "training_ok": self.policy.allow_training_on_data})
+                                        "question": question, "training_ok": self.policy.allow_training_on_data,
+                                        "mode": res.get("mode"), "agents": res.get("agents"),
+                                        "seconds": res["seconds"]})
         return res
+
+    def report(self, flow, existing, understood, seconds, team, asked=False):
+        """The reporter: a plain-English summary for the notes. Which mode ran (and why, when auto picked it) and how
+        long it took; what the flow does (the model's restatement, else the steps' own words); the values the user
+        fills in when the agent runs (inputs nobody gave: folders, files, recipients); what the critic added or
+        thinks is missing; which agents ran."""
+        m = self._mode
+        label = MODE_LABELS.get(m["mode"], m["mode"])
+        head = f"Mode: {label}" + (f" (picked by Auto: {m['why']})" if m["asked"] == "auto" else "") + \
+            f", {seconds:.1f} s."
+        out = [head]
+        if flow is not None:
+            if not understood:
+                try:
+                    what = F.clear_request(flow, self.cat)
+                except Exception:
+                    what = None
+                if what:
+                    out.append("What it does: " + what.rstrip(".") + ".")
+            have = {v.get("name") for v in existing or [] if isinstance(v, dict)}
+            ins = [v.get("name") for v in flow.get("variables", []) if isinstance(v, dict)
+                   and v.get("direction") == "input" and v.get("name") not in have]
+            if ins:
+                out.append("Assumed: you give " + ", ".join(ins[:8]) + (" and more" if len(ins) > 8 else "")
+                           + " when it runs (the request did not name them).")
+            if team.get("critic_added"):
+                out.append("Added steps the first answer missed, for: " + "; ".join(team["critic_added"]) + ".")
+            elif team.get("critic_missing"):
+                out.append("Check that it also does: " + "; ".join(team["critic_missing"]) + ".")
+        elif asked:
+            out.append("It asked before guessing.")
+        names = []
+        for a in self._agents or []:
+            n = a["agent"]
+            if n == "builders" and a.get("parts"):
+                n = f"builders ({a['parts']} parts at once)"
+            if n not in names:
+                names.append(n)
+        if names:
+            out.append("Agents: " + ", ".join(names + ["reporter"]) + ".")
+        return " ".join(out)
 
     def log(self, name, row):
         d = Path(self.policy.log_dir)
@@ -680,6 +1159,31 @@ def make_cloud(policy):
 
 
 MODEL_ID = "ooa-assistant"
+# OpenAI-style model names (GET /v1/models): the name picks the mode. MODEL_ID runs the server's default mode.
+MODEL_BASE = "ooa-flow-assistant"
+MODEL_NAMES = {MODEL_BASE: "auto", MODEL_BASE + "-fast": "fast", MODEL_BASE + "-smart": "smart",
+               MODEL_BASE + "-ultra": "ultra"}
+MODE_HEADER = "X-OOA-Mode"
+
+
+def models_list():
+    """GET /v1/models: MODEL_ID (the server's default mode) and one name per mode."""
+    return {"object": "list", "data": [{"id": n, "object": "model", "owned_by": "local"}
+                                       for n in [MODEL_ID] + list(MODEL_NAMES)]}
+
+
+def request_mode(body, header=None):
+    """The mode a request asks for -> (mode or None, error or None). In order: the body's "mode" field, the
+    X-OOA-Mode header, the model name (MODEL_NAMES; MODEL_ID and other names: None, the server's default)."""
+    for given in ((body or {}).get("mode") if isinstance(body, dict) else None, header):
+        if given is None or given == "":
+            continue
+        m = str(given).strip().lower()
+        if m not in MODE_NAMES:
+            return None, f"mode must be one of {', '.join(MODE_NAMES)}, not {given!r}"
+        return m, None
+    name = body.get("model") if isinstance(body, dict) else None
+    return MODEL_NAMES.get(str(name).strip().lower()) if isinstance(name, str) else None, None
 # Model connection checks send one of these and expect a one-word answer (the platform's connection wizard Test
 # button and Command Center's model probe). They are answered at once, without running the model.
 PROBES = {"reply with the single word ok", "answer with the single word ok"}
@@ -714,32 +1218,39 @@ def quick_reply(body, count_tokens=None, version=None):
     return None
 
 
-def chat_completion(router, body, count_tokens=None, version=None, deadline=None):
+def chat_completion(router, body, count_tokens=None, version=None, deadline=None, mode_header=None):
     """OpenAI-style /v1/chat/completions on the router: (http_status, response). Used by this server and by the
     PC assistant (assistant/app.py), so One Agent Studio's Assistant can use the model as an OpenAI-compatible
     One Model Connection.
     count_tokens(text) -> int counts usage with the model's own tokenizer (default: characters / 4).
     version: dict added to the response's extra "ooa" field (pack / model version).
-    deadline: time.time() after which no further retry attempt starts (see Router.run)."""
+    deadline: time.time() after which no further retry attempt starts (see Router.run).
+    mode_header: the X-OOA-Mode header's value; the mode comes from request_mode (body "mode", the header, the
+    model name), else the router's default. The reply's "model" is the name asked for when it is one of ours."""
     quick = quick_reply(body, count_tokens, version)
     if quick is not None:
         return quick
+    mode, err = request_mode(body, mode_header)
+    if err:
+        return 400, openai_error(err)
     msgs = [m for m in body["messages"] if isinstance(m, dict)]
     request, system, assistant, existing, full_user = parse_messages(msgs)
-    res = router.run(request, system, assistant, existing, full_user, deadline=deadline)
+    res = router.run(request, system, assistant, existing, full_user, deadline=deadline, mode=mode)
+    tail = (" " + res["report"]) if res.get("report") else ""
     if res["verified"]:
         content = res["flow"]
     elif res.get("question"):     # the model asks before it guesses: Studio shows notes
-        content = (json.dumps({"variables": [], "steps": [], "notes": res["question"], "warnings": []})
+        content = (json.dumps({"variables": [], "steps": [], "notes": res["question"] + tail, "warnings": []})
                    if assistant else res["question"])
     elif assistant:   # Studio reads steps/notes: an empty answer with the honest reason is shown to the user
-        content = json.dumps({"variables": [], "steps": [], "notes": "No flow was returned: " + res["reason"] + ". " + " ".join(res.get("problems", [])[:2])})
+        content = json.dumps({"variables": [], "steps": [], "notes": "No flow was returned: " + res["reason"] + ". " + " ".join(res.get("problems", [])[:2]) + tail})
     else:
         content = json.dumps({"error": res["reason"], "problems": res.get("problems", [])})
-    return 200, _completion(msgs, content, {k: v for k, v in res.items() if k != "flow"}, count_tokens, version)
+    name = body.get("model") if isinstance(body.get("model"), str) and body.get("model") in MODEL_NAMES else MODEL_ID
+    return 200, _completion(msgs, content, {k: v for k, v in res.items() if k != "flow"}, count_tokens, version, name)
 
 
-def _completion(msgs, content, ooa, count_tokens, version):
+def _completion(msgs, content, ooa, count_tokens, version, model=MODEL_ID):
     texts = [m.get("content") if isinstance(m.get("content"), str) else json.dumps(m.get("content", ""))
              for m in msgs if isinstance(m, dict)]
     try:
@@ -752,7 +1263,7 @@ def _completion(msgs, content, ooa, count_tokens, version):
     # finish_reason is "stop" whether or not a flow was produced: the answer is complete either way (a missing flow
     # is explained in the content), and "length" would tell the client to retry with more tokens, which does not help.
     return {"id": "ooa-" + str(int(time.time() * 1000)), "object": "chat.completion",
-            "created": int(time.time()), "model": MODEL_ID,
+            "created": int(time.time()), "model": model,
             "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
             "usage": {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct},
             "ooa": ooa}
@@ -769,7 +1280,11 @@ def make_handler(router):
             pass
 
         def do_GET(self):
-            self._send(200, {"ok": True, "policy": asdict(router.policy)}) if self.path == "/health" else self._send(404, {"error": "not found"})
+            if self.path == "/health":
+                return self._send(200, {"ok": True, "policy": asdict(router.policy), "mode": router.default_mode})
+            if self.path == "/v1/models":
+                return self._send(200, models_list())
+            self._send(404, {"error": "not found"})
 
         def do_POST(self):
             try:
@@ -777,7 +1292,7 @@ def make_handler(router):
             except Exception:
                 return self._send(400, {"error": "invalid JSON body"})
             if self.path == "/v1/chat/completions":
-                return self._send(*chat_completion(router, body))
+                return self._send(*chat_completion(router, body, mode_header=self.headers.get(MODE_HEADER)))
             if self.path == "/v1/feedback":
                 out = router.feedback(body)
                 return self._send(400 if out.get("error") else 200, out)
@@ -802,6 +1317,9 @@ if __name__ == "__main__":
     ap.add_argument("--prompt-format", default=None, choices=["auto", "plain", "context"],
                     help="what the local model is given (default: the policy's prompt_format)")
     ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--mode", default="auto", choices=list(MODE_NAMES) + ["none"],
+                    help="mode of a request that names none (model ooa-assistant): auto (default) picks fast, smart or "
+                         "ultra per request; none: the policy's own settings, without the agent team")
     a = ap.parse_args()
     pol = Policy.load(a.policy)
     local = None
@@ -810,7 +1328,8 @@ if __name__ == "__main__":
         local = NanochatBackend(a.source)
     cloud = make_cloud(pol)
     examples = a.examples or str(Path(a.catalog).resolve().parent / "examples.jsonl")
-    r = Router(a.catalog, a.platform, pol, local, cloud, examples, a.prompt_format)
+    r = Router(a.catalog, a.platform, pol, local, cloud, examples, a.prompt_format,
+               mode=None if a.mode == "none" else a.mode)
     print(f"OOA assistant on http://127.0.0.1:{a.port}  | local model: {bool(local)} ({r.format()} prompts) | "
-          f"escalation: {pol.allow_escalation}")
+          f"escalation: {pol.allow_escalation} | mode: {a.mode}")
     serve(r, a.port).serve_forever()

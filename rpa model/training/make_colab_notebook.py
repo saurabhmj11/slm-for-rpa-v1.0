@@ -113,6 +113,7 @@ NEW_FILES = {"long_train.jsonl": 15, "business2_train.jsonl": 15, "targeted_trai
              "fix_train.jsonl": 5, "clarify_train.jsonl": 5,                                     # -> times per epoch
              "beginner_train.jsonl": 4}   # beginner wording: answers start "Clear request: ..." (gen_beginner.py)
 ASSISTANT_EVAL = True      # cell 8 also scores the full assistant (real action names only, repair, loop guard), as users get it
+MODE_EVAL = True           # cell 8 also scores the assistant's modes (fast / smart / ultra / auto: serving/ooa_server.MODES)
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
 MAX_FLOW_CHARS = 9000 * SFT_SEQ // 2048   # skip training flows longer than this (about SFT_SEQ tokens)
 print(PROFILE, P, "iterations:", NUM_ITERS)
@@ -537,6 +538,29 @@ if ASSISTANT_EVAL:
             print(("OK   " if _r["right"] else _r["outcome"][:12].ljust(12)), f"{res.get('seconds', 0):>5}s", row["kind"][:4],
                   row["prompt"][:48], "->", (res.get("question") or res.get("understood") or str(got[:4]))[:70])
         print("beginner set (full assistant) | " + _B.summary_text(_B.summarize(_brows, _bres2)))
+    if MODE_EVAL and NEW_FORMAT:
+        # the modes Studio's Mode menu offers (the agent team: planner, parallel builders in one batch, fixer, critic)
+        print("\n=== Modes: right / verified / mean seconds per request ===")
+        _mrows = [(_f, _label, [json.loads(l) for l in open(f"/content/ooa/{_f}")]) for _f, _label in _sets
+                  if os.path.exists(f"/content/ooa/{_f}")]
+        if os.path.exists(_BEG):
+            _mrows.append(("beginner_requests.jsonl", "beginner", _brows))
+        for _mode in ("fast", "smart", "ultra", "auto"):
+            _line = []
+            for _f, _label, _rows in _mrows:
+                ok = ver = 0; _secs = []
+                for row in _rows:
+                    res = _router.run(row["prompt"], mode=_mode)
+                    _secs.append(res.get("seconds", 0))
+                    if "kind" in row:
+                        right = _B.score_router(row, res, lambda t: RW.actions_of(json.loads(t)))["right"]
+                    else:
+                        got = RW.actions_of(json.loads(res["flow"])) if res.get("verified") else []
+                        right = bool(res.get("verified")) and _in_order(row["must"], got)
+                    ok += right; ver += bool(res.get("verified"))
+                _line.append(f"{_label.split(':')[0]}: {ok}/{len(_rows)} right, {ver} verified, "
+                             f"{sum(_secs) / max(1, len(_secs)):.1f} s")
+            print(f"{_mode:6} | " + " | ".join(_line))
     del _local, _router
 del _engine, _model                    # free the GPU for later cells (RL, self-improvement)
 torch.cuda.empty_cache()

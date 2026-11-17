@@ -148,5 +148,8 @@ Connections...** > **+ Connection**: name `ooa`, provider **OpenAI-compatible**,
 connection** (it starts ticked when no default connection exists yet), **Save**. (Do not make it
 the default connection: every GenAI step without a connection of its own goes to the default one, and this model only
 writes flows.) Then **Assistant > Build from a description**, pick **ooa** as the Model Connection, describe the job,
-**Generate steps**, review, **Insert into the agent**. Answers are
+**Generate steps**, review, **Insert into the agent**. Studio's **Mode** menu (Auto, Fast, Smart, Ultra) appears for
+the built-in flow assistant and for a connection made from its preset; with a connection you made yourself, set its
+model to `ooa-flow-assistant-fast`, `-smart`, `-ultra` or `ooa-flow-assistant` (auto) to pick a mode. The Build tab has
+the same menu, and `--mode` sets the default (auto). Answers are
 repaired (missing open / save steps) and checked before Studio shows them; Studio checks them again.

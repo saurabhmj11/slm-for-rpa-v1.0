@@ -105,6 +105,23 @@ def test_build_unverified_is_honest():
     assert r["explanation"] is None and r["can_run"] is None
 
 
+def test_build_in_a_mode():
+    """The Build tab's Mode menu: the mode that ran, its report and agents come back; an unknown mode is a 400; the
+    model list names one model per mode; --mode sets the default."""
+    st, r = call("POST", "/api/build", {"request": GOOD, "mode": "fast"})
+    assert st == 200 and r["verified"] and r["mode"] == "fast", r
+    assert r["report"].startswith("Mode: Fast, ") and r["agents"][0]["agent"].startswith("builder")   # a plain model
+    st, r = call("POST", "/api/build", {"request": GOOD, "mode": "auto"})
+    assert st == 200 and r["mode"] == "fast" and "picked by Auto" in r["report"], r
+    st, r = call("POST", "/api/build", {"request": GOOD})
+    assert st == 200 and r.get("mode") is None                  # this test app runs without a default mode
+    assert call("POST", "/api/build", {"request": GOOD, "mode": "turbo"})[0] == 400
+    st, r = call("GET", "/v1/models")
+    assert [d["id"] for d in r["data"]] == ["ooa-assistant", "ooa-flow-assistant", "ooa-flow-assistant-fast",
+                                            "ooa-flow-assistant-smart", "ooa-flow-assistant-ultra"]
+    assert A.parse_args(["--platform", "p"]).mode == "auto" and A.parse_args(["--platform", "p", "--mode", "ultra"]).mode == "ultra"
+
+
 def test_build_bad_input():
     assert call("POST", "/api/build", {})[0] == 400
     assert call("POST", "/api/build", {"request": "   "})[0] == 400

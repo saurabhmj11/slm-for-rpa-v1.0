@@ -59,6 +59,48 @@ The model format is defined in `training/ooa_format.py`; training data is render
 `prompt_format` "auto" uses the request alone (models trained before this format) unless the model pack has
 `examples.jsonl` next to its catalog.
 
+## Modes and the agent team
+
+A client picks how hard the assistant works on a request. The modes are `Policy` presets (`MODES` in
+`ooa_server.py`, the only place they are defined) on top of the client's policy (escalation, masking and logs stay):
+
+| Mode | Agents | Limits |
+| --- | --- | --- |
+| `fast` | planner + one builder (the same answer) + checker + reporter | 1 attempt, no parts, no self-correction |
+| `smart` | planner, parallel builders for a long plan, checker, fixer, reporter | 2 retries; failed parts rebuilt for 2 rounds; no new attempt after 100 s |
+| `ultra` | understander, planner, best-of-4 answers, parallel builders (2 samples per part), checker, fixer, critic, reporter | 3 retries, 3 fixer rounds, parts from plans of 5+ lines; no new attempt after 120 s, a running generation cut at 150 s (Studio waits 180 s) |
+| `auto` (default) | picks one per request (`choose_mode`) | |
+
+Auto's rule (`choose_mode`, from `ooa_format.request_features`): **ultra** for a long process (5+ clauses or more
+than 60 words); for a vague request that names no file, folder, app or data, **ultra** when the model was trained to
+restate requests (rewrite rows), else **smart**; **fast** for 2 clauses or fewer, 25 words or fewer, no loop words
+(each, every, repeat ...) and no condition words (if, when, otherwise, only ...); **smart** otherwise.
+
+How a client picks: the model name (`GET /v1/models`: `ooa-assistant` runs the server's default mode;
+`ooa-flow-assistant` is auto; `ooa-flow-assistant-fast`, `-smart`, `-ultra`), a `"mode"` field in the body, or the
+`X-OOA-Mode` header (field first, then header, then name); the server default is `--mode` (auto; `none` keeps the
+settings from before modes). The reply's `ooa` field says `mode`, `mode_asked`, `mode_reason`, `agents` (each with its
+seconds) and `report`; Studio's notes end with the report ("Mode: Smart (picked by Auto: a loop), 12.3 s. What it
+does: ... Assumed: you give folder when it runs ... Agents: ...").
+
+The team is one model playing roles with different prompts (`Router._team`):
+- **understander**: the samples but one start with "Clear request: " (only for a model trained with rewrite rows);
+  the free sample may ask a question instead, which ends the request.
+- **planner**: writes the plan; a plan long enough to build in parts stops at "Flow:", else it writes the flow
+  itself (the single builder).
+- **builders**: every part of the plan (`plan_parts`) in ONE batched generation (`NanochatLocal.generate_batch` ->
+  `constrained.generate_batch`: nanochat's Engine batches samples of one prompt only, so prompts are prefilled one
+  by one, their caches joined, and each decode step runs all rows with per-row positions). A part inside a loop / try
+  / if waits for the part that writes it (`part_dependencies`). Backends without `generate_batch` build the parts one
+  after another (`_decompose`, as before).
+- **assembler**: links a variable a part read under its own name to what an earlier part made
+  (`link_part_variables`), then merges (`merge_flows`).
+- **checker**: repair + verify for each answer, part and the merged flow. **fixer**: rebuilds only the failed parts
+  (batched), each with its previous flow and problems; whole answers get self-correction retries.
+- **critic** (ultra): a request clause that names something to do and that no step covers (`uncovered_clauses`) is
+  built once as a new part and added; if that fails the check, the flow stays and the report says what to check.
+- **reporter**: the summary above. With `store_logs`, requests.jsonl rows carry the mode and the agents' times.
+
 ## Client policy (policy.json), default = local-only, stores nothing
 | Switch | Meaning |
 |---|---|

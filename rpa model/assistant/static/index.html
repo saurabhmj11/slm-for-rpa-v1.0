@@ -204,10 +204,19 @@
         <p class="small muted" id="chips-label">Examples that work well (step-by-step wording):</p>
         <div class="chips" role="group" aria-labelledby="chips-label" id="build-chips"></div>
         <div class="row">
+          <label for="build-mode">Mode</label>
+          <select id="build-mode" aria-describedby="build-mode-help">
+            <option value="auto">Auto: picks for you</option>
+            <option value="fast">Fast: quick, for simple tasks</option>
+            <option value="smart">Smart: checks and fixes its work</option>
+            <option value="ultra">Ultra: tries several times, for long processes</option>
+          </select>
           <button type="submit" id="build-btn">Build</button>
           <span id="build-progress" class="muted" hidden><span class="spinner" aria-hidden="true"></span><span id="build-elapsed">0 s</span>
-            <span class="small">(the model can take up to about 20 s on a CPU)</span></span>
+            <span class="small">(the model can take up to about 20 s on a CPU; Ultra up to 2 minutes)</span></span>
         </div>
+        <p class="small muted" id="build-mode-help">Auto picks Fast for short requests, Smart for loops and conditions
+          and Ultra for long processes.</p>
       </form>
     </div>
     <div id="build-result" aria-live="polite"></div>
@@ -529,6 +538,11 @@
   const buildResult = $("#build-result");
   let lastBuild = null;   // { request, data }
 
+  const buildMode = $("#build-mode");
+  buildMode.value = store.get("ooa.assistant.mode", "auto");
+  if (!buildMode.value) buildMode.value = "auto";
+  buildMode.addEventListener("change", () => store.set("ooa.assistant.mode", buildMode.value));
+
   show($("#build-chips"), EXAMPLES.map(t => el("button", {
     type: "button", class: "chip", text: t,
     onclick: () => { buildReq.value = t; buildReq.focus(); }
@@ -550,7 +564,7 @@
     const timer = setInterval(() => { elapsed.textContent = Math.floor((Date.now() - t0) / 1000) + " s"; }, 250);
     try {
       await busy([buildBtn, ...document.querySelectorAll("#build-chips button")], buildResult, async () => {
-        const data = await api("POST", "/api/build", { request });
+        const data = await api("POST", "/api/build", { request, mode: buildMode.value });
         lastBuild = { request, data };
         $("#run-use-built").disabled = !(data.verified && data.flow);
         renderBuild(request, data);
@@ -590,6 +604,7 @@
         el("p", { class: "small", text: "Tip: say each step plainly, in order, naming what to read and where to write it. " +
           "Short step-by-step requests work best." })));
     }
+    if (typeof d.report === "string" && d.report) out.push(el("p", { class: "small muted", text: d.report }));
     const atts = Array.isArray(d.attempts) ? d.attempts.filter(a => a && typeof a === "object") : [];
     if (atts.length) {
       out.push(el("details", null,

@@ -1549,3 +1549,182 @@ def row_fits(row, max_chars=MAX_ROW_CHARS, max_tokens=MAX_ROW_TOKENS):
         return False
     # rows run 2.5-3.1 characters per token: a short row needs no estimate (it is the slow part of rendering)
     return n * 10 <= max_tokens * 16 or row_tokens(row) <= max_tokens
+
+
+# ---------------------------------------------------------------------------------------------- agent team (serving)
+# Helpers for serving/ooa_server.Router's agent team: which part of a plan waits for which (parallel builders), the
+# assembler's shared variables, the critic's coverage check and the auto mode's request features. They read the
+# formats above; they write nothing the model is trained on.
+
+def part_dependencies(parts):
+    """For plan_parts' parts: the part each one must wait for, or None. A part that goes inside a container (inside
+    >= 1) needs the part that wrote that container: the nearest part before it at a lower level. Top-level parts need
+    nothing and can all be built at once."""
+    deps = []
+    for i, p in enumerate(parts):
+        level, dep = int(p.get("inside") or 0), None
+        if level:
+            for j in range(i - 1, -1, -1):
+                if int(parts[j].get("inside") or 0) < level:
+                    dep = j
+                    break
+        deps.append(dep)
+    return deps
+
+
+def _rename_text(s, old, new):
+    s = re.sub(r"\$" + re.escape(old) + r"\$", "$" + new + "$", s)
+    s = re.sub(r"\$\{(\s*)" + re.escape(old) + r"(?=[\s}.\[])", "${\\g<1>" + new, s)
+    return re.sub(r"\$" + re.escape(old) + r"(?![\w$])", "$" + new, s)
+
+
+def rename_variable(flow, old, new):
+    """A copy of flow (or a step list) with variable old called new: declarations, $refs in args ($x$, ${x}, $x, also
+    x.field), out targets, loop items and core/set targets."""
+    def go(v, key=None, parent_action=None):
+        if isinstance(v, str):
+            if key in ("variable", "as", "index", "name") and v == old:
+                return new
+            return _rename_text(v, old, new)
+        if isinstance(v, list):
+            return [go(x, key, parent_action) for x in v]
+        if isinstance(v, dict):
+            out = {}
+            for k, x in v.items():
+                if k == "out" and isinstance(x, dict):
+                    out[k] = {ok: (new if ov == old else go(ov)) for ok, ov in x.items()}
+                elif k in ("action", "id", "kind", "description", "type", "direction"):
+                    out[k] = x
+                else:
+                    out[k] = go(x, k)
+            return out
+        return v
+    return go(json.loads(compact(flow)))
+
+
+_SCALAR_TYPES = {"String", "Number", "Boolean", "DateTime", "Time", "TimeSpan", "Credential"}
+
+
+def _name_words(name):
+    return {w for w in re.split(r"[_\W\d]+", str(name).lower()) if len(w) > 2}
+
+
+def link_part_variables(parts, known=()):
+    """The assembler's shared variables. Parts built at the same time cannot see each other's variables, so a later
+    part may read a value under its own name ('$rows' for what an earlier part made as 'table'). For each part, a
+    variable it takes as input that no earlier part declares and the open agent does not have is linked to a variable
+    an earlier part made (local or output): one whose name shares a word with it (the latest such), else, for a
+    non-text type (Table, List, Dictionary, File ...), the latest one of the same type. Returns (parts, links) with
+    links as (part number from 1, old name, new name)."""
+    have = {v.get("name") for v in known if isinstance(v, dict)} | {v for v in known if isinstance(v, str)}
+    made, declared, out, links = [], set(have), [], []
+    for n, p in enumerate(parts, 1):
+        p = json.loads(compact(p))
+        for v in list(p.get("variables") or []):
+            name = v.get("name") if isinstance(v, dict) else None
+            if not name or v.get("direction") != "input" or name in declared or n == 1:
+                continue
+            words = _name_words(name)
+            pick = next((m for m in reversed(made) if words & _name_words(m["name"])), None)
+            if pick is None and v.get("type") not in _SCALAR_TYPES:
+                pick = next((m for m in reversed(made) if m.get("type") == v.get("type") and v.get("type")), None)
+            if pick is None or pick["name"] == name:
+                continue
+            p = rename_variable(p, name, pick["name"])
+            p["variables"] = [x for x in p.get("variables") or [] if not (isinstance(x, dict) and x.get("name") ==
+                                                                           pick["name"] and x.get("direction") == "input")]
+            links.append((n, name, pick["name"]))
+        for v in p.get("variables") or []:
+            if isinstance(v, dict) and v.get("name"):
+                declared.add(v["name"])
+                if v.get("direction") != "input":
+                    made.append(v)
+        out.append(p)
+    return out, links
+
+
+# words that make a clause a thing to do (the critic checks such clauses only); English, and common Hinglish verbs
+# ("list" and "log" are left out: "each file in a list", "log in to the site" are not steps of their own)
+ACTION_WORDS = set("""read write save send email mail copy move delete remove rename download upload open close
+extract filter sort merge split zip unzip compress convert print create make add update insert append fill
+click type search find check compare calculate sum count export import fetch get post call run start stop attach
+reply forward archive backup notify alert schedule scan parse translate summarize resize crop rotate encrypt
+decrypt sign share sync publish submit approve reject padh likh bhej bhejo karo kar nikal daal hata""".split())
+# verbs that name the same kind of step ("save it as a CSV" and ooa.csv/write)
+VERB_GROUPS = [{"save", "write", "store", "export"}, {"make", "create", "new"}, {"get", "read", "extract", "fetch", "pull"},
+               {"add", "sum", "insert", "append", "total"}, {"send", "email", "mail", "forward"},
+               {"delete", "remove"}, {"find", "search", "look"}, {"zip", "compress"}, {"padh", "read"},
+               {"likh", "write"}, {"bhej", "bhejo", "send"}, {"hata", "delete"}]
+
+
+def clause_has_action(clause):
+    """True when a request clause names something to do (a word of ACTION_WORDS, plural / -ing / -ed folded)."""
+    for w in re.findall(r"[a-z]+", str(clause).lower()):
+        for form in (w, w[:-1] if w.endswith("s") else w, w[:-3] if w.endswith("ing") else w,
+                     w[:-2] if w.endswith("ed") else w, w[:-1] if w.endswith("e") else w):
+            if form in ACTION_WORDS:
+                return True
+    return False
+
+
+def _verbs(text):
+    """The ACTION_WORDS of a text, plural / -ing / -ed folded, with the verbs of the same group (VERB_GROUPS)."""
+    out = set()
+    for w in re.findall(r"[a-z]+", str(text).lower()):
+        for form in (w, w[:-1], w[:-3], w[:-2], w + "e"):
+            if form in ACTION_WORDS:
+                out.add(form)
+    for g in VERB_GROUPS:
+        if out & g:
+            out |= g
+    return out
+
+
+def uncovered_clauses(request, flow, index, k=6, plan=None):
+    """The critic: request clauses (request_clauses) that name something to do (clause_has_action) and that no step
+    of the flow covers. A clause is covered when one of the flow's actions is among its k best catalog matches
+    (index.search); or a step's action names the clause's verb (id or catalog name: "delete the original" and
+    ooa.file/delete); or a step's action shares 2+ words with the clause (id, name and description: "count its rows"
+    and ooa.datatable/row_count); or a plan line repeats half its words (the model planned it). Kept strict on purpose:
+    what it reports is built as a new part, so a false alarm would add steps nobody asked for."""
+    have = list(dict.fromkeys(actions_of(flow))) if isinstance(flow, dict) else []
+    if not have:
+        return []
+    entries = {e["id"]: e for e in getattr(index, "entries", [])}
+    names, words_of = {}, {}
+    for a in have:
+        e = entries.get(a, {})
+        names[a] = set(re.findall(r"[a-z]+", (a + " " + str(e.get("name", ""))).lower()))    # verbs are stop words there
+        words_of[a] = names[a] | set(retrieval.tokens(str(e.get("description", ""))))
+    plan_words = [set(retrieval.tokens(i["text"])) for i in plan_items(plan or [])]
+    out = []
+    for c in request_clauses(request):
+        if not clause_has_action(c):
+            continue
+        if set(have) & {e["id"] for e in index.search(c, k)}:
+            continue
+        words, verbs = set(retrieval.tokens(c)), _verbs(c)
+        if any(verbs & names[a] for a in have) or any(len(words & words_of[a]) >= 2 for a in have):
+            continue
+        if words and any(len(words & pw) >= max(2, (len(words) + 1) // 2) for pw in plan_words):
+            continue
+        out.append(c)
+    return out
+
+
+_LOOP_WORDS = re.compile(r"\b(each|every|loop|repeat|for every|one by one|har|while|until)\b",
+                         re.I)
+_COND_WORDS = re.compile(r"\b(if|when|whenever|otherwise|else|unless|only|in case|agar|jab|warna|nahi to)\b", re.I)
+_THING_WORDS = re.compile(r"(file|folder|excel|xlsx|xls|sheet|csv|pdf|docx?|word|txt|text|json|xml|zip|image|photo|"
+                          r"e-?mail|mail|outlook|gmail|inbox|attachment|browser|website|web ?page|url|link|portal|"
+                          r"database|sql|table|api|ftp|sftp|sap|erp|crm|invoice|report|form|calendar|teams|slack|"
+                          r"whatsapp|sms|printer|drive|sharepoint|onedrive|directory|path|cell|row|column|[\\/]\w)", re.I)
+
+
+def request_features(request):
+    """What the auto mode looks at: clauses (request_clauses), words, loop words, condition words, and whether the
+    request names any file, app or data thing at all (has_thing; none suggests a vague beginner request)."""
+    text = str(request or "")
+    return {"clauses": len(request_clauses(text)), "words": len(text.split()),
+            "loop": bool(_LOOP_WORDS.search(text)), "condition": bool(_COND_WORDS.search(text)),
+            "has_thing": bool(_THING_WORDS.search(text))}
