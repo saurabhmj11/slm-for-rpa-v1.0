@@ -164,12 +164,13 @@ def norm(t):
 
 
 class LeakGuard:
-    """Never train on a test request: a request whose difflib ratio with any test prompt is over 0.8 is dropped."""
+    """Never train on a test request: a request whose difflib ratio with any test prompt (every eval/*.jsonl set:
+    plain_requests*, beginner_requests) is over 0.8 is dropped."""
 
     def __init__(self, eval_dir=None, threshold=0.8):
         ev = Path(eval_dir) if eval_dir else HERE.parent / "eval"
-        self.tests = [norm(json.loads(l)["prompt"]) for p in sorted(ev.glob("plain_requests*.jsonl"))
-                      for l in open(p, encoding="utf-8") if l.strip()]
+        self.tests = [norm(json.loads(l)["prompt"]) for p in sorted(ev.glob("*.jsonl"))
+                      for l in open(p, encoding="utf-8") if l.strip() and '"prompt"' in l]
         self.t, self.dropped = threshold, 0
 
     def leaks(self, request):

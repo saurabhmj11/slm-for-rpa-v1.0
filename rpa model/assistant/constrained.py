@@ -169,9 +169,10 @@ def token_strings(tok, vocab_size):
     return out
 
 
-# A reply may open with the flow JSON (the format before plans), with a plan ("Plan:" ... "Flow:" + JSON) or with a
-# clarifying question; anything else is chat (see training/ooa_format.py).
-REPLY_STARTS = ("{", "Plan:", "Question:", "Flow:")
+# A reply may open with the flow JSON (the format before plans), with a plan ("Plan:" ... "Flow:" + JSON), with a
+# restatement of the request before the plan ("Clear request: ..."), or with a clarifying question; anything else is
+# chat (see training/ooa_format.py, ANSWER_STARTS).
+REPLY_STARTS = ("{", "Plan:", "Question:", "Flow:", "Clear request:")
 
 
 def not_a_flow(out, decode):

@@ -12,7 +12,9 @@ with --extra ({"kind": "flow"|"fix"|"clarify", ...}), and writes OUT_DIR/<same n
     never the row itself or a row with the same flow; the flow's input variables for --variables-rate of the rows,
     because Studio sends the open agent's variables) and the answer becomes plan + flow. The flow first gets
     repair.session_fix (the missing open / save step), so the plan matches the flow that is trained on.
-  - flow records from --extra files (flow / fix / clarify) are rendered the same way.
+  - flow records from --extra files (flow / fix / clarify / rewrite) are rendered the same way; a rewrite record (a
+    beginner's request, gen_beginner.py) gets an answer that opens with "Clear request: <the request restated>"
+    (ooa_format.render_flow_answer), and its request joins the example index like a flow record's.
   - other rows (chat replies, catalog questions) are kept; --reply-context of the single-turn ones also get the
     context block, because at serving every request carries one and a chat request must still get a chat reply.
   - a flow row that would not fit the 2048-token window (user + assistant over --max-chars, or over --max-tokens by
@@ -90,7 +92,7 @@ def load_items(path, extra, cat, fixes):
                         rec[key] = json.loads(rec[key])
                     except ValueError:
                         pass
-            if isinstance(rec.get("flow"), dict) and rec.get("kind") in ("flow", "fix"):
+            if isinstance(rec.get("flow"), dict) and rec.get("kind") in ("flow", "fix", "rewrite"):
                 if RP.session_fix(rec["flow"], cat):
                     fixes[0] += 1
             items.append({"type": "record", "record": rec})
@@ -153,7 +155,7 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
             continue
         for it in items:
             rec = it.get("record")
-            if rec and rec.get("kind") == "flow" and isinstance(rec.get("flow"), dict):
+            if rec and rec.get("kind") in ("flow", "rewrite") and isinstance(rec.get("flow"), dict):
                 pairs.append((rec["request"], rec["flow"]))
     ex_index = F.ExampleIndex.from_flows(pairs)
     ex_index.save(out / "examples.jsonl")
@@ -170,7 +172,7 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
               "files": {}, "examples": len(ex_index), "session_fixes": fixes[0]}
     for name, items, bad in loaded:
         rng = random.Random(f"{seed}:{name}")
-        c = {"rows": len(items), "written": 0, "flow": 0, "fix": 0, "clarify": 0, "kept": 0, "reply_with_context": 0,
+        c = {"rows": len(items), "written": 0, "flow": 0, "fix": 0, "clarify": 0, "rewrite": 0, "kept": 0, "reply_with_context": 0,
              "part": 0, "split_long": 0,
              "skipped_too_long": 0, "skipped_unusable": bad, "max_chars": 0, "chars": 0}
         with open(out / name, "w", encoding="utf-8") as f:
@@ -201,7 +203,7 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
                     c["skipped_unusable"] += 1
                     continue
                 rows = [(row, kind)]
-                if not F.row_fits(row, max_chars, max_tokens) and kind == "flow" and parts:
+                if not F.row_fits(row, max_chars, max_tokens) and kind in ("flow", "rewrite") and parts:
                     # too long for the window: teach it in parts, the way the server builds a long flow
                     rows = []
                     for req, part, carried in F.split_flow(rec["flow"], cat):
@@ -225,6 +227,7 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
         c["avg_chars"] = round(c.pop("chars") / max(1, c["written"]))
         report["files"][name] = c
         log(f"{name}: {c['written']}/{c['rows']} written (flow {c['flow']}, fix {c['fix']}, clarify {c['clarify']}, "
+            f"rewrite {c['rewrite']}, "
             f"kept {c['kept']}, reply+context {c['reply_with_context']}, part {c['part']} from {c['split_long']} long flows), "
             f"{c['skipped_too_long']} too long, "
             f"{c['skipped_unusable']} unusable")
@@ -232,7 +235,7 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
     if Path(catalog).resolve() != cat_out.resolve():
         shutil.copyfile(catalog, cat_out)
     report["totals"] = {k2: sum(f[k2] for f in report["files"].values())
-                        for k2 in ("rows", "written", "flow", "fix", "clarify", "kept", "reply_with_context", "part", "split_long",
+                        for k2 in ("rows", "written", "flow", "fix", "clarify", "rewrite", "kept", "reply_with_context", "part", "split_long",
                                    "skipped_too_long", "skipped_unusable")}
     report["seconds"] = round(time.time() - t0, 1)
     with open(out / "render_report.json", "w", encoding="utf-8") as f:

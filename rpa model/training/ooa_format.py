@@ -18,6 +18,8 @@ Assistant turn, one of:
               full flow (plan-v1) or, for models trained on FORMAT_COMPACT, only what the model must decide
               (compact_flow: steps without ids / descriptions, no variables list); expand_flow rebuilds the full
               flow, and parse_answer(expand=True) / the server do that only for a compact flow.
+    rewrite:  "Clear request: <one clear sentence naming the steps>\nPlan:\n...\nFlow:\n..." (a beginner's request,
+              restated in tool words before the plan; rendered for "rewrite" records, gen_beginner.py)
     clarify:  "Question: <one short question>"
     reply:    plain text (not a task)
 parse_answer() also reads old answers that are only the flow JSON, so models trained before this format keep working.
@@ -40,6 +42,9 @@ CONTEXT_HEADER = "### Context"
 PREVIOUS_HEADER = "### Previous flow"
 PROBLEMS_HEADER = "### Problems"
 PLAN_HEAD, FLOW_HEAD, QUESTION_HEAD = "Plan:", "Flow:", "Question:"
+CLEAR_HEAD = "Clear request:"  # a restatement before the plan (rewrite records): the model says what it understood
+ANSWER_STARTS = ("{", PLAN_HEAD, QUESTION_HEAD, FLOW_HEAD, CLEAR_HEAD)   # how a flow / question answer can open
+MAX_CLEAR_CHARS = 320         # a longer restatement keeps only the top-level steps (clear_request)
 
 DEFAULT_K = 12                # BM25 candidates per request
 CORE_ALWAYS = ("core/loop", "core/if")   # "for each" / "if" words are stop words for BM25: always offer these two
@@ -343,11 +348,64 @@ def plan_from_flow(flow, catalog=None):
     return out
 
 
-def render_flow_answer(flow, catalog=None, answer_format="full"):
+def render_flow_answer(flow, catalog=None, answer_format="full", clear=None):
     """The plan-first answer for a flow. answer_format "compact": the flow after "Flow:" is compact_flow(flow) (the
-    plan, made from the full flow, still carries the step descriptions)."""
+    plan, made from the full flow, still carries the step descriptions). clear: a restatement of the request, written
+    first as "Clear request: ..." (rewrite records)."""
     body = compact_flow(flow) if answer_format == ANSWER_COMPACT else flow
-    return PLAN_HEAD + "\n" + "\n".join(plan_from_flow(flow, catalog)) + "\n" + FLOW_HEAD + "\n" + compact(body)
+    head = CLEAR_HEAD + " " + " ".join(str(clear).split()) + "\n" if clear and str(clear).strip() else ""
+    return head + PLAN_HEAD + "\n" + "\n".join(plan_from_flow(flow, catalog)) + "\n" + FLOW_HEAD + "\n" + compact(body)
+
+
+_HOUSEKEEPING = re.compile(r"/(close|disconnect|logout|revoke_authentication|close_all)$")
+
+
+def _lower_first(t):
+    return t[:1].lower() + t[1:] if t[:2] != t[:2].upper() else t
+
+
+def clear_request(flow, catalog=None, limit=MAX_CLEAR_CHARS):
+    """One clear sentence naming a flow's steps, for the "Clear request:" line: the steps' plain words (step_text) in
+    order, closing / disconnecting steps left out, a loop's or condition's steps after it ("for each row in rows:
+    create the ticket and log it"; "if amount > 1000: email it, otherwise: log it"). Longer than limit: the steps
+    inside loops and conditions are left out (below the first level, then all), then the sentence is cut at a step
+    boundary."""
+    cat = _as_dict(catalog)
+
+    def phrases(steps, deep):           # deep: how many levels of loop / condition bodies are named
+        out = []
+        for s in steps if isinstance(steps, list) else []:
+            if not isinstance(s, dict) or _HOUSEKEEPING.search(str(s.get("action") or "")):
+                continue
+            t = _lower_first(step_text(s, cat))
+            inner = []
+            if deep > 0:
+                for name, body in branches(s):
+                    sub = phrases(body, deep - 1)
+                    if sub:
+                        word = "" if name == "children" else _BRANCH_WORDS.get(name, "").strip().lower() + " "
+                        inner.append(word + " and ".join(sub))
+            out.append(t + (": " + ", ".join(inner) if inner else ""))
+        return out
+
+    steps = flow.get("steps") if isinstance(flow, dict) else flow
+    for deep in (99, 1, 0):
+        ps = phrases(steps, deep)
+        if not ps:
+            return ""
+        text = ps[0] if len(ps) == 1 else ", ".join(ps[:-1]) + ", then " + ps[-1]
+        if len(text) + 1 <= limit or not deep:
+            break
+    if len(text) + 1 > limit:
+        cut, n = [], 0
+        for p in ps:
+            if n + len(p) + 2 > limit - 12:
+                break
+            cut.append(p)
+            n += len(p) + 2
+        text = ", ".join(cut or [ps[0][:limit - 12]]) + " and more"
+    text = text[:1].upper() + text[1:]
+    return text if text.endswith(".") else text + "."
 
 
 # ---------------------------------------------------------------------------------------------- compact answers
@@ -1122,9 +1180,18 @@ def parse_answer(text, expand=False, catalog=None, request=None, known=()):
     An answer that is only flow JSON (the format before plans) is kind "flow" with an empty plan.
     expand: a compact flow (is_compact) is rebuilt into a full one (expand_flow with catalog, request, known and the
     answer's plan) and flow_text is that full flow; "compact_text" then keeps what the model wrote. A full flow (a
-    model trained before compact answers) is left exactly as written."""
+    model trained before compact answers) is left exactly as written.
+    "clear": the restatement of an answer that opens with "Clear request: ..." (else None); the rest is read as usual."""
     t = str(text or "").split("<|assistant_end|>")[0].strip()
-    res = {"kind": "reply", "plan": [], "flow_text": None, "question": None, "text": t}
+    clear = None
+    if t.startswith(CLEAR_HEAD):          # "Clear request: ..." then the usual answer
+        m = re.search(r"(?m)^[ \t]*(?=" + "|".join(re.escape(h) for h in (PLAN_HEAD, FLOW_HEAD, QUESTION_HEAD)) + ")", t)
+        head = t[len(CLEAR_HEAD):m.start()] if m else t[len(CLEAR_HEAD):]
+        clear = " ".join(head.split()) or None
+        t = t[m.start():].strip() if m else ""
+    res = {"kind": "reply", "plan": [], "flow_text": None, "question": None, "text": t, "clear": clear}
+    if clear and not t:
+        res["kind"] = "flow"              # cut off after the restatement: a flow answer without plan or flow yet
     if t.startswith(QUESTION_HEAD):
         q = t[len(QUESTION_HEAD):].strip()
         res.update(kind="question", question=q.split("\n\n")[0].strip() or q)
@@ -1378,7 +1445,9 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
                 gold_dropout=0.0, dropout_frac=GOLD_DROPOUT_FRAC):
     """A neutral record -> {"messages": [user, assistant]} in this format (None when the record is unusable).
     record: {"kind": "flow", "request", "flow"} | {"kind": "fix", "request", "previous", "problems", "flow"} |
-            {"kind": "clarify", "request", "question"}.
+            {"kind": "clarify", "request", "question"} |
+            {"kind": "rewrite", "request", "flow", "clear"}: a flow row whose answer opens with "Clear request: <clear>"
+            (clear_request(flow) when the record has none).
     The draws from rng are made in a fixed order (number of examples, variables, shuffle), so a seed reproduces a
     dataset.
     A row that does not fit (row_fits) is rendered again with a smaller context (down to the required actions only); the
@@ -1393,7 +1462,7 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
     if context_chars is None:
         context_chars = context_for(window_of(max_tokens))
     kind, request = record.get("kind"), str(record.get("request") or "").strip()
-    if not request or kind not in ("flow", "fix", "clarify"):
+    if not request or kind not in ("flow", "fix", "clarify", "rewrite"):
         return None
     u = rng.random()
     n_ex = 0 if u < 0.1 else (1 if u < 0.55 else 2)
@@ -1427,7 +1496,10 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
         if previous is None or not problems:
             return None
         previous = to_dollar_name_dollar(previous)  # as the server shows it (Router._previous)
-    answer = render_flow_answer(flow, cat, answer_format)
+    clear = None
+    if kind == "rewrite":
+        clear = str(record.get("clear") or "").strip() or clear_request(flow, cat)
+    answer = render_flow_answer(flow, cat, answer_format, clear)
     limits = (context_chars, context_chars // 2, 0)
     if len(answer) > max_chars or (len(answer) * 10 > max_tokens * 16 and approx_tokens(answer) > max_tokens):
         limits = (0,)                    # cannot fit whatever the context: one render, the caller splits it

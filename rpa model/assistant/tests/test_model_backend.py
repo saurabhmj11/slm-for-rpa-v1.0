@@ -120,6 +120,18 @@ def test_answer_watch_repeated_step_id_and_plan_line():
     assert _watch_feed(AnswerWatch(lambda p: p), "Question: which folder? " * 30) is None
 
 
+def test_answer_watch_reads_a_restated_request():
+    """An answer that opens with "Clear request: ..." (a beginner's request restated) is watched like a plan answer;
+    on_plan gets the plan lines only."""
+    seen = []
+    clear = "Clear request: List the files, read each text file and log it.\n"
+    w = AnswerWatch(lambda piece: piece, on_plan=lambda plan: seen.append(plan) or len(plan) > 2)
+    n = _watch_feed(w, clear + PLAN3 + '{"kind":"TaskBot","steps":[' + _step(1), pieces=1)
+    assert n == len(clear + PLAN3) - 1 and w.kind == "plan" and seen[0][0].startswith("1. List"), (n, seen)
+    w = AnswerWatch(lambda piece: piece)
+    bad = clear + PLAN3 + '{"kind":"TaskBot","steps":[' + "".join(_step(i) for i in range(1, 30))
+    assert _watch_feed(w, bad) is not None and "steps for a plan of 3 lines" in w.reason, w.reason
+
 def test_answer_watch_on_plan_stops_after_the_plan():
     seen = []
     w = AnswerWatch(lambda piece: piece, on_plan=lambda plan: seen.append(plan) or len(plan) > 2)

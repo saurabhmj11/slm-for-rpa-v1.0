@@ -122,6 +122,22 @@ def test_clarifying_question():
     assert router(FakeModel(style="plan", catalog=CAT)).run(CSV_REQ)["verified"]
 
 
+def test_restated_request_is_shown_as_understood():
+    """A beginner's request: the answer opens with "Clear request: ..."; Studio's notes start with "I understood: ..."
+    and the result carries it as "understood" (the Studio shape is unchanged: variables, steps, notes, warnings)."""
+    clear = "Read the CSV file and write the table to an Excel sheet"
+    m = Scripted(lambda req, p, a: "Clear request: " + clear + ".\n" + plan_answer(CSV_TO_EXCEL))
+    r = router(m)
+    res = r.run("pls put my csv in excel thx")
+    assert res["verified"] and res["understood"] == clear + "."
+    code, out = S.chat_completion(r, studio_body("pls put my csv in excel thx"))
+    ans = json.loads(out["choices"][0]["message"]["content"])
+    assert set(ans) == {"variables", "steps", "notes", "warnings"} and ans["warnings"] == []
+    assert ans["notes"].startswith(S.UNDERSTOOD + clear + ". " + S.STUDIO_NOTE), ans["notes"]
+    assert out["ooa"]["understood"] == clear + "."
+    plain = router(Scripted(lambda req, p, a: plan_answer(CSV_TO_EXCEL))).run(CSV_REQ)
+    assert plain["verified"] and "understood" not in plain
+
 def test_long_plan_is_built_in_parts():
     whole_plan = F.plan_from_flow(CSV_TO_EXCEL, CAT) + [l.replace(l.split(".")[0], str(int(l.split(".")[0]) + 4), 1)
                                                         for l in F.plan_from_flow(PART2, CAT)]

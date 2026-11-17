@@ -34,6 +34,8 @@ files = {
     "plain_requests.jsonl": (H.parent / "eval/plain_requests.jsonl").read_text(encoding="utf-8"),
     "plain_requests_2.jsonl": (H.parent / "eval/plain_requests_2.jsonl").read_text(encoding="utf-8"),
     "plain_requests_3.jsonl": (H.parent / "eval/plain_requests_3.jsonl").read_text(encoding="utf-8"),
+    "beginner_requests.jsonl": (H.parent / "eval/beginner_requests.jsonl").read_text(encoding="utf-8"),
+    "beginner_score.py": (H.parent / "eval/beginner_score.py").read_text(encoding="utf-8"),
 }
 
 cells = []
@@ -108,7 +110,8 @@ CLEAN_DATA = True          # cell 6 runs the strict data filter (sft/ -> sft_cle
 SCEN_REPEAT = 15           # whole business processes are long and few: weight them 3x the other files (CORE_REPEAT)
 RENDER = True              # cell 6d writes the data in the plan-first format with retrieval context (sft_render/); cell 7 trains on it
 NEW_FILES = {"long_train.jsonl": 15, "business2_train.jsonl": 15, "targeted_train.jsonl": 8,   # new files in Drive sft/
-             "fix_train.jsonl": 5, "clarify_train.jsonl": 5}                                     # -> times per epoch
+             "fix_train.jsonl": 5, "clarify_train.jsonl": 5,                                     # -> times per epoch
+             "beginner_train.jsonl": 4}   # beginner wording: answers start "Clear request: ..." (gen_beginner.py)
 ASSISTANT_EVAL = True      # cell 8 also scores the full assistant (real action names only, repair, loop guard), as users get it
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
 MAX_FLOW_CHARS = 9000 * SFT_SEQ // 2048   # skip training flows longer than this (about SFT_SEQ tokens)
@@ -471,6 +474,30 @@ for _f, _label in _sets:
 print("\\nplain-wording eval (BARE model: raw generation, no loop guard, no catalog lock, no repair) | " + " | ".join(_summary))
 if NEW_FORMAT:
     print("answer kinds (flow / question / reply):", _kinds)
+# Beginner set: 80 requests the way people with no IT background write them (vague goals, business words, casual,
+# typos, Hinglish, Indian English, voice, story). 60 must be built (right = passes every rule + has the must actions
+# in order), 20 miss a key detail and must be ASKED about (right = a Question naming that detail; a flow built on a
+# guess counts as "assumed", not right). Scored per kind and per style (eval/beginner_score.py).
+_BEG = "/content/ooa/beginner_requests.jsonl"
+if NEW_FORMAT and os.path.exists(_BEG):
+    import beginner_score as _B
+    _brows = _B.load(_BEG)
+    print("\\n=== Beginner requests, BARE model ===")
+    _bres, _bclear = [], 0
+    for row in _brows:
+        _txt = run_cli(_prompter.prompt(row["prompt"])).split("Assistant:", 1)[-1].split("<|assistant_end|>")[0].strip()
+        _a = _F.parse_answer(_txt, expand=True, catalog=_cat_entries, request=row["prompt"])
+        _bclear += bool(_a.get("clear"))
+        _valid, _acts = False, []
+        if _a["kind"] == "flow" and _a["flow_text"]:
+            _valid = bool(RW.score(_a["flow_text"])["valid"])
+            try: _acts = RW.actions_of(json.loads(RW.clean(_a["flow_text"])))
+            except Exception: _acts = []
+        _r = _B.score(row, _a["kind"], _valid, _acts, _a.get("question"))
+        _bres.append(_r)
+        print(("OK   " if _r["right"] else _r["outcome"][:12].ljust(12)), row["kind"][:4], ",".join(row["style"])[:22].ljust(22),
+              row["prompt"][:48], "->", (_a.get("question") or _a.get("clear") or str(_acts[:4]))[:70])
+    print(f"beginner set (BARE model) | {_B.summary_text(_B.summarize(_brows, _bres))} | answers restating the request: {_bclear}")
 if ASSISTANT_EVAL:
     # the same pipeline as the PC app and Studio: the model can only write real action / input names (catalog lock),
     # a loop guard stops repetition, typo-level repair is applied, the platform rules verify, up to 2 retries
@@ -499,6 +526,17 @@ if ASSISTANT_EVAL:
             print(("OK   " if right else ("VALID" if res.get("verified") else "FAIL ")), f"{res.get('seconds', 0):>5}s", row["prompt"][:60], "->", got[:6])
         _asum.append(f"{_label.split(':')[0]}: {ok}/{n} right ({ver} verified)")
     print("\\nplain-wording eval (full assistant) | " + " | ".join(_asum))
+    if NEW_FORMAT and os.path.exists(_BEG):
+        print("\\n=== Beginner requests, full assistant ===")
+        _bres2 = []
+        for row in _brows:
+            res = _router.run(row["prompt"])
+            _r = _B.score_router(row, res, lambda t: RW.actions_of(json.loads(t)))
+            _bres2.append(_r)
+            got = RW.actions_of(json.loads(res["flow"])) if res.get("verified") else []
+            print(("OK   " if _r["right"] else _r["outcome"][:12].ljust(12)), f"{res.get('seconds', 0):>5}s", row["kind"][:4],
+                  row["prompt"][:48], "->", (res.get("question") or res.get("understood") or str(got[:4]))[:70])
+        print("beginner set (full assistant) | " + _B.summary_text(_B.summarize(_brows, _bres2)))
     del _local, _router
 del _engine, _model                    # free the GPU for later cells (RL, self-improvement)
 torch.cuda.empty_cache()

@@ -141,6 +141,7 @@ LOOPED = "The answer started repeating itself and was stopped."
 
 
 STUDIO_NOTE = "Written by the OOA assistant and checked against the platform's rules."
+UNDERSTOOD = "I understood: "     # + the model's restatement of a beginner's request ("Clear request: ..."), in notes
 ASKED = "the model asked a question instead of guessing: the request does not say enough to automate"
 
 
@@ -257,11 +258,13 @@ class Router:
         # the platform writes variables $name$ (Studio saves them so, and only $name$ is replaced inside text)
         return F.to_dollar_name_dollar(flow, names | {v.get("name") for v in extra}), notes
 
-    def answer_text(self, flow, existing=None, assistant=False, warnings=()):
-        """The verified flow as the client reads it: Studio's {variables, steps, notes, warnings}, or the flow JSON."""
+    def answer_text(self, flow, existing=None, assistant=False, warnings=(), understood=None):
+        """The verified flow as the client reads it: Studio's {variables, steps, notes, warnings}, or the flow JSON.
+        understood: the model's restatement of the request; Studio shows it first in notes ("I understood: ...")."""
         if assistant:
             have = {v.get("name") for v in (existing or []) if isinstance(v, dict)}
-            notes = " ".join([STUDIO_NOTE] + list(warnings))
+            said = [UNDERSTOOD + understood.rstrip(".") + "."] if understood else []
+            notes = " ".join(said + [STUDIO_NOTE] + list(warnings))
             out = {"variables": [v for v in flow.get("variables", []) if v.get("name") not in have], "steps": flow["steps"],
                    "notes": notes, "warnings": list(warnings)}
             return json.dumps(out, separators=(",", ":"), ensure_ascii=False)
@@ -346,6 +349,7 @@ class Router:
         p, fmt = self.policy, self.format()
         prev = probs = None
         plan, errors, decomposed = [], [], False
+        clear = None                                   # the latest "Clear request: ..." the model wrote
         rule = self.parts_rule(request, can_escalate) if fmt == "context" and p.parts_first else None
         for attempt in range(1 + p.local_retries):
             if late():
@@ -357,6 +361,7 @@ class Router:
             except Exception as ex:
                 return {"errors": [f"local model error: {ex}"], "plan": plan}
             ans = F.parse_answer(raw)
+            clear = ans.get("clear") or clear
             if ans["kind"] == "question":
                 tried.append({"source": "local", "ok": True, "kind": "question"})
                 return {"question": ans["question"], "plan": []}
@@ -368,7 +373,7 @@ class Router:
                 decomposed = True
                 flow, info = self._decompose(request, plan, existing, tried, late)
                 if flow is not None:
-                    return {"flow": flow, "notes": info, "plan": plan, "parts": True}
+                    return {"flow": flow, "notes": info, "plan": plan, "parts": True, "clear": clear}
                 errors = info
                 continue                                     # whole answers next
             flow, info = self.verify(ans["flow_text"] if ans["kind"] == "flow" else raw, existing, ans["plan"], request)
@@ -380,7 +385,7 @@ class Router:
                 plan = ans["plan"]
                 tried[-1]["plan_lines"] = len(plan)
             if flow is not None:
-                return {"flow": flow, "notes": info, "plan": ans["plan"]}
+                return {"flow": flow, "notes": info, "plan": ans["plan"], "clear": clear}
             tried[-1]["preview"] = (raw or "")[:300]      # what the model wrote, so a failure can be read
             errors = info
             if looped:
@@ -402,7 +407,7 @@ class Router:
         if plan and not decomposed and len(self.parts_of(plan)) >= 2 and not late():
             flow, info = self._decompose(request, plan, existing, tried, late)
             if flow is not None:
-                return {"flow": flow, "notes": info, "plan": plan, "parts": True}
+                return {"flow": flow, "notes": info, "plan": plan, "parts": True, "clear": clear}
             errors = list(errors) + info
         elif plan and late():
             errors = list(errors) + [OUT_OF_TIME]
@@ -493,7 +498,7 @@ class Router:
             out = self._local(request, existing, tried, late, can_escalate)
             if out.get("flow") is not None:
                 return self.done(request, out["flow"], "local", tried, out["notes"], t0, assistant, existing,
-                                 plan=out["plan"], parts=out.get("parts", False))
+                                 plan=out["plan"], parts=out.get("parts", False), understood=out.get("clear"))
             if out.get("question"):
                 return self.done(request, None, "local", tried, [], t0, assistant, existing, reason=ASKED,
                                  question=out["question"])
@@ -530,15 +535,18 @@ class Router:
                          plan=plan)
 
     def done(self, request, flow, source, tried, info, t0, assistant=False, existing=None, reason=None, plan=None,
-             question=None, parts=False):
-        """flow: the verified flow dict or None. The result's "flow" is the text the client gets (answer_text)."""
+             question=None, parts=False, understood=None):
+        """flow: the verified flow dict or None. The result's "flow" is the text the client gets (answer_text).
+        understood: the model's restatement of the request (result "understood"; Studio's notes start with it)."""
         warnings = safety.warnings(flow, self.cat) if flow is not None else []
-        text = self.answer_text(flow, existing, assistant, warnings) if flow is not None else None
+        text = self.answer_text(flow, existing, assistant, warnings, understood) if flow is not None else None
         res = {"flow": text, "source": source, "verified": flow is not None, "attempts": tried,
                "repairs" if flow is not None else "problems": info, "seconds": round(time.time() - t0, 3),
                "plan": list(plan or []), "warnings": warnings}
         if parts:
             res["built_in_parts"] = True
+        if understood and flow is not None:
+            res["understood"] = understood
         if question:
             res["question"] = question
         if reason:

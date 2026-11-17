@@ -115,7 +115,11 @@ class AnswerWatch:
         self._done_lines = 0
 
     def _plan(self, text):
-        body = text.split("Plan:", 1)[1] if text.lstrip().startswith("Plan:") else ""
+        t = text.lstrip()
+        if t.startswith("Clear request:"):            # a restatement line before the plan (ooa_format.CLEAR_HEAD)
+            i = t.find("\nPlan:")
+            t = t[i + 1:] if i >= 0 else ""
+        body = t.split("Plan:", 1)[1] if t.startswith("Plan:") else ""
         return [l.rstrip() for l in body.split("\n") if l.strip()]
 
     def push(self, tok):
@@ -127,7 +131,7 @@ class AnswerWatch:
             if head.startswith("{"):                                    # flow JSON only (the format before plans)
                 self.flow_at, self.plan_lines = len(t) - len(head), 0
                 return False
-            if not any(head.startswith(p) or p.startswith(head) for p in ("Plan:", "Flow:")):
+            if not any(head.startswith(p) or p.startswith(head) for p in ("Plan:", "Flow:", "Clear request:")):
                 self.flow_at, self.plan_lines = 10 ** 9, 0               # a question or a chat reply: not watched
                 return False
             i = t.find("Flow:")
@@ -142,13 +146,13 @@ class AnswerWatch:
             lines = t.split("\n")
             for line in lines[self._done_lines:-1]:                      # complete lines not seen yet
                 key = _PLAN_NUM.sub("", line).strip().lower()
-                if key and key != "plan:":
+                if key and key != "plan:" and not key.startswith("clear request:"):
                     self._lines_seen[key] += 1
                     if self._lines_seen[key] >= self.max_same_line:
                         self.reason, self.kind = f"the plan repeats the line '{key[:60]}'", "loop"
                         return True
             self._done_lines = max(self._done_lines, len(lines) - 1)
-            if self._done_lines > self.max_plan_lines + 1:
+            if self._done_lines > self.max_plan_lines + 2:     # "Plan:" and a "Clear request:" line
                 self.reason, self.kind = f"the plan runs past {self.max_plan_lines} lines", "loop"
                 return True
             return False

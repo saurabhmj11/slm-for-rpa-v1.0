@@ -571,6 +571,43 @@ def test_render_gold_dropout_keeps_the_answer():
             shutil.rmtree(d, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------------------------- rewrite ("Clear request:")
+def test_clear_request_names_the_steps():
+    c = F.clear_request(LOOP_FLOW, CAT)
+    assert c.startswith("List files in the folder") and c.endswith(".") and "otherwise" in c, c
+    assert F.clear_request(linear_flow(["ooa.csv/read", "ooa.excel/close", "ooa.csv/write"]), CAT) == \
+        "Step 1 in plain words, then step 3 in plain words."               # closing steps are left out
+    long = linear_flow(["ooa.csv/read"] * 40)
+    c = F.clear_request(long, CAT, limit=120)
+    assert len(c) <= 121 and c.endswith("and more."), c
+
+
+def test_rewrite_answer_parses_back():
+    clear = "Read the CSV, then write it to Excel."
+    ans = F.render_flow_answer(LOOP_FLOW, CAT, F.ANSWER_COMPACT, clear)
+    assert ans.startswith(F.CLEAR_HEAD + " " + clear + "\n" + F.PLAN_HEAD)
+    a = F.parse_answer(ans + "<|assistant_end|>")
+    assert a["kind"] == "flow" and a["clear"] == clear and a["plan"] == F.plan_from_flow(LOOP_FLOW, CAT)
+    assert F.flow_object(a["flow_text"]) == F.compact_flow(LOOP_FLOW)
+    assert F.parse_answer(F.render_flow_answer(LOOP_FLOW, CAT))["clear"] is None        # no restatement
+    q = F.parse_answer("Clear request: Move the files.\nQuestion: Which folder?")
+    assert q["kind"] == "question" and q["question"] == "Which folder?" and q["clear"] == "Move the files."
+    cut = F.parse_answer("Clear request: Move the files")                               # stopped before the plan
+    assert cut["kind"] == "flow" and cut["flow_text"] is None and cut["clear"] == "Move the files"
+
+
+def test_render_rewrite_record():
+    import random as _r
+    rec = {"kind": "rewrite", "request": "pls tidy my pngs into a zip", "flow": LOOP_FLOW}
+    row = F.render_chat(rec, CAT, INDEX, None, _r.Random(1))
+    ans = row["messages"][1]["content"]
+    assert ans.startswith(F.CLEAR_HEAD + " " + F.clear_request(LOOP_FLOW, CAT))      # clear made from the flow
+    row = F.render_chat({**rec, "clear": "Zip the png files."}, CAT, INDEX, None, _r.Random(1))
+    assert row["messages"][1]["content"].startswith("Clear request: Zip the png files.\nPlan:")
+    assert row["messages"][0]["content"].startswith("pls tidy my pngs into a zip\n" + F.CONTEXT_HEADER)
+    flow_row = F.render_chat({**rec, "kind": "flow"}, CAT, INDEX, None, _r.Random(1))
+    assert flow_row["messages"][1]["content"].startswith(F.PLAN_HEAD)
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

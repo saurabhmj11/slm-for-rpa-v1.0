@@ -52,6 +52,10 @@ The model format is defined in `training/ooa_format.py`; training data is render
    remaining attempts are whole answers. A backend without `on_plan` gets the old order (one whole attempt first).
 7. Escalation (only when allowed): after the local attempts fail, or at once when the plan is over 12 lines.
 8. Safety: `training/safety.py` warnings for destructive steps go into notes, `warnings` and the `ooa` field.
+9. What the model understood: a model trained on beginner data (`training/gen_beginner.py`) may open its answer with
+   "Clear request: <the request restated in tool words>" before the plan. The verified answer's Studio notes then
+   start with "I understood: ..." and the result (and the `ooa` field) carries it as `understood`; the Studio shape
+   (`variables`, `steps`, `notes`, `warnings`) is unchanged.
 `prompt_format` "auto" uses the request alone (models trained before this format) unless the model pack has
 `examples.jsonl` next to its catalog.
 

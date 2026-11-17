@@ -31,6 +31,7 @@ WANT = {
     "scenarios_train.jsonl": 3, "long_train.jsonl": 5.5, "business2_train.jsonl": 5.5,
     "targeted_train.jsonl": 3, "fix_train.jsonl": 2, "clarify_train.jsonl": 3,
     "self_improved.jsonl": 2, "hard_fixed.jsonl": 2, "feedback_train.jsonl": 3,
+    "beginner_train.jsonl": 4,       # beginner wording (gen_beginner.py): restate, then plan; friendly questions
 }
 LONG_FILES = ("long_train.jsonl", "business2_train.jsonl", "scenarios_train.jsonl", "synth_pattern.jsonl")
 LONG_CAP = 3.0
