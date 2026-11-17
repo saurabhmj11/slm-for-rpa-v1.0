@@ -234,6 +234,51 @@ def test_fake_model_with_router():
     assert m.calls[-1] == ("make me a sandwich", 0) and len(m.calls) == 2, m.calls
 
 
+def test_fake_model_batch():
+    """FakeModel.generate_batch answers each item as generate would and records the batch sizes."""
+    m = FakeModel(style="plan")
+    out = m.generate_batch([{"prompt": "list the files in a folder"}, {"prompt": "nonsense"},
+                            {"prompt": "list the files in a folder", "prefix": "Plan:\n1. x\nFlow:\n"}])
+    assert len(out) == 3 and out[0].startswith("Plan:") and out[1].startswith("garbage")
+    assert out[2].startswith("Plan:\n1. x\nFlow:\n{") and m.batches == [3] and len(m.last_batch_stats) == 3
+
+
+def test_batched_decode_matches_one_prompt():
+    """constrained.generate_batch (several prompts, per-row positions, one forward per step) gives exactly what the
+    one-prompt decoder gives, greedy and sampled with the same seed, on a tiny random nanochat model with a sliding
+    window shorter than the prompts (needs torch and OOA_NANOCHAT_DIR; no checkpoint)."""
+    nd = os.environ.get("OOA_NANOCHAT_DIR")
+    try:
+        import torch
+    except ImportError:
+        raise Skip("needs torch")
+    if not nd:
+        raise Skip("set OOA_NANOCHAT_DIR")
+    os.environ.setdefault("NANOCHAT_DTYPE", "float32")
+    sys.path.insert(0, str(Path(nd).resolve()))
+    from nanochat.gpt import GPT, GPTConfig
+    import constrained as C
+    torch.manual_seed(0)
+    cfg = GPTConfig(sequence_len=256, vocab_size=96, n_layer=4, n_head=2, n_kv_head=2, n_embd=64, window_pattern="SL")
+    with torch.device("meta"):
+        model = GPT(cfg)
+    model.to_empty(device="cpu")
+    model.init_weights()
+    for prm in model.parameters():                    # init_weights zeroes some projections: make every path count
+        prm.data.add_(0.02 * torch.randn_like(prm))
+    model.eval()
+    assert model.window_sizes[0][0] < 140             # the short window is shorter than the prompts
+    prompts = [[1 + (i * 7) % 90 for i in range(150)], [2 + (i * 5) % 90 for i in range(170)], [3, 4, 5, 6] * 40]
+    for temp, seed in ((0.0, 1), (0.8, 5)):
+        one = [C.generate(model, p, None, 24, temp, 50, seed + k, set(), lambda t: "x")[0]
+               for k, p in enumerate(prompts)]
+        rows = [C.BatchRow(p, 24 - 6 * k, temp, seed + k, top_k=50) for k, p in enumerate(prompts)]
+        C.generate_batch(model, rows, set(), lambda t: "x")
+        for k, r in enumerate(rows):
+            assert r.out == one[k][:24 - 6 * k], (temp, k, r.out, one[k])
+            assert r.reason == "max_tokens"
+
+
 # ---------------------------------------------------------------- real model
 def _real():
     md, nd = os.environ.get("OOA_MODEL_DIR"), os.environ.get("OOA_NANOCHAT_DIR")

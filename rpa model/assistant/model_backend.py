@@ -366,6 +366,50 @@ class NanochatLocal:
         return self._run(request, max_tokens, 0.2 + 0.3 * attempt, 1000 + attempt, attempt=attempt, flow=True,
                          on_plan=on_plan, prefix=prefix)
 
+    def generate_batch(self, items, deadline=None):
+        """Several answers decoded together in one batch (constrained.generate_batch: different prompts, one forward
+        pass per step for all of them). items: dicts {"prompt", "attempt" (0), "max_tokens" (MAX_ANSWER), "on_plan",
+        "prefix", "temperature" (0.2 + 0.3 * attempt), "seed" (1000 + attempt)}, as generate takes them. Returns the
+        texts in order; self.last_batch_stats has one stats dict per item (stop, tokens, seconds) and self.last_stats
+        the whole batch's. deadline: time.time() after which rows still running stop (stop "time")."""
+        import constrained as C
+        t0 = time.time()
+        rows, guards, prefixes = [], [], []
+        for it in items:
+            attempt = int(it.get("attempt", 0) or 0)
+            prefix = it.get("prefix") or ""
+            on_plan = it.get("on_plan")
+            g = Guards(RepetitionGuard(), AnswerWatch(self._decode1, on_plan, prefix=prefix)) if self.guard_enabled else (
+                Guards(AnswerWatch(self._decode1, on_plan, prefix=prefix, max_plan_lines=10 ** 6, max_same_line=10 ** 6,
+                                   max_same_id=10 ** 6)) if on_plan is not None else None)
+            prompt = self._prompt(it["prompt"]) + (self.tok.encode(prefix) if prefix else [])
+            con = self.constraints[attempt % len(self.constraints)] if self.constraint is not None else None
+            temp = it.get("temperature")
+            rows.append(C.BatchRow(prompt, self.token_budget(prompt, it.get("max_tokens") or MAX_ANSWER),
+                                   0.2 + 0.3 * attempt if temp is None else temp,
+                                   it.get("seed") if it.get("seed") is not None else 1000 + attempt, con, g, flow=True))
+            guards.append(g)
+            prefixes.append(prefix)
+        if not hasattr(self, "_tok_text"):
+            self._tok_text = C.token_strings(self.tok, self.model.config.vocab_size)
+        C.generate_batch(self.model, rows, {self.assistant_end, self.bos},
+                         lambda t: self._tok_text[t] or self.tok.decode([t]), deadline=deadline)
+        texts, stats = [], []
+        for r, g, prefix in zip(rows, guards, prefixes):
+            reason = r.reason
+            if reason.startswith("loop: ") and g is not None and g.kind == "plan":
+                reason = "plan: " + g.reason
+            stats.append({"tokens": len(r.out), "stop": reason, "names_locked": r.n_con, "names_corrected": r.n_changed,
+                          "max_tokens": r.max_tokens})
+            texts.append(prefix + self.tok.decode(r.out))
+        secs = round(time.time() - t0, 2)
+        for st in stats:
+            st["seconds"] = secs
+        self.last_batch_stats = stats
+        self.last_stats = {"tokens": sum(s["tokens"] for s in stats), "stop": "batch", "seconds": secs,
+                           "batch": len(stats)}
+        return texts
+
     def ask(self, question):
         return self._run(question, 300, 0.2, 1000).strip()
 
@@ -459,6 +503,18 @@ class FakeModel:
         if prefix:
             text = prefix + (ans["flow_text"] if ans["flow_text"] is not None else text)
         return text
+
+    def generate_batch(self, items, deadline=None):
+        """As NanochatLocal.generate_batch: each item answered as generate would (one call each, in order);
+        self.batches records the size of every batch."""
+        self.batches = getattr(self, "batches", []) + [len(items)]
+        texts, stats = [], []
+        for it in items:
+            texts.append(self.generate(it["prompt"], it.get("attempt", 0), max_tokens=it.get("max_tokens") or 2500,
+                                       on_plan=it.get("on_plan"), prefix=it.get("prefix")))
+            stats.append(dict(self.last_stats))
+        self.last_batch_stats = stats
+        return texts
 
     def ask(self, question):
         q = str(question).lower()
