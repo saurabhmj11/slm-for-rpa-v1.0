@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One-time setup for local training, inside WSL (Ubuntu) or Linux with an NVIDIA GPU.
+# One-time setup for local training, inside WSL (Ubuntu) or Linux with an NVIDIA GPU (optional: the notebook
+# ooa_local_pc.ipynb also trains on plain Windows, without torch.compile; WSL compiles the model and is faster).
 #   tr -d '\r' < "/mnt/c/ooa/rpa model/training/local/setup_wsl.sh" | bash
 # (tr strips Windows line endings, in case the file passed through a Windows tool.)
 # PC without an NVIDIA GPU (CPU only, for overnight top-ups):
@@ -61,5 +62,5 @@ except Exception as ex:
 print("GPU and compiler test: OK")
 EOF
 echo
-echo "Setup done. Next (README.md step 5):"
-echo "  ~/ooa-train-venv/bin/python \"/mnt/c/ooa/rpa model/training/local/train_local.py\" --work /mnt/c/ooa_train --check"
+echo "Setup done. Next (README.md): get the data with the notebook's cells 1-3 (or data_pc.py), then"
+echo "  ~/ooa-train-venv/bin/python \"/mnt/c/ooa/rpa model/training/local/train_pc.py\" --rpa \"/mnt/c/ooa/rpa model\" --mode full --data \"/mnt/c/ooa/rpa model/train_data/sft_render\" --check"

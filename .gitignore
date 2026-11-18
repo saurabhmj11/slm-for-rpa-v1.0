@@ -21,3 +21,5 @@ rpa model/assistant/basic_test_results.json
 rpa model/topup_work*/
 rpa model/topup_*.log
 rpa model/training/local/topup_nightly.log
+rpa model/train_data/
+rpa model/local_run/

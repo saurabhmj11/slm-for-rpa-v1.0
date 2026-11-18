@@ -1,6 +1,10 @@
-"""Generate ooa_local_pc.ipynb: train and run the OOA model on any Windows/Linux PC (GPU or CPU), no Colab.
-Run:  python make_local_notebook.py [DRIVE_FOLDER_ID]   (writes "rpa model/ooa_local_pc.ipynb")
-The notebook sits in the "rpa model" folder of ooa_assistant.zip and drives training/local/*.py.
+"""Generate ooa_local_pc.ipynb: train the OOA model on a Windows/Linux PC with the Colab v4 recipe, test it the way
+Colab cell 8 does, install it only if it is better, and run the assistant. No Colab needed.
+Run:  python make_local_notebook.py [DRIVE_FOLDER_ID] [OUT.ipynb]
+      (default output "rpa model/ooa_local_pc.ipynb"; the folder id is never stored in the repo: leave it out for the
+      shared notebook, and pass it only for a personal copy written outside the repo)
+The notebook sits in the "rpa model" folder of ooa_assistant.zip and drives training/local/{data_pc,train_pc,eval_pc}.py,
+which reuse the Colab modules (sft_setup.py, render_dataset.py, data_filter.py, ooa_format.py).
 """
 import json
 import sys
@@ -8,53 +12,56 @@ from pathlib import Path
 
 H = Path(__file__).resolve().parent
 FOLDER_ID = sys.argv[1] if len(sys.argv) > 1 else ""
+OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else H.parent / "ooa_local_pc.ipynb"
 cells = []
 def md(t): cells.append({"cell_type": "markdown", "metadata": {}, "source": t.strip("\n").splitlines(True)})
 def code(t): cells.append({"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [], "source": t.strip("\n").splitlines(True)})
 
 md("""
-# OOA model on this PC: download, train, test, run
+# OOA model on this PC: download, train (Colab v4 recipe), test, install, run
 
-Run the cells from top to bottom (Shift+Enter). Works on Windows and Linux, with or without an NVIDIA graphics card:
+Run the cells from top to bottom (Shift+Enter): **1 settings -> 2 check this PC -> 3 download -> 4 check -> 5 train ->
+6 test and install -> 7 start the assistant**. Works on Windows and Linux, with or without an NVIDIA graphics card.
+The training is the same code as the Colab notebook (cell 7): nanochat's SFT script from the pinned commit, patched by
+`training/sft_setup.py` (the 4096-token attention-window fix, the data mixture planned for the step budget), on the
+same data (`sft_render`: plan-first answers, compact flows, gold dropout, beginner rows).
 
-| This PC has | Cell 5 does | Time |
+| `MODE` (cell 1) | What it does | Time |
 |---|---|---|
-| NVIDIA RTX 20xx / GTX 16xx or newer | **full training** from the pretrained base model (same recipe as Colab) | about 1-2 h |
-| no graphics card | **top-up**: a short round from the current model on your feedback + training data | about 2-2.5 h on 4 cores |
-| any PC, best with an NVIDIA GPU, `MODE = "big"` in cell 1 | **big**: cleans all the training data with strict filters (report in `sft_clean/filter_report.json`), then the full training from the pretrained base model on it, `BIG_PASSES` passes, saved in chunks and resumable; installed only if better | GPU: a few hours; CPU: several days |
-| no graphics card, `MODE = "curriculum"` in cell 1 | **curriculum**: small focused sessions, one module at a time (not-a-task, files, tables, Excel, Word, PDF, browser, email, chains, loops, conditions), then a mixed polish; each kept only if its module improves and nothing learned is forgotten | about 12-20 h in total; resumable with `CURRICULUM_FROM` |
-| no graphics card, `MODE = "refine"` in cell 1 | **refine**: several top-up rounds in a row from the best model, smaller steps each round; keeps a round only if it is better and does not forget what the model already got right | about 3-4 h per round (up to 4 rounds) |
-| no graphics card, `MODE = "long"` in cell 1 | **long run**: the full Colab-size training in 10 saved chunks, at low priority so the PC stays usable; resumes after a restart | about 1-1.5 days on 4 cores |
+| `"full"` (default with an NVIDIA GPU) | **the Colab run**: 8000 steps at the 4096 window from the pretrained **base** model | estimated 2-3 h on an RTX 3060/4060 (the Colab T4 takes about 2.5 h); a CPU would need weeks, so it is not offered there |
+| `"topup"` (default without a GPU) | **continues the newest trained model** (Drive's, or this PC's own when it already grew from it) for `TOPUP_STEPS` steps on the same data, mostly the beginner and long business-process rows | 300 steps: about 5.5-9 h on 4 CPU cores (measured on a 4-core test machine at the 4096 window: 67 s per step at low priority, 55 s with all cores; slower PCs up to about 100 s) |
+| `"install"` | no training: tests Drive's newest model against this PC's and installs it if it is better | the test only (cell 6) |
 
-Either way the new model is scored on the same 20 everyday requests and **installed only if it is better** than the
-current one (the old one is kept in `nanochat_base/old_model_<date>`). Cell 6 starts the assistant in your browser.
+Training is saved in chunks (top-up: every 50 steps; full: one run like Colab, or `FULL_CHUNKS` pieces): after a stop,
+restart or crash run cells 1-5 again and it continues from the last saved chunk. On a CPU it runs at low priority with
+one core left free, so the PC stays usable.
+
+Cell 6 scores the new model and the installed one through the full assistant (catalog lock, repair, verify,
+self-correction), on sets 1-3 and the beginner set, as Colab cell 8 does; on a CPU a sample (`EVAL_PER_SET` requests
+per set, at most `EVAL_MINUTES` per model; a request takes 2-70 s on 4 cores, about 15-25 minutes per model). The new
+model is **installed only if it is better** (the old one is kept in `nanochat_base/old_model_<date>`), together with
+its `catalog.jsonl` and `examples.jsonl` in `rpa model/sft/`, so the assistant gives it the context + plan prompts it
+was trained on.
 
 Before the first run: unzip `ooa_assistant.zip`, open this notebook from its `rpa model` folder in VS Code (Python +
-Jupyter extensions) or Jupyter, and pick a Python 3.10+ kernel. Internet is needed for cells 2 and 3.
+Jupyter extensions) or Jupyter, and pick a Python 3.10+ kernel. Internet is needed for cells 2 and 3. The Drive folder
+`ooa-nanochat` must be shared as "anyone with the link"; put its id (from the link) in cell 1.
 """)
 
 code(f'''
 #@title 1. Settings
 DRIVE_FOLDER_ID = "{FOLDER_ID}"     # Google Drive folder ooa-nanochat (shared as "anyone with the link")
-MODE = "auto"              # "auto": "full" with an NVIDIA GPU, "topup" without. Or choose:
-                           #   "long"  : Colab-size training on a CPU, day and night, in 10 saved chunks (resumable)
-                           #   "full"  : Colab-size training in one go (GPU)    "topup": short round from the current model
-                           #   "refine": several top-up rounds in a row (day and night), each from the best model,
-                           #             smaller learning rate each round; keeps a round only if it is better and
-                           #             forgets at most 1 request the model already got right
-                           #   "curriculum": small focused sessions, one module at a time (Excel, Word, PDF,
-                           #             files, browser, email, business apps, chains, loops, conditions, not-a-task), then a
-                           #             mixed polish; each kept only if better and nothing learned is forgotten
-                           #   "big"   : clean ALL the training data with strict filters, then the full training
-                           #             from the pretrained base model on it, on this PC's GPU, as long as it
-                           #             takes (saved in chunks, resumable); installed only if better
-BIG_PASSES = 4             # big: passes over the cleaned data (1 pass = about 1,200 steps)
-REFINE_ROUNDS = 4          # refine: at most this many rounds (each about TOPUP_STEPS long)
-CURRICULUM_FROM = ""       # curriculum: continue from this stage after a stop, e.g. "loops" (empty = from the start)
-TOPUP_STEPS = 200          # top-up length (CPU: about 2-2.5 h on 4 cores)
-FULL_STEPS = 2500          # full training length (same as Colab)
-REPLACE_LOCAL_MODEL = False   # True: replace this PC's model with the newest one from Drive (the old one is kept)
-REFRESH_DATA = False       # True: download the training data again even if it is already here
+MODE = "auto"              # "auto": "full" with an NVIDIA GPU, "topup" without; or "full", "topup", "install"
+TOPUP_STEPS = 300          # top-up length in steps of 32,768 tokens (4 CPU cores: about 5.5-9 h)
+TOPUP_HOURS = 0            # > 0: measure this PC's speed first (about 5 min) and size the top-up to this many hours
+FULL_STEPS = 8000          # the Colab run (SFT_ITERS 32000 micro-batches = 8000 steps)
+FULL_CHUNKS = 1            # 1 = one run exactly as Colab cell 7 (a stop means starting again); e.g. 8 = saved every
+                           # 1000 steps and resumable, the same learning-rate schedule (each chunk reloads the data)
+SFT_SEQ = 4096             # training window, as Colab; a CPU PC with less than 10 GB RAM uses 2048 (cell 2)
+EVAL_PER_SET = 10          # cell 6: requests per test set on a CPU (4 sets; 0 = all 139, GPU default)
+EVAL_MINUTES = 60          # cell 6: at most this long per model
+REFRESH_DATA = False       # True: download the training data again even if it is unchanged
+RESTART_TRAINING = False   # True: throw away a training run in progress and start a new one
 
 RPA_FOLDER = r""           # optional: the 'rpa model' folder, e.g. r"C:/OOA/rpa model" (empty = search for it)
 
@@ -62,7 +69,7 @@ import os, sys, json, shutil, subprocess, time
 from pathlib import Path
 
 def _ok(p):
-    return (p / "assistant" / "app.py").exists() and (p / "training" / "local" / "topup_local.py").exists()
+    return (p / "assistant" / "app.py").exists() and (p / "training" / "local" / "train_pc.py").exists()
 
 def _find():
     starts = [Path(RPA_FOLDER)] if RPA_FOLDER else []
@@ -85,10 +92,11 @@ def _find():
                     return p
     print("Looked in:", *[str(p) for p in seen], sep=chr(10) + "  ")
     raise SystemExit("Could not find the 'rpa model' folder of the NEW ooa_assistant.zip (it must contain "
-                     "assistant/app.py and training/local/topup_local.py). Unzip the new zip to C:/OOA, "
+                     "assistant/app.py and training/local/train_pc.py). Unzip the new zip to C:/OOA, "
                      "or put its path in RPA_FOLDER above, then run this cell again.")
 
 ROOT = _find()
+LOCAL = ROOT / "training" / "local"
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
 print("assistant folder:", ROOT)
@@ -98,10 +106,24 @@ print("Python:", sys.executable, sys.version.split()[0])
 code('''
 #@title 2. Check this PC and install what is needed (first time: several minutes)
 def run(cmd, check=True):
-    print(">", " ".join(str(c) for c in cmd)[:160])
+    print(">", " ".join(str(c) for c in cmd)[:200])
     r = subprocess.run([str(c) for c in cmd])
     if check and r.returncode != 0:
         raise SystemExit(f"command failed (exit {r.returncode}); see the messages above")
+    return r.returncode
+
+def stream(cmd):
+    """Run a step and show its output as it happens; -> exit code."""
+    print(">", " ".join(str(c) for c in cmd)[:200])
+    p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         encoding="utf-8", errors="replace", env=dict(os.environ, PYTHONUNBUFFERED="1"))
+    try:
+        for line in p.stdout:
+            print(line, end="")
+    finally:
+        if p.poll() is None:
+            p.terminate()
+    return p.wait()
 
 GPU, GPU_MEM = False, 0
 try:
@@ -146,17 +168,21 @@ if t.returncode != 0:
     raise SystemExit("PyTorch does not load:\\n" + err)
 print("PyTorch", t.stdout.strip())
 CUDA = GPU and t.stdout.strip().endswith("True")
-MODE_NOW = MODE if MODE in ("full", "topup", "long", "refine", "curriculum", "big") else ("full" if CUDA else "topup")
+MODE_NOW = MODE if MODE in ("full", "topup", "install") else ("full" if CUDA else "topup")
+if MODE in ("long", "refine", "curriculum", "big"):
+    raise SystemExit(f'MODE "{MODE}" was removed: it trained the old plain-prompt format and would undo the v4 model. '
+                     'Use "topup" (CPU) or "full" (GPU).')
+if MODE_NOW == "full" and not CUDA:
+    raise SystemExit('MODE "full" needs an NVIDIA GPU (8000 steps; weeks on a CPU). Use MODE = "topup" on this PC.')
 try:
     import psutil
     RAM_GB = psutil.virtual_memory().total / 2**30
 except Exception:
     RAM_GB = 8.0
-# CPU: device batch from this PC's RAM (batch 4 needs about 7.3 GB, 2 about 4.5 GB, 1 about 2.9 GB for training alone).
-# Same tokens per step either way (the rest is gradient accumulation), so the result is the same; only slower.
-CPU_BATCH = 4 if RAM_GB >= 24 else 2 if RAM_GB >= 10 else 1
-DEVICE_BATCH = (min(2, CPU_BATCH) if MODE_NOW in ("long", "big") else CPU_BATCH) if not CUDA else (4 if GPU_MEM >= 10 else 2 if GPU_MEM >= 6 else 1)
-print("training mode:", MODE_NOW, "| device batch:", DEVICE_BATCH, f"| RAM {RAM_GB:.0f} GB")
+# CPU: one 4096-token row per pass needs about 5-6 GB for training; below 10 GB RAM train at 2048 (the model then
+# serves at 2048 too). Same tokens per step either way (the rest is gradient accumulation).
+SEQ = SFT_SEQ if (CUDA or RAM_GB >= 10) else 2048
+print("mode:", MODE_NOW, "| window:", SEQ, f"| RAM {RAM_GB:.0f} GB")
 
 # the desktop launcher and the nightly top-up use the same Python as this notebook
 bat = ROOT / "assistant" / "start_assistant.bat"
@@ -167,134 +193,92 @@ if bat.exists():
 ''')
 
 code('''
-#@title 3. Download the model and training data from Google Drive (about 0.5 GB; 1.5 GB more for full training)
-import importlib, re
+#@title 3. Download the model and the training data from Google Drive
+# Drive sft_render/ (already rendered by the Colab run: saves about 50 minutes) is downloaded when it changed since
+# the last time; without it, sft/ (+ sft_clean/) is downloaded and rendered here with the Colab cell 6/6d settings.
+# A top-up starts from Drive's newest trained model (chatsft_checkpoints, else the newest chatsft_checkpoints_before_*).
+# Files named "... (1).jsonl" on Drive are second uploads: they are reported and ignored.
+import importlib
 importlib.invalidate_caches()
-import gdown
+sys.path.insert(0, str(LOCAL))
+import data_pc
+importlib.reload(data_pc)
 assert DRIVE_FOLDER_ID, "set DRIVE_FOLDER_ID in cell 1"
-print("listing the Drive folder (a minute) ...")
-listing = gdown.download_folder(id=DRIVE_FOLDER_ID, skip_download=True, quiet=True)
-FILES = {}
-for f in listing:
-    FILES.setdefault(str(f.path).replace("\\\\", "/"), []).append(f.id)
-print(len(FILES), "files on Drive")
-
-def fetch(drive_path, dest, refresh=False):
-    """Download one Drive file; if Drive holds two with that name, keep the one with more lines (the fuller one)."""
-    dest = Path(dest)
-    if dest.exists() and dest.stat().st_size > 0 and not refresh:
-        return dest
-    ids = FILES.get(drive_path)
-    if not ids:
-        return None
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    best, best_n = None, -1
-    for i, fid in enumerate(ids):
-        tmp = dest.with_name(dest.name + f".part{i}")
-        gdown.download(id=fid, output=str(tmp), quiet=True)
-        n = sum(1 for _ in open(tmp, "rb")) if tmp.suffix != ".pt" and ".pt." not in tmp.name else tmp.stat().st_size
-        if n > best_n:
-            if best is not None:
-                best.unlink()
-            best, best_n = tmp, n
-        else:
-            tmp.unlink()
-    best.replace(dest)
-    print("  got", drive_path)
-    return dest
-
-def newest_pair(folder, kind="model"):
-    """Highest step N in a Drive folder that has model_N.pt and meta_N.json."""
-    steps = []
-    for p in FILES:
-        m = re.fullmatch(re.escape(folder) + r"/model_(\\d+)\\.pt", p)
-        if m and f"{folder}/meta_{m.group(1)}.json" in FILES:
-            steps.append(m.group(1))
-    return max(steps, key=int) if steps else None
-
-base = ROOT / "nanochat_base"
-for name in ("tokenizer.pkl", "token_bytes.pt"):
-    assert fetch(f"nanochat_base/tokenizer/{name}", base / "tokenizer" / name), f"{name} not found on Drive"
-
-# the chat model: the live one, else the newest kept copy (never the autoresearch mini-model)
-folders = ["nanochat_base/chatsft_checkpoints/d8"] + sorted(
-    {p.rsplit("/", 1)[0] for p in FILES if re.match(r"nanochat_base/chatsft_checkpoints_before_\\d+_\\d+/d8/", p)}, reverse=True)
-chat = next(((f, s) for f in folders if (s := newest_pair(f))), None)
-d8 = base / "chatsft_checkpoints" / "d8"
-have = sorted(d8.glob("model_*.pt")) if d8.exists() else []
-if chat and (not have or REPLACE_LOCAL_MODEL):
-    if have:
-        keep = base / f"old_model_{time.strftime('%Y%m%d_%H%M%S')}"
-        keep.mkdir()
-        for f in d8.iterdir():
-            shutil.move(str(f), keep / f.name)
-        print("previous model kept in", keep)
-    folder, s = chat
-    fetch(f"{folder}/model_{s}.pt", d8 / f"model_{s}.pt", refresh=True)
-    fetch(f"{folder}/meta_{s}.json", d8 / f"meta_{s}.json", refresh=True)
-    print("chat model:", folder, "step", s)
-elif have:
-    print("keeping this PC's model:", have[-1].name, "(set REPLACE_LOCAL_MODEL = True to take Drive's newest)")
-else:
-    raise SystemExit("no trained chat model found on Drive")
-
-# training data
-SFT = ["natural_train.jsonl", "core_train.jsonl", "chains_train.jsonl", "combos_train.jsonl", "notask_train.jsonl", "tools_train.jsonl", "scenarios_train.jsonl", "synth_train.jsonl", "synth_pattern.jsonl", "train_flows.jsonl",
-       "train_catalog.jsonl", "val.jsonl", "catalog.jsonl", "self_improved.jsonl", "hard_fixed.jsonl"]
-for name in SFT:
-    fetch(f"sft/{name}", ROOT / "sft" / name, refresh=REFRESH_DATA)
-
-# full training starts from the pretrained base model
-if MODE_NOW in ("full", "long", "big"):
-    s = newest_pair("nanochat_base/base_checkpoints/d8")
-    assert s, "no pretrained base model on Drive (nanochat_base/base_checkpoints/d8)"
-    for name in (f"model_{s}.pt", f"meta_{s}.json", f"optim_{s}_rank0.pt"):
-        fetch(f"nanochat_base/base_checkpoints/d8/{name}", base / "base_checkpoints" / "d8" / name)
-    print("base model step", s)
+DRIVE = data_pc.GdownDrive(DRIVE_FOLDER_ID)
+print(len(DRIVE.files), "files on Drive")
+GOT = data_pc.sync(DRIVE, ROOT, MODE_NOW, refresh=REFRESH_DATA, seq=SEQ)
+DATA = Path(GOT["data"])
+# the assistant needs a tokenizer even before the first install
+if not (ROOT / "nanochat_base" / "tokenizer" / "tokenizer.pkl").exists():
+    src = ROOT / "train_data" / ("base" if MODE_NOW == "full" else "drive_model") / "tokenizer"
+    shutil.copytree(src, ROOT / "nanochat_base" / "tokenizer", dirs_exist_ok=True)
 print("downloads done")
 ''')
 
 code('''
-#@title 4. Check everything is in place
-if MODE_NOW == "big":      # filter all data, then chunked full training; run cell 5 again after any stop to continue
-    TOPUP = [sys.executable, "-u", str(ROOT / "training" / "local" / "big_local.py"), "--rpa", str(ROOT),
-             "--passes", str(BIG_PASSES), "--device-batch", str(DEVICE_BATCH)]
-elif MODE_NOW == "long":   # 10 saved chunks; run cell 5 again after any interruption to continue
-    TOPUP = [sys.executable, "-u", str(ROOT / "training" / "local" / "train_long.py"), "--rpa", str(ROOT),
-             "--chunks", "10", "--chunk-steps", str(max(1, FULL_STEPS // 10)), "--device-batch", str(DEVICE_BATCH)]
-elif MODE_NOW == "curriculum":  # one module at a time; finished stages stay installed if it is stopped
-    TOPUP = [sys.executable, "-u", str(ROOT / "training" / "local" / "curriculum_local.py"), "--rpa", str(ROOT),
-             "--device-batch", str(DEVICE_BATCH)] + (["--from", CURRICULUM_FROM] if CURRICULUM_FROM else [])
-elif MODE_NOW == "refine":  # several improving rounds; finished rounds stay installed if it is stopped
-    TOPUP = [sys.executable, "-u", str(ROOT / "training" / "local" / "refine_local.py"), "--rpa", str(ROOT),
-             "--rounds", str(REFINE_ROUNDS), "--steps", str(TOPUP_STEPS), "--device-batch", str(DEVICE_BATCH)]
+#@title 4. Check everything is in place (and size the top-up)
+TRAIN = [sys.executable, "-u", str(LOCAL / "train_pc.py"), "--rpa", str(ROOT), "--mode", MODE_NOW, "--data", str(DATA),
+         "--seq", str(SEQ)]
+if MODE_NOW == "full":
+    TRAIN += ["--steps", str(FULL_STEPS), "--chunks", str(FULL_CHUNKS)]
+elif MODE_NOW == "topup":
+    steps = TOPUP_STEPS
+    if TOPUP_HOURS > 0 and not (ROOT / "local_run" / "topup" / "state.json").exists():
+        print(f"measuring this PC's speed (2 steps, about 5 minutes) to size a {TOPUP_HOURS} h top-up ...")
+        out = subprocess.run(TRAIN + ["--measure", "2"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        import re as _re
+        m = _re.search(r"MEASURED: ([\\d.]+) s per step", out.stdout)
+        if m:
+            sps = float(m.group(1)) * 1.15          # low priority, one core left free
+            steps = max(50, int(TOPUP_HOURS * 3600 / sps) // 50 * 50)
+            print(f"  {float(m.group(1)):.0f} s per step -> {steps} steps for about {TOPUP_HOURS} h")
+        else:
+            print(out.stdout[-1500:], out.stderr[-1500:])
+            print("  could not measure; using TOPUP_STEPS =", TOPUP_STEPS)
+    TRAIN += ["--steps", str(steps)]
+if RESTART_TRAINING:
+    TRAIN += ["--restart"]
+if MODE_NOW == "install":
+    print("MODE install: no training; cell 6 tests Drive's newest model against this PC's")
 else:
-    TOPUP = [sys.executable, "-u", str(ROOT / "training" / "local" / "topup_local.py"), "--rpa", str(ROOT), "--mode", MODE_NOW,
-             "--steps", str(FULL_STEPS if MODE_NOW == "full" else TOPUP_STEPS), "--device-batch", str(DEVICE_BATCH)]
-r = subprocess.run(TOPUP + ["--check"])
-print("\\nOK: run cell 5" if r.returncode == 0 else "\\nfix the lines marked ! above, then run this cell again")
+    r = subprocess.run(TRAIN + ["--check"])
+    print("\\nOK: run cell 5" if r.returncode == 0 else "\\nfix the lines marked ! above, then run this cell again")
 ''')
 
 code('''
-#@title 5. Train, test, and install the new model only if it is better
-# Keep the PC on and plugged in. The current model is only replaced at the very end, after scoring.
-# MODE "long": each finished chunk is saved; after a stop, restart or crash just run this cell again to continue.
-# It runs at low priority with one CPU core left free, so you can keep using the PC (slower, but smooth).
-p = subprocess.Popen(TOPUP, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-                     env=dict(os.environ, PYTHONUNBUFFERED="1"))   # show progress as it happens
-try:
-    for line in p.stdout:
-        print(line, end="")
-finally:
-    if p.poll() is None:
-        p.terminate()
-print("\\nexit code", p.wait(), "| full training log: the newest topup_*.log in", ROOT)
+#@title 5. Train (resumable: after any stop run cells 1-5 again and it continues)
+# Keep the PC on and plugged in (it is kept awake while this runs). The installed model is not touched here.
+if MODE_NOW == "install":
+    print("MODE install: nothing to train")
+else:
+    rc = stream(TRAIN)
+    print("\\nexit code", rc, "| log:", ROOT / "local_run" / MODE_NOW / "train.log")
+    if rc != 0:
+        raise SystemExit("training stopped; run this cell again to continue from the last saved chunk")
 ''')
 
 code('''
-#@title 6. Start the assistant (opens in your browser)
+#@title 6. Test (as Colab cell 8) and install the new model only if it is better
+if MODE_NOW == "install":
+    _d8 = ROOT / "train_data" / "drive_model" / "chatsft_checkpoints" / "d8"
+    _origin = (ROOT / "train_data" / "drive_model" / ".drive_id")
+    EVAL = [sys.executable, "-u", str(LOCAL / "eval_pc.py"), "--rpa", str(ROOT), "--new", str(_d8), "--data", str(DATA),
+            "--info", json.dumps({"mode": "install", "drive_origin": _origin.read_text().strip() if _origin.exists() else None})]
+else:
+    _st = ROOT / "local_run" / MODE_NOW / "state.json"
+    _res = json.loads(_st.read_text(encoding="utf-8")).get("result") if _st.exists() else None
+    assert _res, "no finished training run: run cell 5 first"
+    EVAL = [sys.executable, "-u", str(LOCAL / "eval_pc.py"), "--rpa", str(ROOT), "--new", _res, "--data", str(DATA),
+            "--run-state", str(_st)]
+EVAL += ["--per-set", str(0 if CUDA else EVAL_PER_SET), "--minutes", str(EVAL_MINUTES), "--install"]
+rc = stream(EVAL)
+print("\\nexit code", rc, "| history:", ROOT / "nanochat_base" / "topup_history.jsonl")
+''')
+
+code('''
+#@title 7. Start the assistant (opens in your browser)
 import urllib.request, webbrowser
-cat = ROOT / "sft" / "catalog.jsonl"
+cat = ROOT / "sft" / "catalog.jsonl"             # the installed model's catalog (examples.jsonl beside it)
 cat = cat if cat.exists() else ROOT / "data" / "catalog" / "catalog.jsonl"
 APP = subprocess.Popen([sys.executable, str(ROOT / "assistant" / "app.py"), "--model-dir", str(ROOT / "nanochat_base"),
                         "--nanochat", str(ROOT / "nanochat"), "--platform", str(ROOT / "platform"), "--catalog", str(cat),
@@ -305,7 +289,7 @@ for _ in range(150):
     try:
         urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8765/api/status",
                                                       headers={"X-OOA-Assistant": "1"}), timeout=5)
-        print("OOA Assistant is running: http://127.0.0.1:8765  (run cell 7 to stop it)")
+        print("OOA Assistant is running: http://127.0.0.1:8765  (run cell 8 to stop it)")
         webbrowser.open("http://127.0.0.1:8765")
         break
     except Exception:
@@ -314,12 +298,12 @@ for _ in range(150):
 ''')
 
 code('''
-#@title 7. Stop the assistant
+#@title 8. Stop the assistant
 APP.terminate(); print("stopped")
 ''')
 
 code('''
-#@title 8. (Windows, optional) Top-up every night at 01:30 with your feedback
+#@title 9. (Windows, optional) Top-up every night at 01:30 (continues the run, then tests and installs if better)
 NIGHTLY = ROOT / "training" / "local" / "topup_nightly.bat"
 subprocess.run(["schtasks", "/create", "/tn", "OOA nightly top-up", "/tr", f'"{NIGHTLY}"', "/sc", "daily", "/st", "01:30", "/f"])
 subprocess.run(["powershell", "-NoProfile", "-Command",
@@ -330,6 +314,5 @@ print("scheduled: every night at 01:30 (results in", NIGHTLY.parent / "topup_nig
 
 nb = {"cells": cells, "metadata": {"kernelspec": {"display_name": "Python 3", "name": "python3", "language": "python"},
                                    "language_info": {"name": "python"}}, "nbformat": 4, "nbformat_minor": 5}
-out = H.parent / "ooa_local_pc.ipynb"
-out.write_text(json.dumps(nb, indent=1), encoding="utf-8")
-print("wrote", out)
+OUT.write_text(json.dumps(nb, indent=1), encoding="utf-8")
+print("wrote", OUT)

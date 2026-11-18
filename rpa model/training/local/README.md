@@ -1,137 +1,85 @@
-# Train the OOA model on a laptop with an NVIDIA GPU
+# Train the OOA model on a PC (Colab v4 recipe)
 
-Same training as Colab cell 7 (2500 steps on the OOA data mix, including `natural_train.jsonl` and `core_train.jsonl` when present), in one
-command, with no time limit or disconnects. It runs inside WSL (Ubuntu inside Windows) because nanochat compiles the
-model with `torch.compile`, which plain Windows does not support.
+The easiest way is the notebook **`rpa model/ooa_local_pc.ipynb`** (open it in VS Code or Jupyter, run the cells
+from top to bottom). It drives the three scripts in this folder, which reuse the Colab code (one source of truth:
+`training/sft_setup.py`, `render_dataset.py`, `data_filter.py`, `ooa_format.py`):
 
-Needs:
-- Windows 10/11 and an NVIDIA **RTX 20xx / GTX 16xx or newer** GPU with 6 GB+ memory (8 GB+ better). Older cards
-  (GTX 10xx, MX series) cannot run the training code.
-- About 15 GB free disk.
-- Internet for setup **and for the first training run** (it downloads a few hundred MB of general chat data once).
+| Script | What it does |
+|---|---|
+| `data_pc.py` | Downloads from Google Drive (`ooa-nanochat`, shared as "anyone with the link") into `rpa model/train_data/`: the rendered data `sft_render/` (when Drive has one that changed since the last download), else `sft/` (+ `sft_clean/`) and renders it here with the Colab cell 6 / 6d settings (data_filter, then render_dataset with the catalog, `--max-chars 13000 --max-tokens 4068 --answer-format compact --gold-dropout 0.5` and the new files long, business2, targeted, fix, clarify, beginner); the newest trained model (`chatsft_checkpoints/d8`, else the newest `chatsft_checkpoints_before_*`); the pretrained base model for full training. Drive files named `name (1).jsonl` are second uploads: reported and ignored. For a top-up it also renders the assistant's Accept / Edit feedback into `feedback_train.jsonl` in the same format (the full run trains on the Colab data only). |
+| `train_pc.py` | Trains with nanochat's `scripts/chat_sft.py` from the pinned commit, patched by `sft_setup.patch_chat_sft` (the 4096 attention-window fix, the mixture planned for the step budget, rows longer than the window skipped, "Training data actually read" at the end), in saved chunks that resume after any stop. |
+| `eval_pc.py` | Scores the new model and the installed one through the full assistant (`serving/ooa_server.Router`: catalog lock, repair, verify, 2 self-corrections) on sets 1-3 (`eval/plain_requests*.jsonl`) and the beginner set (`eval/beginner_requests.jsonl`), like Colab cell 8, and installs the new model only if it is better. |
+| `topup_nightly.bat` | Windows: the top-up every night at 01:30 (continues the run, then tests and installs). |
+| `setup_wsl.sh` | Optional: a Python environment in WSL / Linux, where `torch.compile` works (faster full training on a GPU). |
 
-Expected time for one run: about 40-75 min on an RTX 3060/4060 class GPU (similar to the Colab T4).
+## Modes (cell 1 `MODE`)
 
-## 1. Check the GPU (Windows Command Prompt)
+- **`full`** (default with an NVIDIA GPU): exactly Colab cell 7. 8000 steps of 32,768 tokens at the 4096 window from
+  the **pretrained base model**, the full mixture planned for that budget (`sft_setup.plan_for_notebook`), 3000
+  SmolTalk rows, learning rate 0.8 of the base one. The device batch follows the GPU memory (2 x 4096 on 14+ GB like
+  the Colab T4, 1 below, 4 on 30+ GB); the tokens per step stay the same. About 2-3 hours on an RTX 3060/4060.
+  Needs an RTX 20xx / GTX 16xx or newer. On plain Windows it runs without `torch.compile` (slower); WSL compiles.
+  nanochat saves only at the end of a run, so by default (`FULL_CHUNKS = 1`) a stop means starting again; with
+  `FULL_CHUNKS = 8` the run is saved every 1000 steps and resumes, with the same learning-rate schedule (each chunk
+  continues the previous chunk's model and optimizer; flat lr over the first half, then the linear warmdown) and the
+  same planned mixture read with a new shuffle per chunk.
+- **`topup`** (default without a GPU): continues the **newest trained model** (Drive's newest; the PC's own when it
+  already grew from that same Drive model in an earlier top-up) on the same rendered data, with the window fix, at
+  the 4096 window (2048 when the PC has less than 10 GB RAM), learning rate 0.3, for `TOPUP_STEPS` (default 300)
+  steps, saved every 50 steps, at low priority with one core left free. A top-up is about 1/25 of the Colab budget,
+  so its mixture is not the full one spread thin (every file at 0.1-0.3 views would teach little):
+  `sft_setup.plan_topup` gives 35% of the tokens to the beginner rows, 20% each to the long and business2 processes,
+  6% clarify, 4% targeted, 3% fix (2% feedback when there is some) and replays every other file with the last 10% in
+  the full mix's proportions so nothing learned is forgotten.
+  Measured on a 4-core test machine (no GPU, no `torch.compile`, as on Windows): **55 s per step at the 4096 window**
+  with all 4 threads and **67 s at low priority with 3 threads (the default)**, so 300 steps take about 5.6 hours
+  there (plus about 3 minutes of loading per 50-step chunk); a slower 4-core PC (the old 2048 runs took 77 s per
+  step on the user's PC) needs up to about 9 hours. `TOPUP_HOURS` in cell 1 measures this
+  PC first (about 5 minutes) and sizes the round to that many hours.
+- **`install`**: no training; tests Drive's newest model against the installed one and installs it if it is better
+  (the quickest way to get a new Colab model onto the PC).
+
+The old modes `long`, `refine`, `curriculum` and `big` (and their scripts `train_long.py`, `refine_local.py`,
+`curriculum_local.py`, `big_local.py`, `train_local.py`, `topup_local.py`) are gone: they trained the old plain-prompt
+format with plain-JSON answers and a 2048 window without the window fix, so their result would undo the v4 model.
+
+## Run order
+
+1. Settings (`DRIVE_FOLDER_ID`, `MODE`). 2. Check this PC (installs PyTorch and the packages). 3. Download (and
+render when Drive has no `sft_render`, 30-60 minutes). 4. Check (shows the plan and the data mixture).
+5. Train (resumable: after a stop run cells 1-5 again). 6. Test and install. 7. Start the assistant.
+
+## Testing and installing (cell 6)
+
+The installed model is scored with what the assistant gives it now (`rpa model/sft/catalog.jsonl` and, when present,
+`examples.jsonl` beside it: context + plan prompts; without it plain prompts), the new one with its own `sft_render`
+catalog and examples. On a CPU a request takes from seconds to a few minutes (measured on 4 cores: 2-72 s, set 3's
+whole business processes the slowest), so a sample is used: `EVAL_PER_SET` (default 10) requests per set, the same
+ones for both models, spread over each set and taken in turn from each set, at most `EVAL_MINUTES` (default 60) per
+model; the comparison uses the requests both finished (scores of the installed
+model are cached in `local_run/eval_cache.json`). With a GPU all 139 requests are used.
+Better = more requests right, ties broken by more verified flows. Installing moves the old model (and its catalog /
+examples) to `nanochat_base/old_model_<date>`, puts the new `model_<N>.pt` + `meta_<N>.json` in
+`nanochat_base/chatsft_checkpoints/d8` and its `catalog.jsonl` + `examples.jsonl` in `rpa model/sft/`, where
+`assistant/app.py` and `start_assistant.bat` read them. Restart the assistant to use it. History:
+`nanochat_base/topup_history.jsonl`.
+
+## Folders
 
 ```
-nvidia-smi
+rpa model/train_data/sft_render/      training data (from Drive or rendered here; feedback_train.jsonl added here)
+rpa model/train_data/drive_model/     Drive's newest trained model + tokenizer (where a top-up starts)
+rpa model/train_data/base/            the pretrained base model (full training)
+rpa model/local_run/<mode>/           a training run: state.json, train.log, the last two chunks
+rpa model/nanochat_base/              the installed model the assistant uses (+ old_model_<date> backups)
+rpa model/sft/catalog.jsonl, examples.jsonl   the installed model's context (the model pack)
 ```
-It must show the card name and memory. If the command is not found, or the driver version is below 570, install the
-latest driver from <https://www.nvidia.com/Download/index.aspx> and restart.
 
-## 2. Install WSL (once, PowerShell as Administrator)
-
-```
-wsl --install
-```
-Restart Windows, open **Ubuntu** from the Start menu, choose a username and password.
-
-## 3. Copy the files (Windows)
-
-Unzip the **new** `ooa_assistant.zip` into `C:\ooa`. Check that these exist (an older zip does not have them):
-`C:\ooa\rpa model\training\local\train_local.py` and `C:\ooa\rpa model\nanochat\scripts\chat_sft.py`.
-
-From Google Drive `ooa-nanochat`, download into `C:\ooa_train` with exactly this layout:
+## Without the notebook (command line)
 
 ```
-C:\ooa_train\nanochat_base\tokenizer\tokenizer.pkl
-C:\ooa_train\nanochat_base\tokenizer\token_bytes.pt
-C:\ooa_train\nanochat_base\base_checkpoints\d8\model_<N>.pt        the HIGHEST step number in that Drive folder
-C:\ooa_train\nanochat_base\base_checkpoints\d8\meta_<N>.json       same number
-C:\ooa_train\nanochat_base\base_checkpoints\d8\optim_<N>_rank0.pt  same number
-C:\ooa_train\sft\train_flows.jsonl, synth_train.jsonl, ...        the files of the Drive "sft" folder
+python training/local/data_pc.py  --rpa "<rpa model>" --drive-id <ID> --mode topup
+python training/local/train_pc.py --rpa "<rpa model>" --mode topup --data "<rpa model>/train_data/sft_render" [--steps 300]
+python training/local/eval_pc.py  --rpa "<rpa model>" --run-state "<rpa model>/local_run/topup/state.json" --install
 ```
-Download the first five as single files (not whole folders). For `sft`, download the folder (Drive makes a zip) and
-extract it so the files sit directly in `C:\ooa_train\sft\` (not in `C:\ooa_train\sft\sft\`).
-`base_checkpoints` is the pretrained model every run starts from (not `chatsft_checkpoints`).
-
-## 4. Set up Python with GPU support (Ubuntu window, once)
-
-```
-tr -d '\r' < "/mnt/c/ooa/rpa model/training/local/setup_wsl.sh" | bash
-```
-It ends with `GPU and compiler test: OK`. On a brand-new Ubuntu it may first wait a few minutes for Ubuntu's own updates.
-
-## 5. Check, then train (Ubuntu window)
-
-```
-~/ooa-train-venv/bin/python "/mnt/c/ooa/rpa model/training/local/train_local.py" --work /mnt/c/ooa_train --check
-```
-Fix anything marked `!`, then start the real run:
-```
-~/ooa-train-venv/bin/python "/mnt/c/ooa/rpa model/training/local/train_local.py" --work /mnt/c/ooa_train
-```
-- GPU with less than 10 GB: add `--device-batch 2` (same result, a bit slower).
-- Check an early line: `natural-wording file in the mix: True` (when `sft\natural_train.jsonl` exists).
-- The run saves the model only at the end. Anything that stops it means starting again from the beginning, so:
-  keep the Ubuntu window open; keep the laptop on power; set Sleep to Never (Settings > System > Power) and
-  "When I close the lid" to Do nothing (Control Panel > Power Options); pause Windows Update for the day.
-- If it stops with `Killed`, WSL ran out of memory (it gets half the laptop's RAM). Add `--smoltalk 0`, or give WSL
-  more memory: create `C:\Users\<you>\.wslconfig` with the two lines `[wsl2]` and `memory=12GB`, run `wsl --shutdown`
-  in Command Prompt, and open Ubuntu again.
-- The log is saved in `C:\ooa_train`. If anything fails, send its last 30 lines.
-
-## 6. Use the new model
-
-The run ends by printing the new files, normally
-`C:\ooa_train\nanochat_base\chatsft_checkpoints\d8\model_002500.pt` and `meta_002500.json`.
-On the PC, in the assistant's `rpa model\nanochat_base\chatsft_checkpoints\d8\`, first move the old `model_*.pt` and
-`meta_*.json` out (keep them as a backup), then copy the two new files in. The assistant loads the highest step number
-in that folder, so an old file left there could be loaded instead. Restart `start_assistant.bat`, then score it:
-```
-python basic_test.py
-```
-A previous model in `C:\ooa_train\nanochat_base\chatsft_checkpoints` is never deleted: each run renames it to
-`chatsft_checkpoints_before_<date>` first.
-
----
-
-# Overnight top-up on a normal PC (no graphics card needed)
-
-A full training run needs a GPU (Colab, Kaggle or an RTX laptop). A normal PC can still keep the model improving:
-`topup_local.py` starts from the model the assistant uses now, trains a short round (200 steps, about 2 hours on
-a 4-core CPU, faster with more cores) on your **Accept / Edit feedback** plus a sample of the existing training
-data, then scores the old and the new model on the same 20 everyday requests. **The new model is installed only if
-it scores better**; the old one is always kept in `nanochat_base\old_model_<date>`. History of every round:
-`nanochat_base\topup_history.jsonl`.
-
-## One-time setup (directly on Windows)
-
-1. The assistant is installed and works (`setup_windows.bat`), e.g. in `F:\model slm 100 k parameter\rpa model v2\rpa model`.
-2. Copy the training data: download the Drive folder `ooa-nanochat\sft` and put its files in `rpa model\sft\`
-   (at least `natural_train.jsonl` and `core_train.jsonl`; `synth_train.jsonl`, `synth_pattern.jsonl`,
-   `train_flows.jsonl`, `train_catalog.jsonl` help it not forget).
-3. In Command Prompt, in the folder `rpa model\training\local`:
-   ```
-   topup_nightly.bat check
-   ```
-   It installs three small extra packages and must end with **READY**.
-
-## Run it
-
-- Once, now: double-click `topup_nightly.bat` (output goes to `topup_nightly.log` next to it).
-- Every night at 01:30: `topup_nightly.bat install` once in Command Prompt (`topup_nightly.bat remove` stops it).
-  The PC must be on and not asleep at that time.
-- After a round that installed a new model, restart the assistant to use it.
-
-(On Windows the model runs without `torch.compile`, which needs a C++ compiler Windows does not have; on a CPU that is
-only a little slower: measured about 35-40 s per step on 4 cores, so a 200-step round takes about 2-2.5 hours. WSL also works: `setup_wsl.sh --cpu`, then run
-`topup_local.py` with `~/ooa-train-venv/bin/python`.)
-
-## How it learns from you
-
-Use the assistant during the day and click **Accept** (the flow was right), **Edit** (fix it and save: the most
-valuable signal) or **Reject**. Every round trains on all Accept/Edit answers that pass the platform's rules
-(5x weight), so the requests you actually use get better first. Rejected requests are not trained on.
-
----
-
-# Long run on a PC without a GPU (Colab-size training, day and night)
-
-`train_long.py` does the full Colab training (2500 steps from the pretrained base model) on a CPU, split into 10
-chunks of 250 steps that are each saved. A restart, update or sleep loses at most the chunk in progress: run it again
-and it continues. It runs at low priority with one CPU core left free and 2 rows in memory at a time (about 4-5 GB
-RAM; `--device-batch 1` about 3 GB), so the PC stays usable. About 1-1.5 days on 4 cores, less with more cores.
-At the end the result is scored against the assistant's model and installed only if it is better.
-Easiest: the notebook `ooa_local_pc.ipynb` with `MODE = "long"` in cell 1 (it downloads the base model).
+`train_pc.py --measure 3` trains 3 steps and prints the seconds per step without keeping anything.

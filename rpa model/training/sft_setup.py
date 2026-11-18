@@ -224,6 +224,59 @@ def plan_for_notebook(sft_dir, steps, tokens_per_step, smoltalk_rows=0, smoltalk
     return views, stats, b, mixture_table(stats, views, b)
 
 
+
+# ------------------------------------------------------------------ the local PC notebook (training/local/train_pc.py)
+# The neutral-record files of Drive sft/ that Colab cell 6d renders into sft_render (cell 1 NEW_FILES; the local
+# notebook renders the same files when Drive has no sft_render). test_train_pc.py checks they match cell 1.
+RENDER_EXTRA = ("long_train.jsonl", "business2_train.jsonl", "targeted_train.jsonl", "fix_train.jsonl",
+                "clarify_train.jsonl", "beginner_train.jsonl")
+# A top-up continues the newest SFT model for a few hundred steps on a CPU (about 1/25 of the Colab budget). Spread
+# like the full mix, every file would get about 0.1-0.3 views and the round would teach little; so a top-up spends
+# most of its tokens where the model is weakest and the data is newest: beginner wording (restate, then plan; ask
+# when a detail only the user knows is missing) and the long business processes, then the clarify / targeted / fix
+# files. TOPUP_REPLAY of the tokens replay all the other files in the full mix's proportions, so nothing learned is
+# forgotten. Shares of files that are missing go to the others in proportion.
+TOPUP_SHARES = {"beginner_train.jsonl": 0.35, "long_train.jsonl": 0.20, "business2_train.jsonl": 0.20,
+                "clarify_train.jsonl": 0.06, "targeted_train.jsonl": 0.04, "fix_train.jsonl": 0.03,
+                "feedback_train.jsonl": 0.02}
+TOPUP_REPLAY = 0.10
+
+
+def plan_topup(stats, budget_tokens, shares=None, replay=TOPUP_REPLAY):
+    """Views per row for a top-up round: the files in shares get that share of budget_tokens, every other file shares
+    replay in proportion to WANT x its tokens (the full mix's proportions). Then plan_mixture applies the usual caps
+    (long files, MAX_VIEWS) and scales to the budget; no catalog floor (a top-up is too short for it)."""
+    shares = dict(TOPUP_SHARES if shares is None else shares)
+    focus = {n: s for n, s in shares.items() if n in stats}
+    others = [n for n in stats if n not in focus]
+    total = sum(focus.values()) + (replay if others else 0.0)
+    if total <= 0:
+        return plan_mixture(stats, budget_tokens, catalog_min=0.0)
+    want = {}
+    for n, s in focus.items():
+        want[n] = s / total * budget_tokens / max(1.0, stats[n][0] * stats[n][1])
+    if others:
+        weight = {n: float(WANT.get(n, DEFAULT_WANT)) * stats[n][0] * stats[n][1] for n in others}
+        wsum = sum(weight.values()) or 1.0
+        for n in others:
+            share = replay / total * weight[n] / wsum
+            want[n] = share * budget_tokens / max(1.0, stats[n][0] * stats[n][1])
+    return plan_mixture(stats, budget_tokens, want, catalog_min=0.0)
+
+
+def plan_for_local(sft_dir, mode, steps, tokens_per_step, smoltalk_rows=0, smoltalk_tokens=500):
+    """(views, stats, budget, table lines) for the local notebook: "full" plans exactly like Colab cell 7
+    (plan_for_notebook); "topup" plans a top-up round (plan_topup)."""
+    if mode == "full":
+        return plan_for_notebook(sft_dir, steps, tokens_per_step, smoltalk_rows, smoltalk_tokens)
+    stats = file_stats(sft_dir)
+    b = budget(steps, tokens_per_step)
+    if smoltalk_rows:
+        b -= int(smoltalk_rows * smoltalk_tokens)
+    views = plan_topup(stats, b)
+    return views, stats, b, mixture_table(stats, views, b)
+
+
 if __name__ == "__main__":
     import sys
     d, steps, tps = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
