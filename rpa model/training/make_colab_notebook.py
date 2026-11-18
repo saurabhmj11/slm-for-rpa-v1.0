@@ -561,7 +561,7 @@ if ASSISTANT_EVAL:
         print("beginner set (full assistant) | " + _B.summary_text(_B.summarize(_brows, _bres2)))
     if MODE_EVAL and NEW_FORMAT:
         # the modes Studio's Mode menu offers (the agent team: planner, parallel builders in one batch, fixer, critic)
-        print("\n=== Modes: right / verified / mean seconds per request ===")
+        print("\\n=== Modes: right / verified / mean seconds per request ===")
         _mrows = [(_f, _label, [json.loads(l) for l in open(f"/content/ooa/{_f}")]) for _f, _label in _sets
                   if os.path.exists(f"/content/ooa/{_f}")]
         if os.path.exists(_BEG):
