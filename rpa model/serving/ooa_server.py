@@ -1,6 +1,7 @@
 """OOA assistant server: one OpenAI-compatible endpoint, a router, a verifier, and client data-policy switches.
 
    request -> [mask PII for cloud] -> router
+        ask-first gate: points only at something the user knows ("rename them properly")? -> a question back
         simple?  -> LOCAL model (our own): context (actions, similar examples, variables) -> plan + flow
                     -> question? return it -> repair -> verify + plan coverage -> ok? return
                     -> self-correction (previous flow + problems) -> long plan: build it in parts and merge
@@ -80,6 +81,9 @@ class Policy:
     sample_temperature: float = 0.25     # temperature of the extra samples (best_of > 1)
     stop_after: float = 0.0              # seconds after which no new attempt starts (0: only the caller's deadline)
     time_limit: float = 0.0              # seconds after which a generation still running is stopped (0: none)
+    ask_first: bool = True               # ask-first gate: a request that points at something only the user knows
+                                         # ("rename them properly", "the usual folder") gets a question before any
+                                         # model runs (ooa_format.ask_first); off in fast mode
 
     @classmethod
     def load(cls, path=None):
@@ -105,10 +109,11 @@ class Policy:
 #          starting attempts after 120 s and cuts a generation still running at 150 s (Studio waits 180 s)
 MODES = {
     "fast": dict(local_retries=0, use_parts=False, parts_first=False, fixer_rounds=0, understander=False, critic=False,
-                 best_of=1, part_best_of=1, stop_after=0.0, time_limit=60.0),
+                 best_of=1, part_best_of=1, stop_after=0.0, time_limit=60.0, ask_first=False),
     "smart": dict(local_retries=2, use_parts=True, parts_first=True, parallel_parts=True, fixer_rounds=2,
-                  understander=False, critic=False, best_of=1, part_best_of=1, stop_after=100.0, time_limit=140.0),
-    "ultra": dict(local_retries=3, use_parts=True, parts_first=True, parallel_parts=True, fixer_rounds=3,
+                  understander=False, critic=False, best_of=1, part_best_of=1, stop_after=100.0, time_limit=140.0,
+                  ask_first=True),
+    "ultra": dict(local_retries=3, use_parts=True, parts_first=True, parallel_parts=True, fixer_rounds=3, ask_first=True,
                   understander=True, critic=True, best_of=4, part_best_of=2, sample_temperature=0.25,
                   decompose_lines=4, long_plan_lines=3, part_lines=4, stop_after=120.0, time_limit=150.0),
 }
@@ -215,10 +220,14 @@ LOOPED = "The answer started repeating itself and was stopped."
 STUDIO_NOTE = "Written by the OOA assistant and checked against the platform's rules."
 UNDERSTOOD = "I understood: "     # + the model's restatement of a beginner's request ("Clear request: ..."), in notes
 ASKED = "the model asked a question instead of guessing: the request does not say enough to automate"
+ASKED_FIRST = ("the assistant asked a question before building: the request points at something only you know "
+               "(which files, folder, app or person)")
 
 
 class Router:
-    """Layers, in order: retrieval context (actions, similar examples, the open agent's variables) -> plan-first answer
+    """Layers, in order: ask-first gate (a request that only points at something the user knows gets a question,
+    ooa_format.ask_first; Policy.ask_first, off in fast mode) -> retrieval context (actions, similar examples, the
+    open agent's variables; app-aware, ooa_format.context_actions) -> plan-first answer
     -> clarify (a question comes back as the answer) -> repair + verify + plan coverage -> self-correction (the next
     attempt sees its previous flow and the problems) -> decomposition (a long plan is built in parts and merged) ->
     escalation (a bigger model through the Anthropic API or any OpenAI-compatible endpoint, when the policy allows)
@@ -922,6 +931,15 @@ class Router:
             # running generation is never cut later than HARD_GRACE seconds after it (Studio waits 180 s)
             hard = min(hard, asked_by + HARD_GRACE)
         late = lambda: deadline is not None and tried and time.time() >= deadline
+        if p.ask_first:
+            # ask-first gate: no model guesses the folder / files / app / person a request only points at
+            t = time.time()
+            gate = F.ask_first(request, has_variables=bool(existing))
+            if gate:
+                tried.append({"source": "ask_first", "ok": True, "kind": "question", "missing": gate["missing"]})
+                self._agent("ask-first gate", t, asked=True)
+                return self.done(request, None, "local", tried, [], t0, assistant, existing, reason=ASKED_FIRST,
+                                 question=gate["question"])
         can_escalate = self.cloud is not None and p.allow_escalation
         simple = p.local_first or (clauses(request) <= p.max_clauses_local and len(request) <= 500)
         if not can_escalate:

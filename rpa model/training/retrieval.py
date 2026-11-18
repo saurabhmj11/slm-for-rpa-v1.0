@@ -25,6 +25,11 @@ def tokens(text):
     return out
 
 
+def toolkit_of(e):
+    """An entry's toolkit id ("ooa.slack"): its toolkit_id, else the part of its id before the slash."""
+    return e.get("toolkit_id") or str(e.get("id", "")).split("/")[0]
+
+
 def _doc_tokens(e):
     t = tokens(e["id"]) * 2 + tokens(e["name"]) * 2 + tokens(e["toolkit"]) + tokens(e["description"])
     t += tokens(" ".join(i["name"] for i in e["inputs"]))
@@ -50,13 +55,16 @@ class ActionIndex:
                 self.inv.setdefault(w, []).append(i)
         self.by_id = {e["id"]: e for e in self.entries}
 
-    def search(self, query, k=10):
+    def search(self, query, k=10, only=None):
+        """The k best entries for query; only: a set of toolkit ids (entries of other toolkits are skipped)."""
         q = Counter(tokens(query))
         scores = {}
         for w in q:
             if w not in self.inv:
                 continue
             for i in self.inv[w]:
+                if only is not None and toolkit_of(self.entries[i]) not in only:
+                    continue
                 f = self.docs[i][w]
                 s = self.idf[w] * f * (self.k1 + 1) / (f + self.k1 * (1 - self.b + self.b * self.len[i] / self.avg))
                 scores[i] = scores.get(i, 0.0) + s

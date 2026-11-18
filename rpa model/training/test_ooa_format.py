@@ -239,8 +239,10 @@ def test_context_actions_gold_and_core():
     serve, _ = F.context_actions("read invoices from csv", (), CAT, INDEX, 12)
     assert [e["id"] for e in serve][-2:] == ["core/loop", "core/if"] and len(serve) <= 14
     shown = [{"request": "r", "outline": "o", "actions": ["ooa.email/send", "ooa.csv/read", "nope/x"]}]
-    serve, _ = F.context_actions("read invoices from csv", (), CAT, INDEX, 12, examples=shown)
+    serve, _ = F.context_actions("read invoices from csv", (), CAT, INDEX, 12, examples=shown, app_aware=False)
     assert serve[0]["id"] == "ooa.email/send" and len({e["id"] for e in serve}) == len(serve)     # examples' actions
+    serve, _ = F.context_actions("read invoices from csv", (), CAT, INDEX, 12, examples=shown)
+    assert [e["id"] for e in serve][:2] == ["ooa.csv/read", "ooa.email/send"]       # a verb hint, then the examples'
     train, _ = F.context_actions("read invoices", ["ooa.pdf/merge"], CAT, INDEX, 12, random.Random(1), shown)
     assert {"ooa.email/send", "ooa.csv/read", "ooa.pdf/merge"} <= {e["id"] for e in train} and len(train) == 16
 
@@ -269,9 +271,13 @@ def test_context_actions_per_clause():
     assert ex.vote("move each file to the archive folder", 2, exclude_sig=F.flow_signature(flows[0][1])) != \
         ["ooa.file/list", "ooa.file/move"]
     whole = [e["id"] for e in INDEX.search(LONG_REQUEST, 12)]
-    acts, req = F.context_actions(LONG_REQUEST, (), CAT, INDEX, 12, example_index=ex)
+    acts, req = F.context_actions(LONG_REQUEST, (), CAT, INDEX, 12, example_index=ex, app_aware=False)
     ids = [e["id"] for e in acts]
     assert ids[:len(whole)] == list(dict.fromkeys(whole))[:len(whole)] or ids[:3] == whole[:3], ids
+    acts, req = F.context_actions(LONG_REQUEST, (), CAT, INDEX, 12, example_index=ex)
+    ids = [e["id"] for e in acts]
+    hints = [a for a in F.verb_hints(LONG_REQUEST) if a in CAT]
+    assert hints and ids[:len(hints)] == hints, (hints, ids)     # app-aware: the verb hints first
     assert {"ooa.file/move", "ooa.email/send", "ooa.pdf/extract_text"} <= set(ids), ids
     assert ids[-2:] == ["core/loop", "core/if"] and len(ids) <= F.MAX_CONTEXT_ACTIONS and len(set(ids)) == len(ids)
     few, _ = F.context_actions(LONG_REQUEST, (), CAT, INDEX, 12, example_index=ex, max_actions=16)
@@ -281,9 +287,17 @@ def test_context_actions_per_clause():
     assert [e["id"] for e in one] == [e["id"] for e in old]
     # training: gold always in, the same per-clause candidates fill it up, the row itself never votes
     train, required = F.context_actions(LONG_REQUEST, ["ooa.file/list", "ooa.file/move"], CAT, INDEX, 12,
-                                        random.Random(2), example_index=ex, exclude_request=LONG_REQUEST)
+                                        random.Random(2), example_index=ex, exclude_request=LONG_REQUEST,
+                                        app_aware=False)
     tids = {e["id"] for e in train}
     assert {"ooa.file/list", "ooa.file/move", "core/loop", "core/if"} <= tids and len(train) > 16
+    assert set(required) == {"ooa.file/list", "ooa.file/move", "core/loop", "core/if"}
+    # app-aware (the default): fewer, because the other apps' mail actions (Exchange, Outlook, Microsoft 365) are out
+    train, required = F.context_actions(LONG_REQUEST, ["ooa.file/list", "ooa.file/move"], CAT, INDEX, 12,
+                                        random.Random(2), example_index=ex, exclude_request=LONG_REQUEST)
+    tids = {e["id"] for e in train}
+    assert {"ooa.file/list", "ooa.file/move", "core/loop", "core/if"} <= tids and len(train) >= 14
+    assert not any(a.split("/")[0] in F.APP_NAMES for a in tids), tids
     assert set(required) == {"ooa.file/list", "ooa.file/move", "core/loop", "core/if"}
     # the context budget: a 4096-token model gets the larger one and keeps the per-clause candidates
     assert F.context_for(4096) == F.MAX_CONTEXT_CHARS_LONG and F.context_for(2048) == F.context_for(None) == F.MAX_CONTEXT_CHARS
@@ -626,6 +640,92 @@ def test_render_rewrite_record():
     assert row["messages"][0]["content"].startswith("pls tidy my pngs into a zip\n" + F.CONTEXT_HEADER)
     flow_row = F.render_chat({**rec, "kind": "flow"}, CAT, INDEX, None, _r.Random(1))
     assert flow_row["messages"][1]["content"].startswith(F.PLAN_HEAD)
+
+def test_named_apps():
+    assert F.named_apps("nudge the team in the #sales slack channel") == ["ooa.slack"]
+    assert F.named_apps("Download the report from SFTP and load it into the database") == ["ooa.file_transfer",
+                                                                                           "ooa.database"]
+    assert set(F.named_apps("book it in Outlook")) == {"ooa.microsoft365", "ooa.outlook_desktop"}
+    assert F.named_apps("message the sales head on Teams") == ["ooa.microsoft365"]
+    assert F.named_apps("put prices.xlsx up on our google drive") == ["ooa.google"]
+    assert F.named_apps("stop the EC2 instances tagged dev") == ["ooa.aws_ec2"]
+    # local things are no app: a folder on the E drive, a text box, the inbox, an email, the team
+    for r in ["keep a spare copy of my Projects folder on the E drive", "type it into the search box",
+              "save the attachments of the unread mails in the inbox", "Make a new folder called Reports",
+              "Delete all the files in the temp folder", "the sales team", "print invoice.pdf"]:
+        assert F.named_apps(r) == [], (r, F.named_apps(r))
+
+
+def test_app_aware_context():
+    """A named app's best actions are offered and kept by trimming; apps the request does not name are left out
+    (or only fill a short list); without app_aware the context is as before."""
+    req = "nudge the team in the #sales slack channel that timesheets are due on friday"
+    acts, keep = F.context_actions(req, (), CAT, INDEX, 12)
+    ids = [e["id"] for e in acts]
+    slack = [a for a in ids if a.startswith("ooa.slack/")]
+    assert "ooa.slack/post_message" in ids and set(slack[:F.APP_TOP]) <= set(keep), (ids, keep)
+    assert ids[:len(slack)] == slack                                       # the named app first
+    for req in ["Make a new folder called Reports", "Delete all the files in the temp folder",
+                "List the files in a folder", "keep a spare copy of my whole Projects folder on the E drive"]:
+        ids = [e["id"] for e in F.context_actions(req, (), CAT, INDEX, 12)[0]]
+        other = [a for a in ids if a.split("/")[0] in F.APP_NAMES]
+        assert len(other) <= F.DEMOTED_FILL and all(ids.index(a) >= len(ids) - len(other) - 2 for a in other), ids
+    ids = [e["id"] for e in F.context_actions("Make a new folder called Reports", (), CAT, INDEX, 12)[0]]
+    assert ids[0] == "ooa.folder/create", ids
+    old = [e["id"] for e in F.context_actions("Make a new folder called Reports", (), CAT, INDEX, 12,
+                                              app_aware=False)[0]]
+    assert any(a.split("/")[0] in F.APP_NAMES for a in old[:12])          # what it fixes: cloud folders came first
+    # training rows: the gold is in whatever app it uses, the named app's best actions are kept too
+    train, req = F.context_actions("post the total in the #finance slack channel", ["ooa.csv/read"], CAT, INDEX, 12,
+                                   random.Random(4))
+    assert "ooa.csv/read" in req and any(a.startswith("ooa.slack/") for a in req)
+    assert {e["id"] for e in train} >= set(req)
+
+
+def test_verb_hints():
+    h = F.verb_hints
+    assert set(h("print invoice.pdf for me")) >= {"ooa.printer/print_file", "ooa.file/print_files"}
+    assert "ooa.excel_desktop/export_pdf" in h("convrt the reprot.xlsx to pdf and mail it to boss@company.com")
+    assert "ooa.email/send" in h("convrt the reprot.xlsx to pdf and mail it to boss@company.com")
+    assert h("word doc minutes.docx -> pdf")[:2] == ["ooa.word/open", "ooa.word/save_as"]
+    assert "ooa.word/save_as" not in h("pdf to text pls, file is notes.pdf")          # a PDF in, not out
+    assert set(h("summary of minutes.pdf pls")) >= {"ooa.genai/summarize", "ooa.pdf/extract_text"}
+    assert set(h("letter.txt but in hindi")) >= {"ooa.genai/translate", "ooa.file/read_text"}
+    assert "ooa.folder/create" in h("new folder on the desktop called Clients 2026")
+    assert "ooa.folder/create" not in h("For each new invoice PDF in the inbox folder, read the total")
+    assert "ooa.file/delete" in h("get rid of the junk in C:\\Temp")
+    assert "ooa.file/delete" not in h("remove duplicates from customers.csv")
+    assert "ooa.datatable/remove_duplicates" in h("remove dupliactes from custmers.csv")
+    assert "ooa.file/unzip" in h("open up backup.zip onto the desktop")
+    assert "ooa.datatable/row_count" in h("how many rows does data.csv have")
+    assert "ooa.file/move" not in h("move the emails to Processed")
+    assert h("Read a CSV file into a table") == ["ooa.csv/read"] and h("") == []
+
+
+def test_ask_first_gate():
+    """Requests that only point at something the user knows get a question naming it; requests that name what
+    they need (even generally: 'a CSV file', 'a folder', 'the website ... as a CSV file') never do."""
+    for req, word in [("rename them properly", "files"), ("put todays entries into the tracker", "file"),
+                      ("copy the important ones over to the other folder", "folder"),
+                      ("send the sales data to the app", "app"), ("check the website for me and tell me", "website"),
+                      ("move the invoices into the usual folder", "folder"),
+                      ("Kindly change the format of that document", "file"),
+                      ("remind people about the deadline", "who")]:
+        a = F.ask_first(req)
+        assert a and word in a["question"].lower(), (req, a)
+    for req in ["Read a CSV file into a table, then write the table to an Excel sheet",
+                "Open the website and save its product table as a CSV file", "Merge some PDF files into one",
+                "Copy a file to another folder, then delete the original", "print invoice.pdf for me",
+                "For each file in a list, move it to the archive folder", "save all the attachments for me",
+                "okay so whenever there's stuff in the Incoming folder i want it moved over to Processed",
+                "List all repositories of our GitHub organization, save them as a CSV file and upload that file",
+                "make it smaller", ""]:
+        assert F.ask_first(req) is None or req == "make it smaller", (req, F.ask_first(req))
+    assert F.ask_first("rename them properly", has_variables=True) is None          # the agent's variables say
+    assert F.ask_first("copy it into the usual folder", has_variables=True)         # ... but never which folder
+    two = F.ask_question(["folder", "recipient"])
+    assert "Which folder" in two and "who should get it" in two
+
 
 if __name__ == "__main__":
     fails = 0

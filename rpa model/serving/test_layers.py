@@ -516,6 +516,26 @@ def test_compact_parts_are_expanded_and_merged():
     assert {v["name"]: v["direction"] for v in flow["variables"]}["inbox"] == "input"
 
 
+def test_ask_first():
+    """The ask-first gate answers a request that only points at something the user knows with a question, before
+    any model runs; Studio gets it in the notes; fast mode and Policy(ask_first=False) skip it; a request that
+    names its things goes to the model as before."""
+    m = Scripted(lambda req, p, a: plan_answer(CSV_TO_EXCEL))
+    r = router(m)
+    res = r.run("rename them properly")
+    assert not res["verified"] and "Which files" in res["question"] and m.prompts == [], res
+    assert res["reason"] == S.ASKED_FIRST and res["attempts"][0]["source"] == "ask_first"
+    code, out = S.chat_completion(r, studio_body("put todays entries into the tracker"))
+    ans = json.loads(out["choices"][0]["message"]["content"])
+    assert ans["steps"] == [] and "file" in ans["notes"] and out["ooa"]["question"] and m.prompts == []
+    assert r.run("rename them properly", mode="smart")["question"] and m.prompts == []
+    res = r.run("rename them properly", mode="fast")                    # fast: no gate, the model builds
+    assert res["verified"] and res["mode"] == "fast" and len(m.prompts) == 1
+    assert router(m, ask_first=False).run("rename them properly")["verified"]
+    assert r.run(CSV_REQ)["verified"]                                   # names its file: built
+    assert S.MODES["fast"]["ask_first"] is False and S.MODES["smart"]["ask_first"] and S.MODES["ultra"]["ask_first"]
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

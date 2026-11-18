@@ -1299,9 +1299,162 @@ def _clause_ids(request, cat, index, example_index, clause_k, clause_votes, excl
     return [a for a in dict.fromkeys(ids) if a in cat]
 
 
+# ---------------------------------------------------------------------------------------------- app-aware retrieval
+# Toolkits of named apps and services: their actions are offered when the request names the app (APP_NAMES) and are
+# demoted to the end of the list (the context budget trims them first) when it does not. Without such a name the
+# local / core toolkits (file, folder, pdf, excel, word, csv, datatable, email, browser, ocr, printer ...) come first:
+# "make a new folder" is a folder on disk, not a Box folder; "delete the files in temp" is ooa.file, not SFTP.
+_I = re.I
+APP_NAMES = {
+    "ooa.slack": [r"\bslack\b"],
+    "ooa.jira": [r"\bjira\b"],
+    "ooa.file_transfer": [r"\bs?ftps?\b", r"\bfile transfer\b"],
+    "ooa.aws_ec2": [r"\bec2\b", r"\baws\b(?! (?:textract|comprehend|rekognition|ai\b))"],
+    "ooa.aws_ai": [r"\btextract\b", r"\bcomprehend\b", r"\brekognition\b", r"\baws ai\b"],
+    "ooa.azure_devops": [r"\bazure devops\b", r"\bado\b(?= (?:board|work item|pipeline|test))", r"\bwork items?\b"],
+    "ooa.azure_vm": [r"\bazure (?:vms?|virtual machines?)\b"],
+    "ooa.azure_ai": [r"\bazure (?:ai|cognitive|form recognizer|document intelligence|openai)\b"],
+    "ooa.servicenow": [r"\bservice ?now\b", r"\bsnow (?:incident|ticket|table)"],
+    "ooa.zendesk": [r"\bzendesk\b"],
+    "ooa.salesforce": [r"\bsalesforce\b", r"\bsfdc\b"],
+    "ooa.docusign": [r"\bdocu ?sign\b"],
+    "ooa.google": [r"\bgoogle (?:sheets?|drive|docs?|calendar|workspace|mail)\b", r"\bg ?mail\b", r"\bgsheets?\b", r"\bgdrive\b"],
+    "ooa.google_ai": [r"\bgoogle (?:cloud )?(?:ai|vision|document ai|natural language|translate api)\b", r"\bvertex\b"],
+    "ooa.microsoft365": [r"\bmicrosoft 365\b", r"\b(?:office|o|m) ?365\b", r"\bone ?drive\b", r"\bshare ?point\b",
+                         r"\boutlook\b", r"\b(?:ms |microsoft )?teams (?:channel|chat|message|meeting)s?\b",
+                         r"\b(?:on|in|via|to|through|over) (?:ms |microsoft )?teams\b", r"\bmicrosoft teams\b",
+                         r"\bexchange online\b", r"\bmicrosoft graph\b"],
+    "ooa.outlook_desktop": [r"\boutlook\b"],
+    "ooa.exchange": [r"\bexchange (?:server|on-?prem\w*|mailbox|ews)\b", r"\bews\b"],
+    "ooa.box": [r"\bbox\.com\b", r"(?<!text )(?<!check )(?<!search )(?<!input )(?<!message )(?<!dialog )(?<!list )"
+                r"(?<!combo )(?<!tick )(?<!drop )(?<!in)\bbox (?:folder|drive|account|storage)\b",
+                r"\b(?:on|in|to|from|into) (?:our |my |the )?box\b(?! (?:of|with)\b)"],
+    "ooa.snowflake": [r"\bsnowflake\b"],
+    "ooa.databricks": [r"\bdatabricks\b"],
+    "ooa.kafka": [r"\bkafka\b"],
+    "ooa.github": [r"\bgit ?hub\b"],
+    "ooa.okta": [r"\bokta\b"],
+    "ooa.workday": [r"\bworkday\b"],
+    "ooa.asana": [r"\basana\b"],
+    "ooa.active_directory": [r"\bactive directory\b", r"(?-i:\bAD\b)", r"\bldap\b", r"\bad (?:user|group|account)s?\b",
+                             r"\bdomain (?:user|account|group)s?\b"],
+    "ooa.database": [r"\bdata ?base\b", r"\bsql\b", r"\bdb\b", r"\bmysql\b", r"\bpostgre(?:s|sql)\b", r"\boracle\b",
+                     r"\bsql server\b", r"\bsqlite\b"],
+    "ooa.sap": [r"\bsap\b"],
+    "ooa.sap_bapi": [r"\bbapi\b", r"\bsap\b"],
+}
+_APP_RX = {t: [re.compile(p, _I) for p in ps] for t, ps in APP_NAMES.items()}
+APP_TOP = 3            # best actions of each named app, by the request's words (always kept by trimming)
+MAX_APP_IDS = 8        # at most this many such kept actions in all
+_CONNECT = ("connect", "authenticate", "login", "sign_in")
+DEMOTED_FILL = 3       # at most this many actions of apps the request does not name, only to fill a short list
+
+
+def named_apps(request):
+    """Toolkit ids of the apps / services the request names (APP_NAMES), in toolkit order:
+    'post it in the #sales slack channel' -> ['ooa.slack']; 'move the files to the E drive' -> []."""
+    text = str(request or "")
+    return [t for t, rxs in _APP_RX.items() if any(r.search(text) for r in rxs)]
+
+
+def _has(rx, text):
+    return re.search(rx, text, _I) is not None
+
+
+_PDF_TARGET = r"(?:\b(?:to|into|as|in|ko|me|mein)\s+(?:a\s+|an\s+)?pdf\b|->\s*pdf\b|\bpdf\s+(?:format|version|copy|file)\b|\blike a pdf\b)"
+_EXCEL = r"\.xlsx?\b|\bexcel\b|\bworkbook\b|\bspreadsheet\b"
+_WORD = r"\.docx?\b|\bword (?:doc|file|document)|\bdocument\b"
+_READ = (r"\b(?:total|sum|add up|filter|read|go through|goes through|each|every|har|list is in|details|padh\w*|khol\w*|"
+         r"count|how many|kitne|look|check|find|in it|from it|with every\w*|has each)\b")
+VERB_HINTS = [
+    # (pattern, action ids, pattern that must NOT match too or None) ; first matching rules first
+    (r"\bprint(?:s|ed|ing)?\b(?! ?screen)|\bprintout\b", ["ooa.printer/print_file", "ooa.file/print_files"], None),
+    (r"\bsummar(?:y|ies|i[sz]e[sd]?|i[sz]ing)\b|\bsum it up\b|\bgist\b|\btl;? ?dr\b", ["ooa.genai/summarize"], None),
+    (r"\btranslat\w*|\b(?:in|into|to) (?:hindi|english|french|german|spanish|tamil|telugu|marathi|bengali|gujarati|"
+     r"kannada|arabic|chinese|japanese)\b", ["ooa.genai/translate"], None),
+    (r"\bforward\w*\b|\bgoes on to\b|\bpass (?:it|them) on\b", ["ooa.email/forward"], None),
+    (r"[\w.+-]+@[\w-]+\.[\w.]+|\b(?:e-?mail|mail)\s+(?:it|them|this|that|everyone|every\w*|each|me|him|her)\b|"
+     r"\bon mail\b|\bmail (?:karna|kar do|bhej)", ["ooa.email/send"], None),
+    (r"\bunread\b|\binbox\b(?! folder)|\bmailbox\b|\bmails?\b.{0,40}\bsubject\b", ["ooa.email/list"], None),
+    (r"\bnew (?:sub)?folder\b|\b(?:make|create|add)(?: \w+){0,2} (?:new )?(?:sub)?folder\b", ["ooa.folder/create"], None),
+    (r"\b(?:delete|remove|get rid of|clear out|clean out|empty|purge|wipe|hata\w*)\b(?! (?:the )?dupli)",
+     ["ooa.file/delete"], r"\bdupli|\btwice\b|do baar"),
+    (r"\b(?:delete|remove|get rid of)\s+(?:that|the|this|my)?\s*folder\b", ["ooa.folder/delete"], None),
+    (r"\bunzip\w*|\bun-zip|\.zip\b.{0,30}\b(?:open|extract|khol)|\b(?:open|extract|khol)\w*\b.{0,30}\.zip\b",
+     ["ooa.file/unzip"], None),
+    (r"\bzip (?:up|it|the|them|a|my)\b|\bcompress\w*|\bmake it smaller\b", ["ooa.file/zip"], None),
+    (r"dupli\w*|\bdupe\w*|\btwice\b|\bdo baar\b", ["ooa.datatable/remove_duplicates"], None),
+    (r"\bhow many rows\b|\bcount (?:the |its )?rows\b|\brow count\b|\bnumber of rows\b|\bkitne\b|\bginti\b",
+     ["ooa.datatable/row_count"], None),
+    (r"\bscreen ?shot\b|\bphoto (?:of|khinch)\w*|\bkhinch\w*\b|\bsnapshot of\b", ["ooa.browser/screenshot"], None),
+    (r"https?://\S+\.(?:pdf|csv|xlsx?|zip|docx?|txt|json|xml)\b", ["ooa.browser/download_url"], None),
+    (r"\bre(?:name|nmae)\w*|\brenam\w*", ["ooa.file/move"], None),
+    (r"\b(?:move[sd]?|moving|shift\w*)\b", ["ooa.file/move"], r"\b(?:move|shift)\w* (?:the |all |each |every )?(?:e-?mails?|mails?|messages?)\b"),
+    (r"\bpdfs?\b.{0,60}\b(?:read|text|total|amount|number|extract|mentions?|padh\w*|nikal\w*)\b|"
+     r"\b(?:read|text|extract|padh\w*)\b.{0,30}\bpdfs?\b", ["ooa.pdf/extract_text"], r"\bpdf\s+(?:tables?|forms?)\b"),
+    (r"\b(?:each|every|all|har|jitni|sab\w*)\b[^.;]{0,40}\b(?:files?|pdfs?|documents?|images?|photos?|scans?|"
+     r"stuff|everything)\b[^.;]{0,40}\bfold(?:e)?r\b|\b(?:list|everything) (?:of |in )?(?:my |the )?\w+ folder\b",
+     ["ooa.file/list"], None),
+    (r"\b(?:writ\w*|save\w*|log\w*|likh\w*|put)\b.{0,40}\b(?:text file|txt)\b", ["ooa.file/write_text"], None),
+]
+_VERB_RX = [(re.compile(p, _I), ids, re.compile(n, _I) if n else None) for p, ids, n in VERB_HINTS]
+
+
+def verb_hints(request):
+    """Actions the request's everyday verbs point at, where word search goes wrong (VERB_HINTS): 'print invoice.pdf'
+    -> the printer actions; 'turn report.xlsx into a pdf' -> Excel's Export to PDF; 'summary of minutes.pdf' ->
+    pdf text + summarize; 'letter.txt but in hindi' -> read the text + translate. Ids may be missing from a catalog."""
+    text = str(request or "")
+    out = []
+    if _has(_PDF_TARGET, text) and not _has(r"\bpdf\s+(?:to|into|se)\s+(?:text|excel|word|csv)", text):
+        if _has(_EXCEL, text):
+            out += ["ooa.excel_desktop/export_pdf"]
+        if _has(_WORD, text):
+            out += ["ooa.word/open", "ooa.word/save_as"]
+    for rx, ids, neg in _VERB_RX:
+        if rx.search(text) and not (neg and neg.search(text)):
+            out += ids
+    if any(a in out for a in ("ooa.genai/summarize", "ooa.genai/translate")):
+        if _has(r"\.pdf\b|\bpdf\b", text):
+            out.append("ooa.pdf/extract_text")
+        if _has(r"\.txt\b|\btext file\b", text):
+            out.append("ooa.file/read_text")
+        if _has(r"\.docx?\b|\bword\b", text):
+            out.append("ooa.word/extract_text")
+    if _has(_EXCEL, text) and _has(_READ, text) and "ooa.excel_desktop/export_pdf" not in out:
+        out += ["ooa.excel/open", "ooa.excel/get_all_cells"]
+    if _has(r"\.csv\b", text) or _has(r"\bcsv\b", text) and _has(_READ, text):
+        out.append("ooa.csv/read")
+    return list(dict.fromkeys(out))
+
+
+def app_actions(request, cat, index, named=None):
+    """(kept, extra) for the apps the request names: kept = the APP_TOP best actions of each named app for the
+    request's words (at most MAX_APP_IDS; trimming keeps them), extra = each such app's connect / sign-in action."""
+    named = named_apps(request) if named is None else named
+    kept, extra = [], []
+    if index is None or not named:
+        return kept, extra
+    for t in named:
+        try:
+            hits = index.search(request, APP_TOP, only={t})
+        except TypeError:            # an older index without toolkit filtering
+            hits = [e for e in index.search(request, 200) if str(e.get("id", "")).startswith(t + "/")][:APP_TOP]
+        kept += [e["id"] for e in hits if e["id"] in cat]
+        extra += [f"{t}/{c}" for c in _CONNECT if f"{t}/{c}" in cat][:1]
+    kept = list(dict.fromkeys(kept))[:MAX_APP_IDS]
+    return kept, [a for a in dict.fromkeys(extra) if a not in kept]
+
+
+def demoted(action_id, named):
+    """True for an action of an app toolkit (APP_NAMES) the request does not name."""
+    t = str(action_id).split("/")[0]
+    return t in APP_NAMES and t not in named
+
+
 def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng=None, examples=(), example_index=None,
                     clause_k=CLAUSE_K, clause_votes=CLAUSE_VOTES, exclude_request=None, exclude_sig=None,
-                    max_actions=MAX_CONTEXT_ACTIONS, withheld=()):
+                    max_actions=MAX_CONTEXT_ACTIONS, withheld=(), app_aware=True):
     """Action entries for the context and the ids trimming must keep. Training and serving both call this, so the
     model is trained on the context it gets.
     examples: the similar examples shown (dicts with "actions"); up to EXAMPLE_ACTIONS of their actions are added.
@@ -1313,13 +1466,21 @@ def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng
     always in (they are required), plus CORE_ALWAYS and the examples' actions, filled up with the serving candidates to
     the same size, shuffled with rng so the position of an action says nothing. exclude_request / exclude_sig keep the
     row itself out of the votes (training). withheld: ids never listed (training's gold dropout, see drop_gold): the
-    row then looks like a serving request whose retrieval missed them."""
+    row then looks like a serving request whose retrieval missed them.
+    app_aware (default on, at training and at serving): the actions of the apps the request names (named_apps) and
+    the actions its everyday verbs point at (verb_hints) come first, the named apps' best ones are kept by trimming,
+    and the actions of apps it does not name go last (demoted); False: the context as before."""
     cat = _as_dict(catalog) or (index.by_id if index is not None else {})
     gone = set(withheld or ())
     if gone:
         cat = {a: e for a, e in cat.items() if a not in gone}
     gold = [a for a in dict.fromkeys(gold) if a in cat]
-    found = [e["id"] for e in index.search(request, k + len(gone)) if e["id"] in cat][:k] if index is not None else []
+    named = named_apps(request) if app_aware else []
+    low = (lambda a: demoted(a, named)) if app_aware else (lambda a: False)
+    # app-aware: twice as many hits, those of apps the request does not name after the others (then cut to k)
+    found = ([e["id"] for e in index.search(request, (2 * k if app_aware else k) + len(gone)) if e["id"] in cat]
+             if index is not None else [])
+    found = ([a for a in found if not low(a)] + [a for a in found if low(a)])[:k]
     core = [c for c in CORE_ALWAYS if c in cat]
     shown = []
     for x in examples or []:
@@ -1327,23 +1488,38 @@ def context_actions(request, gold=(), catalog=None, index=None, k=DEFAULT_K, rng
             if a in cat and a not in shown and a not in gold and a not in core and len(shown) < EXAMPLE_ACTIONS:
                 shown.append(a)
     more = _clause_ids(request, cat, index, example_index, clause_k, clause_votes, exclude_request, exclude_sig)
+    # app-aware: the named apps' best actions first (kept by trimming), then the verb hints; apps the request does
+    # not name go to the end, so the context budget drops them first
+    app_kept, app_extra = app_actions(request, cat, index, named) if app_aware else ([], [])
+    hints = [a for a in verb_hints(request) if a in cat] if app_aware else []
+    front = [a for a in dict.fromkeys(app_kept + app_extra + hints) if a not in core]
+    late = [a for a in shown if low(a)]
+    shown = [a for a in shown if not low(a)]
+
+    def demote(seq):
+        """Unnamed apps' actions after the others; only as many of them as fill the list up to k."""
+        seq = list(dict.fromkeys(seq))
+        good = [a for a in seq if not low(a)]
+        return good + [a for a in seq if low(a)][:max(0, min(DEMOTED_FILL, k - len(good)))]
+
     if gold:
         ids = list(dict.fromkeys(gold + core + shown))
-        pool = [a for a in dict.fromkeys(found[:FOUND_FIRST] + more + found) if a not in ids]
-        extra = len([a for a in dict.fromkeys(more) if a not in found and a not in shown and a not in core])
+        pool = [a for a in demote(front + found[:FOUND_FIRST] + more + found + late) if a not in ids]
+        extra = len([a for a in dict.fromkeys(more + front) if a not in found and a not in shown and a not in core])
         cap = max(min(k + 2 + len(shown) + extra, max_actions), len(ids))
         for a in pool:
             if len(ids) >= cap:
                 break
             ids.append(a)
     else:
-        ids = list(dict.fromkeys(shown + found + core))
+        ids = demote(front + shown + found + late)
+        ids = [a for a in ids if a not in core] + core
         if more:
-            ids = [a for a in dict.fromkeys(shown + found[:FOUND_FIRST] + more + found) if a not in core]
+            ids = [a for a in demote(front + shown + found[:FOUND_FIRST] + more + found + late) if a not in core]
             ids = ids[:max(0, max_actions - len(core))] + core
     if rng is not None:
         rng.shuffle(ids)
-    required = list(dict.fromkeys(gold + core))
+    required = list(dict.fromkeys(gold + core + [a for a in app_kept if a in ids]))
     return [cat[a] for a in ids], required
 
 
@@ -1790,3 +1966,126 @@ def request_features(request):
     return {"clauses": len(request_clauses(text)), "words": len(text.split()),
             "loop": bool(_LOOP_WORDS.search(text)), "condition": bool(_COND_WORDS.search(text)),
             "has_thing": bool(_THING_WORDS.search(text))}
+
+
+# ---------------------------------------------------------------------------------------------- ask-first gate
+# A request that points at something only the user knows ("the usual folder", "rename them properly", "put it in the
+# tracker") is answered with one short question before anything is built (serving/ooa_server.Router, ask-first layer).
+# Two kinds of vague words:
+#   sure    always ask, whatever else is named: "the usual folder", "the right person", "the same file as last time",
+#           "our system", "the important ones" (the beginner clarify data's own phrases, gen_beginner.SLOTS)
+#   loose   ask only when nothing concrete is named: a pronoun with nothing it can stand for ("mail them when its
+#           ready"), "the tracker", "the system", "the app", "the website", "the report", "that document", "stuff"
+# Concrete: a file name (.csv, .xlsx ...), a path, a web address, an email address, a named app (named_apps), a named
+# folder ("the Reports folder", "my photos folder"), or a kind of thing given generally ("a CSV file", "all PDFs",
+# "every email in the inbox", "an Excel workbook"): the model then builds with inputs for the details.
+ASK_SLOTS = {
+    "folder": ("Which folder do you mean?", "Please tell me its name or path (for example C:\\Invoices)."),
+    "file": ("Which file do you mean?", "Please tell me its name and which folder it is in."),
+    "files": ("Which files do you mean?", "Please tell me the folder they are in, or their names."),
+    "recipient": ("Who should get it?", "Please give me their name or email address."),
+    "app": ("Which app or system do you mean?", "Please tell me its name (for example Outlook, Jira or Salesforce)."),
+    "website": ("Which website do you mean?", "Please give me its address (for example https://example.com)."),
+    "condition": ("How do I tell which ones you mean?", "Tell me the rule, for example amount above 10,000."),
+    "sheet": ("Which sheet or file do you mean?", "Please tell me the file's name and where it is saved."),
+    "report": ("Which report do you mean?", "Please tell me the file's name and where it is saved."),
+    "data": ("Where does the data come from?", "Please tell me the file, sheet or app it is in."),
+    "list": ("Which list do you mean?", "Please tell me the file or sheet it is in."),
+    "place": ("Where should it go?", "Please tell me the folder's name or path."),
+    "what": ("What exactly should the bot do, and with which files or app?", "Please name the file, folder or app."),
+}
+_ASK_SURE = [
+    (r"\b(?:the|our|my) usual (?:folder|place|location|directory)\b|\bthe folder we always use\b|\bour normal folder\b|"
+     r"\bthe right folder\b|\bthe other folder\b|\bthe right place\b|\bsomewhere\b", "folder"),
+    (r"\bthe usual (?:file|sheet|workbook|excel|document)\b|\bthe (?:file|sheet|workbook) (?:we|i) al?ways use\b|"
+     r"\bthe same file as last time\b", "file"),
+    (r"\bthe usual (?:people|guys|person|team|recipients?)\b|\b(?:to )?(?:the )?right person\b|"
+     r"\bthe people who need it\b|\busual guys\b", "recipient"),
+    (r"\b(?:our|the) (?:usual )?(?:system|tool|app)\b(?!'s| (?:tray|settings|clock|date|time|log|folder|servers?|project|data|store))|"
+     r"\bthe app we use\b|\bthe usual tool\b|\bour usual app\b", "app"),
+    (r"\bthe (?:important|small|big|right|relevant|good|bad) ones\b|\bthat (?:are big|matter|look right|are the "
+     r"important ones)\b", "condition"),
+    (r"\b(?:files?|stuff|things?) i (?:do ?n[o']?t|dont) need\b|\bmy old stuff\b", "files"),
+    (r"\bthe usual (?:report|summary|numbers|data|list|one)\b", "report"),
+    (r"\bthe excel thing\b|\bthe (?:sheet|spreadsheet) thing\b", "sheet"),
+]
+_ASK_LOOSE = [
+    (r"\bthe (?:website|site|portal|web ?page)\b", "website"),
+    (r"\bthat (?:document|file|sheet|workbook|doc)\b|\bthe (?:sheet|files|documents)\b", "file"),
+    (r"\bstuff\b|\bthings\b", "files"),
+    (r"\bthe (?:report|summary)\b", "report"),
+    (r"\bthe list\b", "list"),
+    (r"\bthe (?:sales |)(?:data|numbers|figures|entries)\b|\btodays? entries\b|\buska data\b", "data"),
+    (r"\b(?:e-?mail|mail|send|share|forward)\w* (?:it|them|this|that)\b(?! to\b)", "recipient"),
+    (r"\bthe (?:system|app|application|tool)\b(?!'s| (?:servers?|info|log|tray|settings|project|data|store))", "app"),
+    (r"\bthe tracker\b", "sheet"),
+    (r"\bpeople\b|\beveryone\b", "recipient"),
+    (r"^(?:\S+\s+){0,2}(?:them|those|these|it|they|usko|unko|uska|unka|isko)\b|^jo bhi\b", "files"),
+]
+_ASK_SURE_RX = [(re.compile(p, re.I), s) for p, s in _ASK_SURE]
+_ASK_LOOSE_RX = [(re.compile(p, re.I), s) for p, s in _ASK_LOOSE]
+_EXT = r"(?:csv|xlsx|xlsm|xls|docx|doc|pdf|txt|json|xml|zip|png|jpe?g|pptx?|msg|eml|html?|log|tiff?|bmp|gif|rtf|odt)"
+_CONCRETE = re.compile(
+    r"[\w-]\.(?:" + _EXT + r")\b|\b(?:dot|\.) ?(?:" + _EXT + r")\b|"           # a file name (also "orders dot csv")
+    r"\b[A-Za-z]:\\|\\\\\w|(?:^|\s)~?/\w+/|"                                     # a path
+    r"https?://|\bwww\.|\b[\w-]+\.(?:com|in|org|net|io|local|gov)\b|"            # a web address / host
+    r"[\w.+-]+@[\w-]+\.\w|"                                                      # an email address
+    r"#[a-z][\w-]+|\bcell [A-Z]+\d+\b|\b[A-Z]{1,2}\d{1,5}\b|"                   # a channel, a cell
+    r"\b(?:a|an|any|all|each|every|some|new|two|several|multiple|the following|har|saari|sab|jitni)\s+(?:of the\s+)?"
+    r"(?:\w+\s+){0,2}?(?:csv|pdf|excel|xlsx|word|docx|text|json|xml|zip|image|photo|png|jpe?g|scan|invoice|"
+    r"e-?mail|mail|message|attachment|files?|folders?|workbooks?|documents?|spreadsheets?|sheets?|web ?(?:site|page)s?|"
+    r"websites?|urls?|links?|tables?|rows?|records?|tickets?|issues?|orders?|customers?|vendors?|pdfs|csvs)s?\b|"
+    r"\b(?:inbox|mailbox|outlook|gmail|desktop|downloads|documents folder|clipboard|printer|"
+    r"excel (?:file|workbook|sheet)|csv file|pdf files?|word (?:file|document|doc))\b",
+    re.I)
+_TYPE_WORDS = re.compile(
+    r"\b(?:pdfs?|csvs?|excel|xlsx|workbooks?|spreadsheets?|word (?:files?|documents?|docs?)|docx|jpe?g|png|images?|"
+    r"photos?|scans?|scanned|zip|e-?mails|mails|inbox|mailbox|attachments?|browser|text files?|json|xml|"
+    r"(?:[\w'-]+ )(?:files?|workbook|statement|csv|pdf|document|log|table|invoices?))\b", re.I)
+_NOT_A_TYPE = re.compile(r"\b(?:that|the usual|the same|the right|the other|this|those|these) (?:files?|document|"
+                         r"workbook|table|log)\b", re.I)
+_NAMED_FOLDER = re.compile(r"\b(?:the |my |our |in |from |to |into )?([\w&'-]+) (?:sub)?fold(?:e)?r\b", re.I)
+_NAMED_PLACE = re.compile(r"\b(?:to|into|in|from|under|inside) (?:the )?[A-Z][\w&'-]+")   # "copy it into Vendor Docs"
+_VAGUE_FOLDER_WORDS = {"the", "a", "an", "that", "this", "other", "right", "usual", "same", "some", "any", "new",
+                       "another", "correct", "proper", "normal", "which", "my", "our", "your", "one", "each", "every",
+                       "certain", "given", "specific", "target", "destination", "source", "relevant"}
+
+
+def concrete_things(request):
+    """What the request names concretely: file names, paths, addresses, apps, named folders, kinds of things given
+    generally ('a CSV file', 'every email in the inbox'). Empty: it names nothing the bot can act on."""
+    text = str(request or "")
+    out = [m.group(0).strip() for m in _CONCRETE.finditer(text)]
+    out += [m.group(0) for m in _TYPE_WORDS.finditer(_NOT_A_TYPE.sub(" ", text))]
+    out += named_apps(text)
+    out += [m.group(0) for m in _NAMED_FOLDER.finditer(text) if m.group(1).lower() not in _VAGUE_FOLDER_WORDS]
+    out += [m.group(0) for m in _NAMED_PLACE.finditer(text)]
+    return out
+
+
+def ask_first(request, has_variables=False):
+    """The ask-first gate: None when the request can be built, else {"missing": [slots], "question": text} for a
+    request that points at something only the user knows (sure vague words always; loose ones only when nothing
+    concrete is named, see concrete_things). has_variables: the open agent already has variables the request may
+    refer to (Studio): then only the sure words ask."""
+    text = " ".join(str(request or "").split())
+    if not text:
+        return None
+    missing = [s for rx, s in _ASK_SURE_RX if rx.search(text)]
+    if not missing and not has_variables and not concrete_things(text):
+        missing = [s for rx, s in _ASK_LOOSE_RX if rx.search(text)]
+    missing = list(dict.fromkeys(missing))
+    if not missing:
+        return None
+    return {"missing": missing, "question": ask_question(missing)}
+
+
+def ask_question(missing):
+    """One short, friendly question about the missing details (at most two of them), in the wording style of the
+    beginner clarify data: 'Which folder do you mean? Please tell me its name or path (for example C:\\Invoices).'"""
+    slots = [s for s in missing if s in ASK_SLOTS][:2] or ["what"]
+    if len(slots) == 1:
+        q, hint = ASK_SLOTS[slots[0]]
+        return f"Happy to help. {q} {hint}"
+    (q1, h1), (q2, _) = ASK_SLOTS[slots[0]], ASK_SLOTS[slots[1]]
+    return f"Happy to help, I just need two details. {q1} {h1} And {q2[0].lower() + q2[1:]}"
