@@ -300,8 +300,9 @@ SFT_DIR = f"{DRIVE_DIR}/sft_clean" if CLEAN_DATA and os.path.exists(f"{DRIVE_DIR
 if RENDER and os.path.exists(f"{DRIVE_DIR}/sft_render/render_report.json"):
     SFT_DIR = f"{DRIVE_DIR}/sft_render"
 print("training data:", SFT_DIR)
-# always start from the pinned nanochat scripts, so an earlier patch can never hide the current data mix
-!cd /content/nanochat && git checkout -q -- scripts/chat_sft.py scripts/chat_cli.py
+# always start from the pinned nanochat scripts, so an earlier patch can never hide the current data mix: write them
+# straight from the pinned commit (independent of the working tree, the index or an earlier edit of this cell)
+!cd /content/nanochat && git fetch -q origin 2>/dev/null; git cat-file -e {NANOCHAT_COMMIT} && git show {NANOCHAT_COMMIT}:scripts/chat_sft.py > scripts/chat_sft.py && git show {NANOCHAT_COMMIT}:scripts/chat_cli.py > scripts/chat_cli.py && echo "chat_sft.py and chat_cli.py written from the pinned nanochat {NANOCHAT_COMMIT}"
 !cp /content/ooa/ooa_task.py /content/nanochat/tasks/ooa.py
 # The data mix is planned for the real budget (SFT_STEPS optimizer steps x tokens per step), not "epochs x repeats":
 # every file gets a number of views per row; long / business rows at most 3, catalog questions at least 3.
@@ -317,7 +318,19 @@ print("\\n".join(_lines))
 #  - the mix above; conversations longer than the window are skipped, never cut; at the end it prints how many rows
 #    of each file were actually read ("Training data actually read").
 p = "/content/nanochat/scripts/chat_sft.py"
-open(p, "w").write(_T.patch_chat_sft(open(p).read(), SFT_DIR, VIEWS, smoltalk_rows=SMOLTALK_ROWS))
+_s = open(p).read().replace("\\r\\n", "\\n")
+_need = {"window": _T.WINDOW_ANCHOR, "meta": _T.META_ANCHOR, "tasks start": _T.TASKS_START, "tasks end": _T.TASKS_END,
+         "import": _T.IMPORT_ANCHOR, "loader": _T.LOADER_OLD, "step": _T.STEP_ANCHOR, "end": _T.END_ANCHOR}
+_miss = [k for k, a in _need.items() if a not in _s]
+if _miss:      # say exactly what differs, so it can be fixed from this output
+    print("chat_sft.py does not match the pinned nanochat; missing:", _miss, "| sha1 of the file:",
+          __import__("hashlib").sha1(_s.encode()).hexdigest()[:12])
+    for _i, _l in enumerate(_s.splitlines()):
+        if any(w in _l for w in ("torch.compile", "orig_model =", "user_config\\": ", "train_tasks =", "render_conversation(")):
+            print(f"  line {_i + 1}: {_l!r}")
+    !cd /content/nanochat && git log -1 --oneline && git status --short | head
+    raise SystemExit("cell 7 stopped before training: send the lines above")
+open(p, "w").write(_T.patch_chat_sft(_s, SFT_DIR, VIEWS, smoltalk_rows=SMOLTALK_ROWS))
 print("patched chat_sft.py")
 # keep the previous model: nanochat loads the highest step in chatsft_checkpoints, so move it aside (never deleted)
 _ck = os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatsft_checkpoints")
