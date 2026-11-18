@@ -30,6 +30,7 @@ is trimmed to MAX_CONTEXT_CHARS in a fixed order (see build_user) and a previous
 is shown as its outline. Pure standard library + retrieval.py.
 """
 import hashlib
+import heapq
 import json
 import math
 import re
@@ -1419,23 +1420,41 @@ class ExampleIndex:
             terms = list(dict.fromkeys(terms + sorted(q, key=lambda w: self.df[w])[:2]))
         scores = {}
         for w in terms:
-            idf, post = self.idf[w], self.inv[w]
-            for i, f in post[:5000]:
-                s = idf * f * (self.k1 + 1) / (f + self.k1 * (1 - self.b + self.b * self.len[i] / self.avg))
+            for i, s in self._weights(w):
                 scores[i] = scores.get(i, 0.0) + s
         ex_req = " ".join(str(exclude_request).split()).lower() if exclude_request else None
-        out, outlines = [], set()
-        for i in sorted(scores, key=lambda i: (-scores[i], i)):
-            r = self.rows[i]
-            if (ex_req and r["request"].lower() == ex_req) or (exclude_sig and r["sig"] == exclude_sig):
-                continue
-            if r["outline"] in outlines:
-                continue
-            outlines.add(r["outline"])
-            out.append({"request": r["request"], "outline": r["outline"], "actions": r["actions"]})
-            if len(out) >= n:
-                break
-        return out
+        # best first by (-score, index), the same order as sorting every candidate, but only the top few are ranked:
+        # a small heap first, the full sort only when skipped rows (excluded / same outline) use the top up
+        top = max(4 * n, 32)
+        while True:
+            ranked = (heapq.nsmallest(top, scores, key=lambda i: (-scores[i], i)) if top < len(scores)
+                      else sorted(scores, key=lambda i: (-scores[i], i)))
+            out, outlines = [], set()
+            for i in ranked:
+                r = self.rows[i]
+                if (ex_req and r["request"].lower() == ex_req) or (exclude_sig and r["sig"] == exclude_sig):
+                    continue
+                if r["outline"] in outlines:
+                    continue
+                outlines.add(r["outline"])
+                out.append({"request": r["request"], "outline": r["outline"], "actions": r["actions"]})
+                if len(out) >= n:
+                    return out
+            if top >= len(scores):
+                return out
+            top *= 4
+
+    def _weights(self, w):
+        """BM25 weight of term w in each of its first 5000 postings, computed once per term (same value and order as
+        computing it on every search)."""
+        cache = self.__dict__.setdefault("_wcache", {})
+        got = cache.get(w)
+        if got is None:
+            idf = self.idf[w]
+            got = [(i, idf * f * (self.k1 + 1) / (f + self.k1 * (1 - self.b + self.b * self.len[i] / self.avg)))
+                   for i, f in self.inv[w][:5000]]
+            cache[w] = got
+        return got
 
 
 # ---------------------------------------------------------------------------------------------- training rows
