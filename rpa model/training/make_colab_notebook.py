@@ -142,9 +142,16 @@ os.environ["NANOCHAT_DTYPE"] = "bfloat16" if cap >= (8, 0) else "float16"
 os.environ["OMP_NUM_THREADS"] = "1"
 print("compute dtype:", os.environ["NANOCHAT_DTYPE"])
 
-if not os.path.exists("/content/nanochat"):
+# nanochat at the pinned commit; a folder left half-downloaded by an earlier failed clone is removed and cloned again
+import shutil
+if not (os.path.exists("/content/nanochat/.git") and os.path.exists("/content/nanochat/scripts/chat_sft.py")):
+    if os.path.exists("/content/nanochat"):
+        print("nanochat folder is incomplete - downloading it again")
+        shutil.rmtree("/content/nanochat", ignore_errors=True)
     !git clone -q https://github.com/karpathy/nanochat /content/nanochat
-!cd /content/nanochat && git checkout -q {NANOCHAT_COMMIT}
+!cd /content/nanochat && (git cat-file -e {NANOCHAT_COMMIT} 2>/dev/null || git fetch -q origin) && git checkout -q -f {NANOCHAT_COMMIT} && git log -1 --oneline
+assert os.path.exists("/content/nanochat/tasks") and os.path.exists("/content/nanochat/scripts/chat_sft.py"), \
+    "nanochat did not download (GitHub not reachable?). Run this cell again; if it repeats, send the output."
 # Keep Colab's own torch; install only nanochat's other dependencies
 !pip -q install rustbpe tiktoken kernels filelock pyarrow psutil requests wandb jsonschema
 %cd /content/nanochat
