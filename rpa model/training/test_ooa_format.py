@@ -699,6 +699,7 @@ def test_verb_hints():
     assert "ooa.file/unzip" in h("open up backup.zip onto the desktop")
     assert "ooa.datatable/row_count" in h("how many rows does data.csv have")
     assert "ooa.file/move" not in h("move the emails to Processed")
+    assert "ooa.pdf/extract_text" not in h("save their PDF attachments into the BGV folder, mark each email read")
     assert h("Read a CSV file into a table") == ["ooa.csv/read"] and h("") == []
 
 

@@ -1390,7 +1390,7 @@ VERB_HINTS = [
     (r"https?://\S+\.(?:pdf|csv|xlsx?|zip|docx?|txt|json|xml)\b", ["ooa.browser/download_url"], None),
     (r"\bre(?:name|nmae)\w*|\brenam\w*", ["ooa.file/move"], None),
     (r"\b(?:move[sd]?|moving|shift\w*)\b", ["ooa.file/move"], r"\b(?:move|shift)\w* (?:the |all |each |every )?(?:e-?mails?|mails?|messages?)\b"),
-    (r"\bpdfs?\b.{0,60}\b(?:read|text|total|amount|number|extract|mentions?|padh\w*|nikal\w*)\b|"
+    (r"\bpdfs?\b(?! attachments?\b).{0,60}\b(?:read|text|total|amount|number|extract|mentions?|padh\w*|nikal\w*)\b|"
      r"\b(?:read|text|extract|padh\w*)\b.{0,30}\bpdfs?\b", ["ooa.pdf/extract_text"], r"\bpdf\s+(?:tables?|forms?)\b"),
     (r"\b(?:each|every|all|har|jitni|sab\w*)\b[^.;]{0,40}\b(?:files?|pdfs?|documents?|images?|photos?|scans?|"
      r"stuff|everything)\b[^.;]{0,40}\bfold(?:e)?r\b|\b(?:list|everything) (?:of |in )?(?:my |the )?\w+ folder\b",
