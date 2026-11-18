@@ -123,10 +123,13 @@ def pinned_chat_sft(nano):
     as it is, which must be the unpatched pinned version (the zip ships it so)."""
     nano = Path(nano)
     if (nano / ".git").exists():
-        r = subprocess.run(["git", "-C", str(nano), "show", f"{NANOCHAT_COMMIT}:scripts/chat_sft.py"],
-                           capture_output=True, text=True, encoding="utf-8")
-        if r.returncode == 0 and r.stdout:
-            return r.stdout.replace("\r\n", "\n")
+        try:                                   # Windows without Git: no git program (FileNotFoundError)
+            r = subprocess.run(["git", "-C", str(nano), "show", f"{NANOCHAT_COMMIT}:scripts/chat_sft.py"],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if r.returncode == 0 and r.stdout:
+                return r.stdout.replace("\r\n", "\n")
+        except OSError:
+            pass
     s = (nano / "scripts" / "chat_sft.py").read_text(encoding="utf-8").replace("\r\n", "\n")
     if "OOADialogues" in s:
         raise SystemExit(f"{nano / 'scripts' / 'chat_sft.py'} was patched by an older tool: restore it from the pinned "
@@ -398,9 +401,12 @@ def main(argv=None):
                         + (" (the pretrained base model from Drive nanochat_base/base_checkpoints/d8)" if full else ""))
     if tok is None:
         problems.append(f"no tokenizer (tokenizer.pkl + token_bytes.pt) in {src_root / 'tokenizer'}")
-    for f in (data / "val.jsonl", data / "catalog.jsonl", nano / "scripts" / "chat_sft.py"):
+    for f in (data / "val.jsonl", data / "catalog.jsonl"):
         if not f.exists():
             problems.append(f"missing {f}")
+    if not (nano / "scripts" / "chat_sft.py").exists() or not (nano / "nanochat" / "gpt.py").exists():
+        problems.append(f"nanochat is missing in {nano}: run notebook cell 2 again (it downloads it; Git is not "
+                        f"needed), or: python \"{HERE / 'setup_pc.py'}\" --rpa \"{rpa}\"")
     if not (data / "examples.jsonl").exists():
         problems.append(f"{data} is not rendered data (no examples.jsonl): run the data cell (data_pc.py) first")
     if full and not gpu and not (a.allow_cpu_full or a.measure):
@@ -493,9 +499,9 @@ def main(argv=None):
         shutil.rmtree(work, ignore_errors=True)
         wb = work / "nanochat_base"
         copy_model(from_dir, from_step, wb / "base_checkpoints" / "d8")
-        shutil.copytree(tok, wb / "tokenizer")
-        if (run_dir / "task_data").exists():
-            shutil.copytree(run_dir / "task_data", wb / "task_data")
+        shutil.copytree(tok, wb / "tokenizer", dirs_exist_ok=True)     # dirs_exist_ok: Windows may leave a
+        if (run_dir / "task_data").exists():                             # locked leftover of the last chunk
+            shutil.copytree(run_dir / "task_data", wb / "task_data", dirs_exist_ok=True)
         write_script(nano, data, views, a.smoltalk, state.get("seed", 1) + k, compile_ok=not a.no_compile)
         env = dict(os.environ, NANOCHAT_BASE_DIR=str(wb), OOA_TRAINING_DIR=str(HERE.parent), PYTHONUTF8="1",
                    PYTHONIOENCODING="utf-8", NANOCHAT_DTYPE=dtype, OMP_NUM_THREADS=str(1 if gpu else threads),
@@ -524,7 +530,7 @@ def main(argv=None):
             shutil.rmtree(run_dir, ignore_errors=True)
             return 0
         if not (run_dir / "task_data").exists() and (wb / "task_data").exists():
-            shutil.copytree(wb / "task_data", run_dir / "task_data")
+            shutil.copytree(wb / "task_data", run_dir / "task_data", dirs_exist_ok=True)
         dst = run_dir / "chunks" / f"chunk_{k:03d}"
         shutil.rmtree(dst, ignore_errors=True)
         copy_model(out_d8, cstep, dst)

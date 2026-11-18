@@ -246,6 +246,26 @@ def window_check(meta, base_seq=None):
     return None, None
 
 
+def _calculator_without_alarm():
+    """Windows has no signal.SIGALRM: nanochat's calculator tool (engine.eval_with_timeout, used when the model writes
+    <|python_start|>) would raise AttributeError there and end the answer. Use it without the time limit (the
+    expressions are tiny and run with no builtins)."""
+    import signal
+    if hasattr(signal, "SIGALRM"):
+        return
+    import warnings
+    import nanochat.engine as E
+
+    def eval_no_alarm(formula, max_time=3):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                return eval(formula, {"__builtins__": {}}, {})
+        except Exception:
+            return None
+    E.eval_with_timeout = eval_no_alarm
+
+
 class NanochatLocal:
     def __init__(self, model_dir, nanochat_dir, source="sft", device=None, guard=True, catalog=None):
         os.environ["NANOCHAT_BASE_DIR"] = str(Path(model_dir).resolve())
@@ -261,6 +281,7 @@ class NanochatLocal:
         import torch
         from nanochat.checkpoint_manager import load_model
         from nanochat.engine import Engine
+        _calculator_without_alarm()
         torch.set_grad_enabled(False)
         self.device = torch.device(dev_type)
         self.model, self.tok, meta = load_model(source, self.device, phase="eval")

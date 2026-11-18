@@ -5,9 +5,9 @@ Why not only `ooa validate`: the Python reference lacks most toolkits (browser, 
 import json,glob,sys
 import jsonschema
 P=sys.argv[1]; C=sys.argv[2]
-schema=json.load(open(P+'/contracts/flow-schema/flow.v1.json'))
+schema=json.load(open(P+'/contracts/flow-schema/flow.v1.json',encoding='utf-8'))
 cat={}
-for l in open(C):
+for l in open(C,encoding='utf-8'):
     e=json.loads(l); cat[e['id']]=e
 def steps(n):
     for s in n:
@@ -22,7 +22,7 @@ def steps(n):
         if isinstance(s.get('finally'),list): yield from steps(s['finally'])
 tot=sok=0; unk=bad_in=0; unk_ids=set(); ex=[]
 for f in sorted(glob.glob(P+'/examples/**/*.flow.json',recursive=True)):
-    d=json.load(open(f)); tot+=1
+    d=json.load(open(f,encoding='utf-8')); tot+=1
     try: jsonschema.validate(d,schema); sok+=1
     except Exception as e: ex.append((f.split('/')[-1],str(e)[:100]))
     for s in steps(d.get('steps',[])):

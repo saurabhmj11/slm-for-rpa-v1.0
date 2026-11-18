@@ -16,6 +16,7 @@ Files Drive shows as "name (1).jsonl" are copies made by a second upload: they a
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -24,8 +25,31 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))
+sys.path[:0] = [str(HERE.parent)] + ([] if str(HERE) in sys.path else [str(HERE)])
 import sft_setup as T                                          # noqa: E402
+from setup_pc import replace, PLATFORM_HELP                   # noqa: E402
+
+UTF8_ENV = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}    # child scripts read / write UTF-8 (Windows: cp1252)
+
+
+def run_step(cmd, log=print):
+    """Run a script with this Python, its output passed on line by line (a notebook on Windows does not show the
+    output of a child process that writes to the console itself). -> exit code."""
+    p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         encoding="utf-8", errors="replace", env=dict(os.environ, PYTHONUNBUFFERED="1", **UTF8_ENV))
+    try:
+        for line in p.stdout:
+            log(line.rstrip("\n"))
+    finally:
+        if p.poll() is None:
+            p.kill()
+    return p.wait()
+
+
+def run_quiet(cmd):
+    """-> CompletedProcess with text output decoded as UTF-8 whatever the Windows code page."""
+    return subprocess.run([str(c) for c in cmd], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          env=dict(os.environ, **UTF8_ENV))
 
 COPY_RE = re.compile(r" \(\d+\)(\.[^./]+)?$")                  # "long_train (1).jsonl": a second upload
 ANSWER_FORMAT = "compact"                                      # Colab cell 1 ANSWER_FORMAT
@@ -126,7 +150,7 @@ class Sync:
                 best, best_n = tmp, n
             else:
                 tmp.unlink()
-        best.replace(dest)
+        replace(best, dest)
         self.downloaded += 1
         self._remember(dest, ids)
         return dest
@@ -249,7 +273,7 @@ class Sync:
         (new / ".drive_report.sha1").write_text(sha, encoding="utf-8")
         if out.exists():
             shutil.rmtree(out)
-        new.rename(out)
+        replace(new, out)
         return "downloaded"
 
     def raw_data(self, refresh=False):
@@ -281,10 +305,13 @@ def render_local(rpa, seq=4096, log=print, platform=None, filter_here=True):
         shutil.rmtree(clean, ignore_errors=True)                 # always from the sft/ that is here now
     if not (clean / "filter_report.json").exists():
         plat = Path(platform) if platform else rpa / "platform"
+        if not (plat / "contracts" / "flow-schema" / "flow.v1.json").exists():
+            raise SystemExit("cleaning the data needs the platform's flow rules: "
+                             + PLATFORM_HELP.format(p=plat, rpa=rpa))
         log("== cleaning the data (training/data_filter.py, as Colab cell 6) ...")
-        r = subprocess.run([sys.executable, str(tr / "data_filter.py"), str(sft), str(clean), str(plat), str(rpa / "eval"),
-                            "--cap", str(FILTER_CAP), "--max-chars", str(row_chars(seq))])
-        if r.returncode != 0:
+        rc = run_step([sys.executable, tr / "data_filter.py", sft, clean, plat, rpa / "eval",
+                       "--cap", FILTER_CAP, "--max-chars", row_chars(seq)], log)
+        if rc != 0:
             raise SystemExit("data_filter.py failed (see above)")
     src = clean if (clean / "filter_report.json").exists() else sft
     extra = [str(sft / f) for f in T.RENDER_EXTRA if (sft / f).exists()]
@@ -292,16 +319,16 @@ def render_local(rpa, seq=4096, log=print, platform=None, filter_here=True):
     shutil.rmtree(tmp, ignore_errors=True)
     log(f"== rendering {src.name} + {len(extra)} new files into the plan-first format (render_dataset.py, as Colab "
         "cell 6d; 30-60 minutes) ...")
-    r = subprocess.run([sys.executable, str(tr / "render_dataset.py"), str(src), str(tmp), "--catalog", str(sft / "catalog.jsonl"),
-                        "--max-chars", str(row_chars(seq)), "--max-tokens", str(row_tokens(seq)),
-                        "--answer-format", ANSWER_FORMAT, "--gold-dropout", str(GOLD_DROPOUT), "--extra", *extra])
-    if r.returncode != 0:
+    rc = run_step([sys.executable, tr / "render_dataset.py", src, tmp, "--catalog", sft / "catalog.jsonl",
+                   "--max-chars", row_chars(seq), "--max-tokens", row_tokens(seq),
+                   "--answer-format", ANSWER_FORMAT, "--gold-dropout", GOLD_DROPOUT, "--extra", *extra], log)
+    if rc != 0:
         raise SystemExit("render_dataset.py failed (see above)")
     if (src / "train_catalog.jsonl").exists():                 # catalog question rows stay as they are
         shutil.copy2(src / "train_catalog.jsonl", tmp / "train_catalog.jsonl")
     (tmp / ".local_render").write_text(time.strftime("%Y-%m-%d %H:%M"), encoding="utf-8")
     shutil.rmtree(out, ignore_errors=True)
-    tmp.rename(out)
+    replace(tmp, out)
     return out
 
 
@@ -317,8 +344,7 @@ def add_feedback(rpa, data, log=print):
     shutil.rmtree(work, ignore_errors=True)
     (work / "empty").mkdir(parents=True)
     schema = rpa / "platform" / "contracts" / "flow-schema" / "flow.v1.json"
-    r = subprocess.run([sys.executable, str(rpa / "training" / "ingest_feedback.py"), str(fb), str(work / "fb"),
-                        str(data / "catalog.jsonl"), str(schema)], capture_output=True, text=True)
+    r = run_quiet([sys.executable, rpa / "training" / "ingest_feedback.py", fb, work / "fb", data / "catalog.jsonl", schema])
     rec = work / "fb" / "feedback_records.jsonl"
     if r.returncode != 0 or not rec.exists() or not rec.read_text(encoding="utf-8").strip():
         log("feedback: nothing usable", (r.stdout.strip() or r.stderr.strip())[-300:])
@@ -327,10 +353,9 @@ def add_feedback(rpa, data, log=print):
         seq = json.loads((data / "render_report.json").read_text(encoding="utf-8"))["settings"]["max_tokens"] + 28
     except (OSError, ValueError, KeyError, TypeError):
         seq = 4096
-    r = subprocess.run([sys.executable, str(rpa / "training" / "render_dataset.py"), str(work / "empty"), str(work / "out"),
-                        "--catalog", str(data / "catalog.jsonl"), "--max-chars", str(row_chars(seq)),
-                        "--max-tokens", str(row_tokens(seq)), "--answer-format", ANSWER_FORMAT,
-                        "--gold-dropout", str(GOLD_DROPOUT), "--extra", str(rec)], capture_output=True, text=True)
+    r = run_quiet([sys.executable, rpa / "training" / "render_dataset.py", work / "empty", work / "out",
+                   "--catalog", data / "catalog.jsonl", "--max-chars", row_chars(seq), "--max-tokens", row_tokens(seq),
+                   "--answer-format", ANSWER_FORMAT, "--gold-dropout", GOLD_DROPOUT, "--extra", rec])
     out = work / "out" / "feedback_records.jsonl"
     if r.returncode != 0 or not out.exists():
         log("feedback: render failed", r.stderr.strip()[-300:])

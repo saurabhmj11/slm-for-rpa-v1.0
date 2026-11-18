@@ -407,7 +407,8 @@ class Assistant:
         src = out / "feedback_snapshot.jsonl"
         src.write_bytes(snap)
         p = subprocess.run([sys.executable, str(INGEST), str(src), str(out), self.catalog, self.schema],
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+                           env=dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8"))
         if p.returncode != 0:
             raise ApiError(500, "ingest_feedback failed: " + (p.stderr.strip().splitlines() or ["unknown error"])[-1])
         m = re.search(r"(\d+) usable, (\d+) dropped.*?, (\d+) rejected", p.stdout)

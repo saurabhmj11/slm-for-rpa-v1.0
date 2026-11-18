@@ -9,6 +9,7 @@ from top to bottom). It drives the three scripts in this folder, which reuse the
 | `data_pc.py` | Downloads from Google Drive (`ooa-nanochat`, shared as "anyone with the link") into `rpa model/train_data/`: the rendered data `sft_render/` (when Drive has one that changed since the last download), else `sft/` (+ `sft_clean/`) and renders it here with the Colab cell 6 / 6d settings (data_filter, then render_dataset with the catalog, `--max-chars 13000 --max-tokens 4068 --answer-format compact --gold-dropout 0.5` and the new files long, business2, targeted, fix, clarify, beginner); the newest trained model (`chatsft_checkpoints/d8`, else the newest `chatsft_checkpoints_before_*`); the pretrained base model for full training. Drive files named `name (1).jsonl` are second uploads: reported and ignored. For a top-up it also renders the assistant's Accept / Edit feedback into `feedback_train.jsonl` in the same format (the full run trains on the Colab data only). |
 | `train_pc.py` | Trains with nanochat's `scripts/chat_sft.py` from the pinned commit, patched by `sft_setup.patch_chat_sft` (the 4096 attention-window fix, the mixture planned for the step budget, rows longer than the window skipped, "Training data actually read" at the end), in saved chunks that resume after any stop. |
 | `eval_pc.py` | Scores the new model and the installed one through the full assistant (`serving/ooa_server.Router`: catalog lock, repair, verify, 2 self-corrections) on sets 1-3 (`eval/plain_requests*.jsonl`) and the beginner set (`eval/beginner_requests.jsonl`), like Colab cell 8, and installs the new model only if it is better. |
+| `setup_pc.py` | Notebook cell 2's first-run setup (standard library only): checks the Python (64-bit, 3.10+), copies `platform/`, `nanochat_base/`, `sft/`, `train_data/` and `assistant/assistant_data/` from an older `rpa model` folder next to this one (the code-only update zip has none of them), and puts nanochat at the pinned commit in `rpa model/nanochat`: from the older folder, else `git clone`, else GitHub's zip of the commit (Git is not needed). |
 | `topup_nightly.bat` | Windows: the top-up every night at 01:30 (continues the run, then tests and installs). |
 | `setup_wsl.sh` | Optional: a Python environment in WSL / Linux, where `torch.compile` works (faster full training on a GPU). |
 
@@ -91,3 +92,14 @@ python training/local/train_pc.py --rpa "<rpa model>" --mode topup --data "<rpa 
 python training/local/eval_pc.py  --rpa "<rpa model>" --run-state "<rpa model>/local_run/topup/state.json" --install
 ```
 `train_pc.py --measure 3` trains 3 steps and prints the seconds per step without keeping anything.
+
+## Windows notes
+
+- The notebook has no `!` / `%` shell lines: every command is a Python list of arguments run with the kernel's own
+  Python (`sys.executable`), and the output of every step is passed into the notebook (on Windows a notebook does not
+  show what a child process writes to the console itself).
+- Everything reads and writes UTF-8 explicitly (`encoding="utf-8"`, `PYTHONUTF8=1` for the scripts it starts):
+  Windows' default code page (cp1252) cannot read the training data.
+- No Git needed; no `torch.compile` on Windows (no compiler); training runs at below-normal priority and in a Windows
+  job, so stopping a cell ends the whole process tree.
+- Keep the folder outside OneDrive and at a short path (e.g. `C:\OOA\rpa model`): cell 2 warns otherwise.

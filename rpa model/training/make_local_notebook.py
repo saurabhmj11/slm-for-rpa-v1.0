@@ -44,8 +44,12 @@ its `catalog.jsonl` and `examples.jsonl` in `rpa model/sft/`, so the assistant g
 was trained on.
 
 Before the first run: unzip `ooa_assistant.zip`, open this notebook from its `rpa model` folder in VS Code (Python +
-Jupyter extensions) or Jupyter, and pick a Python 3.10+ kernel. Internet is needed for cells 2 and 3. The Drive folder
-`ooa-nanochat` must be shared as "anyone with the link"; put its id (from the link) in cell 1.
+Jupyter extensions; also Antigravity) or Jupyter, and pick a 64-bit Python 3.10+ kernel (if the editor asks to
+install `ipykernel`, say yes). Everything is installed into that kernel's Python by cell 2; Git is not needed (nanochat
+is downloaded as a zip when Git is missing). Internet is needed for cells 2 and 3. The Drive folder `ooa-nanochat`
+must be shared as "anyone with the link"; put its id (from the link) in cell 1.
+Updating with the code-only zip: rename the old folder (e.g. `rpa model OLD`) and unzip the new one next to it; cell 2
+copies the platform files, the installed model, the downloads and your feedback from the old folder.
 """)
 
 code(f'''
@@ -73,6 +77,9 @@ def _ok(p):
 
 def _find():
     starts = [Path(RPA_FOLDER)] if RPA_FOLDER else []
+    _nb = globals().get("__vsc_ipynb_file__")        # VS Code / Antigravity: this notebook's own path
+    if _nb:
+        starts += [Path(_nb).parent]
     here = Path.cwd()
     starts += [here, *here.parents]
     home = Path.home()
@@ -80,16 +87,22 @@ def _find():
     seen = set()
     for s0 in starts:
         for p in [s0, s0 / "rpa model"]:
-            if p in seen or not p.exists():
+            try:
+                if p in seen or not p.exists():
+                    continue
+            except OSError:                               # a folder Windows does not let us look into
                 continue
             seen.add(p)
             if _ok(p):
                 return p
     for s0 in starts[len(starts) - 6:]:          # one more level down, e.g. Downloads/ooa_assistant/rpa model
         if s0.exists():
-            for p in list(s0.glob("*/rpa model")) + list(s0.glob("*/*/rpa model")):
-                if _ok(p):
-                    return p
+            try:
+                for p in list(s0.glob("*/rpa model")) + list(s0.glob("*/*/rpa model")):
+                    if _ok(p):
+                        return p
+            except OSError:
+                pass
     print("Looked in:", *[str(p) for p in seen], sep=chr(10) + "  ")
     raise SystemExit("Could not find the 'rpa model' folder of the NEW ooa_assistant.zip (it must contain "
                      "assistant/app.py and training/local/train_pc.py). Unzip the new zip to C:/OOA, "
@@ -97,30 +110,31 @@ def _find():
 
 ROOT = _find()
 LOCAL = ROOT / "training" / "local"
-os.environ.setdefault("PYTHONUTF8", "1")
+os.environ["PYTHONUTF8"] = "1"                 # every script started from here reads and writes UTF-8 (Windows)
+os.environ["PYTHONIOENCODING"] = "utf-8"
 os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
 print("assistant folder:", ROOT)
-print("Python:", sys.executable, sys.version.split()[0])
+print("Python (this notebook's kernel; everything is installed into it):", sys.executable, sys.version.split()[0],
+      f"({64 if sys.maxsize > 2**32 else 32}-bit)")
+if sys.version_info < (3, 10) or sys.maxsize <= 2**32:
+    print("! this Python cannot run the training: it needs a 64-bit Python 3.10 or newer. Install Python 3.12 from "
+          "https://www.python.org, then pick it as the kernel (top right of the notebook) and run this cell again.")
 ''')
 
 code('''
 #@title 2. Check this PC and install what is needed (first time: several minutes)
-def run(cmd, check=True):
-    print(">", " ".join(str(c) for c in cmd)[:200])
-    r = subprocess.run([str(c) for c in cmd])
-    if check and r.returncode != 0:
-        raise SystemExit(f"command failed (exit {r.returncode}); see the messages above")
-    return r.returncode
-
-def stream(cmd):
-    """Run a step and show its output as it happens; -> exit code. A stopped cell ends the step with everything it
-    started (Windows: the whole process tree, since terminating a process there does not end its children)."""
-    print(">", " ".join(str(c) for c in cmd)[:200])
+# Every command runs as a list of arguments with this notebook's own Python (no shell lines: on Windows those go to
+# cmd.exe), and its output is shown here as it happens.
+def stream(cmd, cwd=None):
+    \"\"\"Run a step and show its output as it happens; -> exit code. A stopped cell ends the step with everything it
+    started (Windows: the whole process tree, since terminating a process there does not end its children).\"\"\"
+    print(">", " ".join(str(c) for c in cmd)[:200], flush=True)
     p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                         encoding="utf-8", errors="replace", env=dict(os.environ, PYTHONUNBUFFERED="1"))
+                         encoding="utf-8", errors="replace", cwd=None if cwd is None else str(cwd),
+                         env=dict(os.environ, PYTHONUNBUFFERED="1", PYTHONUTF8="1", PYTHONIOENCODING="utf-8"))
     try:
         for line in p.stdout:
-            print(line, end="")
+            print(line, end="", flush=True)
     finally:
         if p.poll() is None:
             if os.name == "nt":
@@ -129,18 +143,48 @@ def stream(cmd):
                 p.terminate()
     return p.wait()
 
+def run(cmd, check=True):
+    rc = stream(cmd)
+    if check and rc != 0:
+        hint = ""
+        if os.name == "nt" and "pip" in [str(c) for c in cmd]:
+            hint = ("\\nOn Windows the usual causes: the assistant (or another notebook) is running and holds PyTorch's "
+                    "files (close it and restart this notebook's kernel), or Windows long paths are off (the error "
+                    "names a long path: run PowerShell as administrator, then  New-ItemProperty -Path "
+                    "HKLM:\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\FileSystem -Name LongPathsEnabled -Value 1 "
+                    "-PropertyType DWORD -Force  and restart the PC).")
+        raise SystemExit(f"command failed (exit {rc}); see the messages above" + hint)
+    return rc
+
+def capture(cmd):
+    \"\"\"-> (exit code, stdout, stderr), decoded as UTF-8 whatever the Windows code page; a missing program: 127.\"\"\"
+    try:
+        r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           env=dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8"))
+        return r.returncode, r.stdout, r.stderr
+    except OSError as ex:
+        return 127, "", str(ex)
+
+import importlib
+sys.path.insert(0, str(LOCAL))
+import setup_pc
+importlib.reload(setup_pc)
+for _p in setup_pc.python_problems():
+    raise SystemExit(_p)
+for _p in setup_pc.path_notes(ROOT):
+    print("note:", _p)
+
 GPU, GPU_MEM = False, 0
-try:
-    q = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
-                       capture_output=True, text=True)
-    if q.returncode == 0 and q.stdout.strip():
-        name, mem = q.stdout.strip().splitlines()[0].rsplit(",", 1)
+_rc, _out, _err = capture(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
+if _rc == 0 and _out.strip():
+    try:
+        name, mem = _out.strip().splitlines()[0].rsplit(",", 1)
         GPU, GPU_MEM = True, int(float(mem)) // 1024
         print(f"NVIDIA GPU: {name.strip()} ({GPU_MEM} GB)")
-except FileNotFoundError:
-    pass
+    except ValueError:
+        pass
 if not GPU:
-    print("no NVIDIA GPU: training will run on the CPU |", os.cpu_count(), "CPU cores")
+    print("no NVIDIA GPU: training will run on the CPU |", os.cpu_count(), "CPU threads")
 
 if os.name == "nt":                     # Smart App Control blocks PyTorch's files (WinError 4551)
     try:
@@ -152,16 +196,27 @@ if os.name == "nt":                     # Smart App Control blocks PyTorch's fil
     except OSError:
         pass
 
+# what the code-only update zip does not carry: copied from the older "rpa model" folder next to this one (e.g.
+# "rpa model OLD"): platform, the installed model, its context, the downloads, your feedback
+_copied = setup_pc.adopt_old(ROOT)
+print("copied from the older folder:", ", ".join(_copied) if _copied else "nothing needed")
+# nanochat (the model code) at the pinned commit: from the older folder, else git, else GitHub's zip (no Git needed)
+print("nanochat:", setup_pc.ensure_nanochat(ROOT), "->", ROOT / "nanochat")
+if not setup_pc.platform_ok(ROOT):
+    print("! " + setup_pc.PLATFORM_HELP.format(p=ROOT / "platform", rpa=ROOT) + ". Training (cells 3-5) works "
+          "without them; testing (cell 6) and the assistant (cell 7) need them.")
+
 probe = "import torch; print(torch.__version__, torch.cuda.is_available())"
-t = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
-if t.returncode != 0 or (GPU and "True" not in t.stdout):
+_rc, _out, _err = capture([sys.executable, "-c", probe])
+if _rc != 0 or (GPU and "True" not in _out):
     idx = "https://download.pytorch.org/whl/cu128" if GPU else "https://download.pytorch.org/whl/cpu"
     run([sys.executable, "-m", "pip", "install", "--upgrade", "torch", "--index-url", idx])
-run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
-     "rustbpe", "tiktoken", "filelock", "jsonschema", "wandb", "psutil", "pyarrow", "numpy", "requests", "gdown"])
-t = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
-if t.returncode != 0:
-    err = t.stderr[-800:]
+run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--progress-bar", "off",
+     "rustbpe", "tiktoken", "filelock", "jsonschema", "wandb", "psutil", "pyarrow", "numpy", "requests", "gdown>=6"])
+importlib.invalidate_caches()
+_rc, _out, _err = capture([sys.executable, "-c", probe])
+if _rc != 0:
+    err = _err[-800:]
     if "WinError 126" in err or "WinError 193" in err:
         raise SystemExit("PyTorch cannot load its DLLs: this PC is missing the Microsoft Visual C++ Redistributable. "
                          "Install it from https://aka.ms/vs/17/release/vc_redist.x64.exe (choose Repair if it is "
@@ -170,8 +225,8 @@ if t.returncode != 0:
         raise SystemExit("Windows Smart App Control blocks PyTorch: Windows Security > App & browser control > "
                          "Smart App Control settings > Off, then run cells 1 and 2 again.")
     raise SystemExit("PyTorch does not load:\\n" + err)
-print("PyTorch", t.stdout.strip())
-CUDA = GPU and t.stdout.strip().endswith("True")
+print("PyTorch", _out.strip())
+CUDA = GPU and _out.strip().endswith("True")
 MODE_NOW = MODE if MODE in ("full", "topup", "install") else ("full" if CUDA else "topup")
 if MODE in ("long", "refine", "curriculum", "big"):
     raise SystemExit(f'MODE "{MODE}" was removed: it trained the old plain-prompt format and would undo the v4 model. '
@@ -193,7 +248,8 @@ bat = ROOT / "assistant" / "start_assistant.bat"
 if bat.exists():
     import re as _re
     txt = bat.read_text(encoding="utf-8", errors="replace")
-    bat.write_text(_re.sub(r"(?m)^set PYTHON=.*$", lambda m: "set PYTHON=" + sys.executable, txt), encoding="utf-8")
+    with open(bat, "w", encoding="utf-8", newline="\\r\\n") as _f:     # cmd.exe wants Windows line ends
+        _f.write(_re.sub(r"(?m)^set PYTHON=.*$", lambda m: "set PYTHON=" + sys.executable, txt))
 ''')
 
 code('''
@@ -251,8 +307,8 @@ if RESTART_TRAINING:
 if MODE_NOW == "install":
     print("MODE install: no training; cell 6 tests Drive's newest model against this PC's")
 else:
-    r = subprocess.run(TRAIN + ["--check"])
-    print("\\nOK: run cell 5" if r.returncode == 0 else "\\nfix the lines marked ! above, then run this cell again")
+    rc = stream(TRAIN + ["--check"])
+    print("\\nOK: run cell 5" if rc == 0 else "\\nfix the lines marked ! above, then run this cell again")
 ''')
 
 code('''
@@ -269,11 +325,14 @@ else:
 
 code('''
 #@title 6. Test (as Colab cell 8) and install the new model only if it is better
+if not setup_pc.platform_ok(ROOT):
+    raise SystemExit(setup_pc.PLATFORM_HELP.format(p=ROOT / "platform", rpa=ROOT) + ", then run this cell again")
 if MODE_NOW == "install":
     _d8 = ROOT / "train_data" / "drive_model" / "chatsft_checkpoints" / "d8"
     _origin = (ROOT / "train_data" / "drive_model" / ".drive_id")
     EVAL = [sys.executable, "-u", str(LOCAL / "eval_pc.py"), "--rpa", str(ROOT), "--new", str(_d8), "--data", str(DATA),
-            "--info", json.dumps({"mode": "install", "drive_origin": _origin.read_text().strip() if _origin.exists() else None})]
+            "--info", json.dumps({"mode": "install",
+                                 "drive_origin": _origin.read_text(encoding="utf-8").strip() if _origin.exists() else None})]
 else:
     _st = ROOT / "local_run" / MODE_NOW / "state.json"
     _res = json.loads(_st.read_text(encoding="utf-8")).get("result") if _st.exists() else None
@@ -288,12 +347,20 @@ print("\\nexit code", rc, "| history:", ROOT / "nanochat_base" / "topup_history.
 code('''
 #@title 7. Start the assistant (opens in your browser)
 import urllib.request, webbrowser
+if not setup_pc.platform_ok(ROOT):
+    raise SystemExit(setup_pc.PLATFORM_HELP.format(p=ROOT / "platform", rpa=ROOT) + ", then run this cell again")
+if not setup_pc.nanochat_ok(ROOT / "nanochat"):
+    raise SystemExit("nanochat is missing: run cell 2 again")
 cat = ROOT / "sft" / "catalog.jsonl"             # the installed model's catalog (examples.jsonl beside it)
 cat = cat if cat.exists() else ROOT / "data" / "catalog" / "catalog.jsonl"
+(ROOT / "assistant" / "assistant_data").mkdir(parents=True, exist_ok=True)
+APP_LOG = ROOT / "assistant" / "assistant_data" / "assistant.log"      # its messages (a notebook does not show them)
+_app_log = open(APP_LOG, "w", encoding="utf-8")
 APP = subprocess.Popen([sys.executable, str(ROOT / "assistant" / "app.py"), "--model-dir", str(ROOT / "nanochat_base"),
                         "--nanochat", str(ROOT / "nanochat"), "--platform", str(ROOT / "platform"), "--catalog", str(cat),
                         "--data-dir", str(ROOT / "assistant" / "assistant_data"), "--port", "8765"],
-                       cwd=str(ROOT / "assistant"))
+                       cwd=str(ROOT / "assistant"), stdout=_app_log, stderr=subprocess.STDOUT,
+                       env=dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1"))
 for _ in range(150):
     time.sleep(2)
     try:
@@ -304,22 +371,37 @@ for _ in range(150):
         break
     except Exception:
         if APP.poll() is not None:
-            raise SystemExit("the assistant stopped while starting; see the messages above")
+            _app_log.close()
+            print(APP_LOG.read_text(encoding="utf-8", errors="replace")[-3000:])
+            raise SystemExit("the assistant stopped while starting; its messages are above (full log: "
+                             + str(APP_LOG) + ")")
+else:
+    print("the assistant is still starting; its messages so far:", APP_LOG)
 ''')
 
 code('''
 #@title 8. Stop the assistant
-APP.terminate(); print("stopped")
+if os.name == "nt":
+    subprocess.run(["taskkill", "/T", "/F", "/PID", str(APP.pid)], capture_output=True)
+else:
+    APP.terminate()
+APP.wait()
+print("stopped")
 ''')
 
 code('''
 #@title 9. (Windows, optional) Top-up every night at 01:30 (continues the run, then tests and installs if better)
 NIGHTLY = ROOT / "training" / "local" / "topup_nightly.bat"
-subprocess.run(["schtasks", "/create", "/tn", "OOA nightly top-up", "/tr", f'"{NIGHTLY}"', "/sc", "daily", "/st", "01:30", "/f"])
-subprocess.run(["powershell", "-NoProfile", "-Command",
-                "Set-ScheduledTask -TaskName 'OOA nightly top-up' -Settings (New-ScheduledTaskSettingsSet "
-                "-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 8))"])
-print("scheduled: every night at 01:30 (results in", NIGHTLY.parent / "topup_nightly.log", ")")
+if os.name != "nt":
+    raise SystemExit("this cell is for Windows (Task Scheduler); on Linux use cron with train_pc.py and eval_pc.py")
+_rc = stream(["schtasks", "/create", "/tn", "OOA nightly top-up", "/tr", f'"{NIGHTLY}"', "/sc", "daily", "/st", "01:30", "/f"])
+stream(["powershell", "-NoProfile", "-Command",
+        "Set-ScheduledTask -TaskName 'OOA nightly top-up' -Settings (New-ScheduledTaskSettingsSet "
+        "-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 8))"])
+if _rc == 0:
+    print("scheduled: every night at 01:30 (results in", NIGHTLY.parent / "topup_nightly.log", ")")
+else:
+    print("could not schedule it (see the messages above)")
 ''')
 
 nb = {"cells": cells, "metadata": {"kernelspec": {"display_name": "Python 3", "name": "python3", "language": "python"},

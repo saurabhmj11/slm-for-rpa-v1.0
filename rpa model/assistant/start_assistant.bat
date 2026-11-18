@@ -12,6 +12,9 @@ set CATALOG=%~dp0..\sft\catalog.jsonl
 if not exist "%CATALOG%" set CATALOG=%~dp0..\data\catalog\catalog.jsonl
 set DATA_DIR=%~dp0assistant_data
 set PORT=8765
+rem Python reads and writes UTF-8 (the training data and the catalog are UTF-8; Windows defaults to cp1252)
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 
 rem Set to 1 to try the app without the real model (canned answers only).
 set FAKE_MODEL=0

@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -15,6 +16,7 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE), str(HERE.parent)]
 import data_pc as D      # noqa: E402
 import eval_pc as E      # noqa: E402
+import setup_pc as SP    # noqa: E402
 import sft_setup as T    # noqa: E402
 import train_pc as P     # noqa: E402
 
@@ -331,6 +333,218 @@ def test_patch_against_pinned_nanochat():
         assert (n2 / "tasks/ooa.py").exists()
         assert "OOADialogues" not in (n2 / "scripts/chat_sft.py").read_text(encoding="utf-8")
         compile(s, str(out), "exec")
+
+
+# ---------------------------------------------------------------------------------------- Windows
+RPA = HERE.parent.parent
+# the code the PC notebook runs (cells 1-9 and everything they start)
+PC_FILES = ["training/local/data_pc.py", "training/local/train_pc.py", "training/local/eval_pc.py",
+            "training/local/setup_pc.py", "training/make_local_notebook.py", "training/sft_setup.py",
+            "training/render_dataset.py", "training/data_filter.py", "training/ooa_format.py",
+            "training/ingest_feedback.py", "training/ooa_task.py", "training/ooa_reward.py", "training/repair.py",
+            "training/retrieval.py", "training/safety.py", "assistant/model_backend.py", "assistant/app.py",
+            "assistant/constrained.py", "assistant/knowledge.py", "assistant/runner_bridge.py",
+            "serving/ooa_server.py", "serving/backends.py", "eval/beginner_score.py", "eval/flow_check.py"]
+KNOWN = {("serving/ooa_server.py", "Policy.load")}     # fixed in its own change (that file is being edited elsewhere)
+
+
+def no_encoding_calls(src):
+    """Text-mode open() / read_text() / write_text() / subprocess(text=True) without encoding=: on Windows they use
+    the ANSI code page (cp1252) and crash on the UTF-8 JSONL. -> [(line, what, enclosing def)]"""
+    out, tree = [], ast.parse(src)
+    parents = {}
+    for n in ast.walk(tree):
+        for c in ast.iter_child_nodes(n):
+            parents[c] = n
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        kw = {k.arg for k in n.keywords}
+        f = n.func
+        name = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else "")
+        if "encoding" in kw:
+            continue
+        what = None
+        if name == "open" and isinstance(f, ast.Name):
+            mode = n.args[1] if len(n.args) > 1 else next((k.value for k in n.keywords if k.arg == "mode"), None)
+            if not (isinstance(mode, ast.Constant) and "b" in str(mode.value)):
+                what = "open"
+        elif name in ("read_text", "write_text"):
+            what = name
+        elif name in ("run", "Popen", "check_output") and {"text", "universal_newlines"} & kw:
+            what = "subprocess " + name
+        if what:
+            d, p = None, parents.get(n)
+            while p is not None and d is None:
+                d = p.name if isinstance(p, (ast.FunctionDef, ast.ClassDef)) else None
+                p = parents.get(p)
+            out.append((n.lineno, what, d))
+    return out
+
+
+def notebook_cells(fid=""):
+    with tempfile.TemporaryDirectory() as t:
+        out = Path(t) / "nb.ipynb"
+        subprocess.run([sys.executable, str(HERE.parent / "make_local_notebook.py"), fid, str(out)], check=True,
+                       capture_output=True)
+        nb = json.loads(out.read_text(encoding="utf-8"))
+    return [("".join(c["source"]), c["cell_type"]) for c in nb["cells"]]
+
+
+def test_every_text_file_access_names_utf8():
+    bad = []
+    for f in PC_FILES:
+        for ln, what, d in no_encoding_calls((RPA / f).read_text(encoding="utf-8")):
+            if (f, f"{d}" if d != "load" else "Policy.load") not in KNOWN:
+                bad.append(f"{f}:{ln} {what} in {d}")
+    for i, (src, kind) in enumerate(notebook_cells()):
+        if kind == "code":
+            bad += [f"notebook cell {i}: line {ln} {what}" for ln, what, d in no_encoding_calls(src)]
+    assert not bad, bad
+
+
+def test_notebook_cells_are_windows_safe():
+    cells = notebook_cells()
+    code = [s for s, k in cells if k == "code"]
+    for i, s in enumerate(code):
+        for line in s.splitlines():
+            assert not line.lstrip().startswith(("!", "%")), (i, line)   # shell lines: cmd.exe on Windows
+        assert "python3" not in s and "os.system" not in s and "shell=True" not in s, i
+        for n in ast.walk(ast.parse(s)):          # every command is a list of arguments
+            if isinstance(n, ast.Call) and getattr(n.func, "attr", getattr(n.func, "id", "")) in ("run", "Popen", "stream"):
+                if n.args and isinstance(n.args[0], (ast.Constant, ast.JoinedStr)):
+                    raise AssertionError(f"cell {i}: command given as a string")
+    # cell 1 runs on a bare Python: plain settings + the standard library only
+    imported = {a.name.split(".")[0] for n in ast.walk(ast.parse(code[0])) if isinstance(n, (ast.Import, ast.ImportFrom))
+                for a in (n.names if isinstance(n, ast.Import) else [type("M", (), {"name": n.module})])}
+    assert imported <= {"os", "sys", "json", "shutil", "subprocess", "time", "pathlib"}, imported
+    assert "__vsc_ipynb_file__" in code[0] and "sys.executable" in code[0]
+    c2 = code[1]
+    assert "setup_pc.ensure_nanochat(ROOT)" in c2 and "setup_pc.adopt_old(ROOT)" in c2
+    assert '[sys.executable, "-m", "pip", "install"' in c2 and "gdown>=6" in c2
+    assert "stream(TRAIN + [\"--check\"])" in code[3]                  # the check's output shows in the notebook
+    assert "stdout=_app_log" in code[6]
+
+
+def test_python_and_path_checks():
+    assert SP.python_problems((3, 12, 1), True) == []
+    assert len(SP.python_problems((3, 9, 0), True)) == 1 and len(SP.python_problems((3, 12, 0), False)) == 1
+    assert SP.path_notes("C:/OOA/rpa model", True) == []
+    assert any("OneDrive" in n for n in SP.path_notes("C:/Users/x/OneDrive/Desktop/rpa model", True))
+    assert any("260" in n for n in SP.path_notes("C:/" + "x" * 130 + "/rpa model", True))
+    assert SP.path_notes("/home/x/" + "y" * 200, False) == []
+    assert SP.NANOCHAT_COMMIT == P.NANOCHAT_COMMIT
+
+
+def fake_nanochat(d, patched=False):
+    d = Path(d)
+    for f in ("nanochat/engine.py", "nanochat/gpt.py", "scripts/chat_sft.py", "tasks/common.py"):
+        (d / f).parent.mkdir(parents=True, exist_ok=True)
+        (d / f).write_text("# OOADialogues\n" if patched and f.endswith("chat_sft.py") else "x = 1\n", encoding="utf-8")
+    return d
+
+
+def test_nanochat_without_git_comes_from_the_zip():
+    """No Git (most Windows PCs): GitHub's zip of the pinned commit, unpacked to rpa/nanochat with its commit noted."""
+    import zipfile
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        src = fake_nanochat(t / "src")
+        zf = t / "nc.zip"
+        with zipfile.ZipFile(zf, "w") as z:
+            for f in src.rglob("*"):
+                if f.is_file():
+                    z.write(f, f"nanochat-{SP.NANOCHAT_COMMIT}/" + f.relative_to(src).as_posix())
+        rpa = t / "new" / "rpa model"
+        rpa.mkdir(parents=True)
+        (rpa / "nanochat").mkdir()                                     # a half-finished earlier try
+        logs = []
+        how = SP.ensure_nanochat(rpa, log=logs.append, olds=[], zip_url=str(zf), use_git=False)
+        assert how == "downloaded the zip", how
+        assert SP.nanochat_ok(rpa / "nanochat") and SP.nanochat_commit(rpa / "nanochat") == SP.NANOCHAT_COMMIT
+        assert not list(rpa.glob("*.zip")) and not (rpa / "nanochat.unzip").exists()
+        assert SP.ensure_nanochat(rpa, log=logs.append, olds=[], zip_url="unused", use_git=False) == "already here"
+        # git missing: train_pc reads the script from the folder (no crash on the missing git program)
+        (rpa / "nanochat" / ".git").mkdir()
+        real = subprocess.run
+        try:
+            def no_git(*a, **k):
+                raise FileNotFoundError("git")
+            subprocess.run = no_git
+            assert P.pinned_chat_sft(rpa / "nanochat") == "x = 1\n"
+        finally:
+            subprocess.run = real
+
+
+def test_update_zip_takes_what_it_lacks_from_the_old_folder():
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        old, new = t / "rpa model OLD", t / "rpa model"
+        fake_nanochat(old / "nanochat")
+        for f in ("platform/contracts/flow-schema/flow.v1.json", "nanochat_base/chatsft_checkpoints/d8/model_000001.pt",
+                  "nanochat_base/old_model_1/model_000000.pt", "sft/catalog.jsonl",
+                  "assistant/assistant_data/feedback.jsonl", "assistant/app.py", "train_data/sft_render/x.jsonl"):
+            (old / f).parent.mkdir(parents=True, exist_ok=True)
+            (old / f).write_text("é\n", encoding="utf-8")
+        (new / "assistant").mkdir(parents=True)
+        (new / "assistant" / "app.py").write_text("new", encoding="utf-8")
+        (new / "sft").mkdir()
+        (new / "sft" / "catalog.jsonl").write_text("mine", encoding="utf-8")
+        assert SP.old_folders(new) == [old]
+        done = SP.adopt_old(new, log=lambda *a: None)
+        assert set(done) == {"platform", "nanochat_base", "train_data", "assistant/assistant_data"}, done
+        assert SP.platform_ok(new) and (new / "sft" / "catalog.jsonl").read_text(encoding="utf-8") == "mine"
+        assert (new / "nanochat_base/chatsft_checkpoints/d8/model_000001.pt").exists()
+        assert not (new / "nanochat_base" / "old_model_1").exists()            # backups stay behind
+        assert (old / "nanochat_base/chatsft_checkpoints/d8/model_000001.pt").exists()   # copied, not moved
+        assert SP.ensure_nanochat(new, log=lambda *a: None, use_git=False).startswith("copied from")
+        assert SP.nanochat_ok(new / "nanochat")
+        # an old nanochat whose chat_sft.py an older tool patched in place is not copied
+        shutil.rmtree(new / "nanochat")
+        fake_nanochat(old / "nanochat", patched=True)
+        try:
+            SP.ensure_nanochat(new, log=lambda *a: None, use_git=False, zip_url=str(t / "missing.zip"))
+            raise AssertionError("expected the download to be tried")
+        except SystemExit as ex:
+            assert "could not download nanochat" in str(ex)
+
+
+def test_windows_runs_list_commands_and_shows_child_output():
+    """data_pc passes a child's output on line by line (Windows notebooks do not show it otherwise) as UTF-8."""
+    lines = []
+    rc = D.run_step([sys.executable, "-c", "print('caf\\u00e9 \\u2192 ok'); import sys; sys.exit(3)"], lines.append)
+    assert rc == 3 and lines == ["café → ok"], lines
+    r = D.run_quiet([sys.executable, "-c", "print('\\u00fc')"])
+    assert r.stdout.strip() == "ü"
+
+
+def test_calculator_works_without_sigalrm():
+    """Windows has no signal.SIGALRM: nanochat's calculator (engine.eval_with_timeout) must not crash an answer."""
+    import signal
+    import types
+    sys.path.insert(0, str(RPA / "assistant"))
+    import model_backend as MB
+    fake = types.ModuleType("nanochat.engine")
+    fake.eval_with_timeout = lambda formula, max_time=3: signal.SIGALRM     # what nanochat does first
+    pkg = types.ModuleType("nanochat")
+    pkg.engine = fake
+    saved = {k: sys.modules.get(k) for k in ("nanochat", "nanochat.engine")}
+    had = hasattr(signal, "SIGALRM")
+    alarm = getattr(signal, "SIGALRM", None)
+    try:
+        sys.modules.update({"nanochat": pkg, "nanochat.engine": fake})
+        if had:
+            del signal.SIGALRM
+        MB._calculator_without_alarm()
+        assert fake.eval_with_timeout("2+3") == 5 and fake.eval_with_timeout("open('x')") is None
+    finally:
+        if had:
+            signal.SIGALRM = alarm
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
 
 
 if __name__ == "__main__":
