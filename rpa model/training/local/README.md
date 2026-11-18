@@ -21,11 +21,13 @@ from top to bottom). It drives the three scripts in this folder, which reuse the
   Needs an RTX 20xx / GTX 16xx or newer. On plain Windows it runs without `torch.compile` (slower); WSL compiles.
   nanochat saves only at the end of a run, so by default (`FULL_CHUNKS = 1`) a stop means starting again; with
   `FULL_CHUNKS = 8` the run is saved every 1000 steps and resumes, with the same learning-rate schedule (each chunk
-  continues the previous chunk's model and optimizer; flat lr over the first half, then the linear warmdown) and the
-  same planned mixture read with a new shuffle per chunk.
-- **`topup`** (default without a GPU): continues the **newest trained model** (Drive's newest; the PC's own when it
-  already grew from that same Drive model in an earlier top-up) on the same rendered data, with the window fix, at
-  the 4096 window (2048 when the PC has less than 10 GB RAM), learning rate 0.3, for `TOPUP_STEPS` (default 300)
+  continues the previous chunk's model and optimizer; flat lr over the first half, then the linear warmdown; the Muon
+  momentum ramp counts the run's steps, not the chunk's) and the same planned mixture read with a new shuffle per chunk.
+- **`topup`** (default without a GPU): continues the **newest trained model** (Drive's newest, with its optimizer
+  state when Drive has it; the PC's own when it already grew from that same Drive model in an earlier top-up: the
+  model is known by its Drive file id, so it stays the same model when Colab moves it to
+  `chatsft_checkpoints_before_*`) on the same rendered data, with the window fix, at the 4096 window (2048 when the PC
+  has less than 10 GB RAM; `train_pc.py` and the nightly task apply the same rule when `--seq` is not given), learning rate 0.3, for `TOPUP_STEPS` (default 300)
   steps, saved every 50 steps, at low priority with one core left free. A top-up is about 1/25 of the Colab budget,
   so its mixture is not the full one spread thin (every file at 0.1-0.3 views would teach little):
   `sft_setup.plan_topup` gives 35% of the tokens to the beginner rows, 20% each to the long and business2 processes,
@@ -35,7 +37,13 @@ from top to bottom). It drives the three scripts in this folder, which reuse the
   with all 4 threads and **67 s at low priority with 3 threads (the default)**, so 300 steps take about 5.6 hours
   there (plus about 3 minutes of loading per 50-step chunk); a slower 4-core PC (the old 2048 runs took 77 s per
   step on the user's PC) needs up to about 9 hours. `TOPUP_HOURS` in cell 1 measures this
-  PC first (about 5 minutes) and sizes the round to that many hours.
+  PC first (about 5 minutes, at the same low priority) and sizes every new round to that many hours, chunk loading
+  included.
+- Drive's `sft_render/` is used only when its `render_report.json` has the Colab cell 6d settings for this PC's window
+  (`answer_format` compact, `gold_dropout` 0.5, `max_tokens` window - 28) and every new file (long, business2,
+  targeted, fix, clarify, beginner); otherwise (an older render, or a 2048 PC) the data is rendered here.
+- Stopping cell 5 or 6 ends the step with everything it started (on Windows the whole process tree; `train_pc.py`
+  also puts the training process in a Windows job that ends with it).
 - **`install`**: no training; tests Drive's newest model against the installed one and installs it if it is better
   (the quickest way to get a new Colab model onto the PC).
 

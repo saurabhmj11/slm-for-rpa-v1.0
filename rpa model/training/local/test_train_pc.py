@@ -100,6 +100,9 @@ def test_plan_for_local_modes():
         assert set(vt) == set(vf) and "val.jsonl" not in vt
 
 
+V4 = {"answer_format": "compact", "gold_dropout": 0.5, "max_tokens": 4068}
+
+
 def make_drive(root, report="r1"):
     root = Path(root)
     (root / "nanochat_base/tokenizer").mkdir(parents=True)
@@ -112,10 +115,10 @@ def make_drive(root, report="r1"):
         (d8 / f"meta_{step:06d}.json").write_text(json.dumps({"step": step}), encoding="utf-8")
     r = root / "sft_render"
     r.mkdir()
-    for n in ("catalog.jsonl", "examples.jsonl", "val.jsonl", "long_train.jsonl", "beginner_train.jsonl"):
+    for n in ("catalog.jsonl", "examples.jsonl", "val.jsonl", *T.RENDER_EXTRA):
         (r / n).write_text('{"a": 1}\n', encoding="utf-8")
     (r / "long_train (1).jsonl").write_text('{"copy": 1}\n', encoding="utf-8")
-    (r / "render_report.json").write_text(json.dumps({"seconds": report}), encoding="utf-8")
+    (r / "render_report.json").write_text(json.dumps({"seconds": report, "settings": V4}), encoding="utf-8")
     return root
 
 
@@ -135,7 +138,7 @@ def test_drive_sync_with_a_local_folder():
         assert P.newest(dm / "chatsft_checkpoints/d8") == 8000
         # unchanged on Drive: nothing downloaded again; a new render on Drive: downloaded again
         assert D.sync(D.FolderDrive(drive), rpa, "topup", log=log)["render"] == "up to date"
-        (drive / "sft_render/render_report.json").write_text(json.dumps({"seconds": "r2"}), encoding="utf-8")
+        (drive / "sft_render/render_report.json").write_text(json.dumps({"seconds": "r2", "settings": V4}), encoding="utf-8")
         (drive / "sft_render/long_train.jsonl").write_text('{"b": 2}\n', encoding="utf-8")
         assert D.sync(D.FolderDrive(drive), rpa, "topup", log=log)["render"] == "downloaded"
         assert (data / "long_train.jsonl").read_text(encoding="utf-8") == '{"b": 2}\n'
@@ -154,6 +157,64 @@ def test_drive_sync_with_a_local_folder():
         shutil.rmtree(drive / "nanochat_base/chatsft_checkpoints")
         got = D.Sync(D.FolderDrive(drive), rpa, log).sft_model()
         assert got == ("nanochat_base/chatsft_checkpoints_before_20251101_000000/d8", 2500)
+
+
+def test_drive_render_must_fit_the_run():
+    with tempfile.TemporaryDirectory() as t:
+        drive, rpa = make_drive(Path(t) / "drive"), Path(t) / "rpa"
+        logs = []
+        log = lambda *x: logs.append(" ".join(str(y) for y in x))
+        assert D.Sync(D.FolderDrive(drive), rpa, log).render_from_drive(seq=4096) == "downloaded"
+        # a 2048 PC does not train on the 4096 render (most long/business rows would be skipped)
+        assert D.Sync(D.FolderDrive(drive), rpa, log).render_from_drive(seq=2048) is None
+        assert any("max_tokens 4068 (needed 2020)" in l for l in logs), logs
+        # an older render: no beginner rows, other settings
+        (drive / "sft_render/beginner_train.jsonl").unlink()
+        assert D.Sync(D.FolderDrive(drive), rpa, log).render_from_drive(seq=4096) is None
+        assert any("no beginner_train.jsonl" in l for l in logs), logs
+        old = dict(V4, gold_dropout=0.0, answer_format="full")
+        assert len(D.render_problems({"settings": old}, 4096, set(T.RENDER_EXTRA))) == 2
+        assert D.render_problems({"settings": V4}, 4096, set(T.RENDER_EXTRA)) == []
+        assert D.render_problems({}, 4096) != []
+
+
+def test_drive_model_keeps_its_identity_when_moved():
+    """Colab cell 7 moves chatsft_checkpoints to chatsft_checkpoints_before_<date>; Drive keeps the file id."""
+    class Moved:                                                  # a Drive listing: path -> [file id]
+        def __init__(self, files):
+            self.files = files
+
+        def download(self, path, dest, i=0):
+            Path(dest).write_bytes(self.files[path][i].encode())
+    with tempfile.TemporaryDirectory() as t:
+        rpa = Path(t) / "rpa"
+        tokf = {"nanochat_base/tokenizer/tokenizer.pkl": ["t1"], "nanochat_base/tokenizer/token_bytes.pt": ["t2"]}
+        a = dict(tokf, **{"nanochat_base/chatsft_checkpoints/d8/model_008000.pt": ["FILEID"],
+                          "nanochat_base/chatsft_checkpoints/d8/meta_008000.json": ["META"],
+                          "nanochat_base/chatsft_checkpoints/d8/optim_008000_rank0.pt": ["OPT"]})
+        logs = []
+        log = lambda *x: logs.append(" ".join(str(y) for y in x))
+        s1 = D.Sync(Moved(a), rpa, log)
+        assert s1.sft_model() == ("nanochat_base/chatsft_checkpoints/d8", 8000)
+        dm = rpa / "train_data/drive_model"
+        assert (dm / "chatsft_checkpoints/d8/optim_008000_rank0.pt").exists()      # top-up keeps the momentum buffers
+        id1 = (dm / ".drive_id").read_text(encoding="utf-8")
+        # the PC's model grew from it
+        here = rpa / "nanochat_base/chatsft_checkpoints/d8"
+        here.mkdir(parents=True)
+        (here / "model_008300.pt").write_bytes(b"x")
+        (here / "meta_008300.json").write_text(json.dumps({"ooa_local": {"drive_origin": id1}}), encoding="utf-8")
+        assert P.topup_start(rpa) == rpa / "nanochat_base"
+        # Colab starts a new run: the same file now sits in chatsft_checkpoints_before_*
+        b = dict(tokf, **{k.replace("chatsft_checkpoints/", "chatsft_checkpoints_before_20261118_010203/"): v
+                          for k, v in a.items() if "chatsft" in k})
+        n0 = D.Sync(Moved(b), rpa, log)
+        before = n0.downloaded
+        assert n0.sft_model() == ("nanochat_base/chatsft_checkpoints_before_20261118_010203/d8", 8000)
+        assert n0.downloaded == before                                          # not downloaded again
+        assert P.same_drive_model((dm / ".drive_id").read_text(encoding="utf-8"), id1)
+        assert P.topup_start(rpa) == rpa / "nanochat_base"                      # the PC's grown model stays the start
+        assert not P.same_drive_model("x/model_1.pt:A", "x/model_1.pt:B") and not P.same_drive_model(None, None)
 
 
 def test_topup_starts_from_the_newest_model():
@@ -215,6 +276,22 @@ def test_install_moves_the_old_model_and_writes_the_pack():
         assert (rpa / "nanochat_base/tokenizer/tokenizer.pkl").read_bytes() == b"t"
 
 
+def test_seq_default_follows_the_ram_rule():
+    import types
+    assert P.default_seq(True) == 4096
+    real = sys.modules.get("psutil")
+    try:
+        for gb, want in ((8, 2048), (16, 4096)):
+            sys.modules["psutil"] = types.SimpleNamespace(
+                virtual_memory=lambda gb=gb: types.SimpleNamespace(total=gb * 2**30))
+            assert P.default_seq(False) == want, gb
+    finally:
+        if real is None:
+            sys.modules.pop("psutil", None)
+        else:
+            sys.modules["psutil"] = real
+
+
 def test_notebook_generates_without_the_drive_id():
     with tempfile.TemporaryDirectory() as t:
         gen = HERE.parent / "make_local_notebook.py"
@@ -230,6 +307,8 @@ def test_notebook_generates_without_the_drive_id():
             for old in ("topup_local.py", "train_long.py", "big_local.py", "curriculum_local.py", "refine_local.py"):
                 assert old not in text, old
             assert "train_pc.py" in text and "eval_pc.py" in text and "data_pc" in text
+            assert '"taskkill", "/T", "/F"' in text and "1.15" not in text
+            assert 'get("finished")' in src[4]                     # TOPUP_HOURS sizes every new round
         shipped = json.loads((HERE.parent.parent / "ooa_local_pc.ipynb").read_text(encoding="utf-8"))
         assert 'DRIVE_FOLDER_ID = ""' in "".join(shipped["cells"][1]["source"])
 
@@ -248,6 +327,7 @@ def test_patch_against_pinned_nanochat():
         s = out.read_text(encoding="utf-8")
         assert "SFT attention window" in s and '"trained_window"' in s and "seed=3" in s
         assert "torch.compile switched off" in s and s.startswith("import torch as _torch_nc")
+        assert P.MOMENTUM_NEW in s and P.MOMENTUM_OLD not in s                 # momentum ramp over the whole run
         assert (n2 / "tasks/ooa.py").exists()
         assert "OOADialogues" not in (n2 / "scripts/chat_sft.py").read_text(encoding="utf-8")
         compile(s, str(out), "exec")

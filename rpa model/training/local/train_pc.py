@@ -14,7 +14,8 @@ the plan-first format, compact answers, gold dropout, beginner rows), prepared b
 
 Chunks: nanochat saves only at the end of a run, so the run is split into --chunks pieces. Chunk k starts from the
 model and optimizer chunk k-1 saved and covers the part [k/K, (k+1)/K] of the run's learning-rate schedule (constant,
-then the linear warmdown over the second half, exactly the shape of one long run). Every chunk plans the same data
+then the linear warmdown over the second half, exactly the shape of one long run); the Muon momentum ramp (0.85 to
+0.95 over the first 300 steps) also counts the run's steps, not the chunk's (OOA_STEP_OFFSET). Every chunk plans the same data
 mixture for the whole run and reads its own share of it with a different shuffle (seed + k; a full run starts at seed
 1 like Colab, every top-up round at a new seed), so over the run every file is seen the planned number of times on
 average. With --chunks 1 (default on a GPU) the run is Colab cell 7.
@@ -88,6 +89,13 @@ def drive_id(root):
     return f.read_text(encoding="utf-8").strip() if f.exists() else None
 
 
+def same_drive_model(a, b):
+    """Two Drive model identities ("<path>:<file id>") name the same model: Drive keeps a file's id when it is moved
+    (Colab cell 7 moves chatsft_checkpoints to chatsft_checkpoints_before_<date> when a new run starts), so only the
+    id counts, not the folder."""
+    return bool(a and b) and a.rsplit(":", 1)[-1] == b.rsplit(":", 1)[-1]
+
+
 def local_origin(rpa):
     """The Drive model the PC's installed model grew from (written into its meta when it was installed), or None."""
     d8 = Path(rpa) / "nanochat_base" / "chatsft_checkpoints" / "d8"
@@ -105,7 +113,7 @@ def topup_start(rpa):
     drive, here = rpa / "train_data" / "drive_model", rpa / "nanochat_base"
     if newest(drive / "chatsft_checkpoints" / "d8") is None:
         return here
-    if newest(here / "chatsft_checkpoints" / "d8") is not None and local_origin(rpa) == drive_id(drive):
+    if newest(here / "chatsft_checkpoints" / "d8") is not None and same_drive_model(local_origin(rpa), drive_id(drive)):
         return here
     return drive
 
@@ -137,6 +145,11 @@ def no_compile(s):
             "_torch_nc.compile = lambda fn=None, **kw: fn if fn is not None else (lambda f: f)\n") + s
 
 
+MOMENTUM_OLD = "    muon_momentum = get_muon_momentum(step)\n"
+MOMENTUM_NEW = ("    muon_momentum = get_muon_momentum(step + int(os.environ.get(\"OOA_STEP_OFFSET\", \"0\")))"
+                "  # the run's step, not the chunk's\n")
+
+
 def write_script(nano, data, views, smoltalk, seed, compile_ok):
     s = pinned_chat_sft(nano)
     missing = [k for k, a in {"window": T.WINDOW_ANCHOR, "meta": T.META_ANCHOR, "tasks start": T.TASKS_START,
@@ -145,6 +158,9 @@ def write_script(nano, data, views, smoltalk, seed, compile_ok):
     if missing:
         raise SystemExit(f"chat_sft.py does not match the pinned nanochat; missing: {missing}")
     s = T.patch_chat_sft(s, Path(data).as_posix(), views, smoltalk_rows=smoltalk, seed=seed)
+    if s.count(MOMENTUM_OLD) != 1:
+        raise SystemExit("chat_sft.py is not the expected version (Muon momentum line)")
+    s = s.replace(MOMENTUM_OLD, MOMENTUM_NEW, 1)                # chunk k continues the momentum ramp of chunk k-1
     if not compile_ok:
         s = no_compile(s)
     out = Path(nano) / "scripts" / "chat_sft_ooa.py"            # the original chat_sft.py stays untouched
@@ -166,10 +182,79 @@ def device_info():
     return "cpu", f"{os.cpu_count()} CPU threads", 0.0, None
 
 
+LOW_RAM_GB = 10                  # notebook cell 2: a CPU PC below this trains at 2048
+
+
+def default_seq(gpu):
+    """The window when --seq is not given (the nightly task): the notebook's rule, 4096 unless a CPU PC has less
+    than LOW_RAM_GB of RAM (one 4096-token row per pass needs about 5-6 GB on a CPU)."""
+    if gpu:
+        return 4096
+    try:
+        import psutil
+        ram = psutil.virtual_memory().total / 2**30
+    except Exception:
+        return 4096
+    return 4096 if ram >= LOW_RAM_GB else 2048
+
+
 def gpu_batch(mem_gb, seq):
     """Rows per GPU pass: Colab's T4 (15 GB) runs 2 x 4096. Same tokens per step either way."""
     b = 8 if mem_gb >= 60 else 4 if mem_gb >= 30 else 2 if mem_gb >= 14 else 1
     return max(1, min(b, TOKENS_PER_STEP // seq))
+
+
+def windows_kill_with_parent(p):
+    """Windows: put the training process in a job that ends when this process ends, however it ends (a stopped
+    notebook cell kills this process with TerminateProcess, which runs no finally block; the nightly task's time
+    limit does the same). -> the job handle (keep it open while the child runs), or None."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+        k32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+        k32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+        class IO(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_ulonglong) for n in ("r", "w", "o", "rb", "wb", "ob")]
+
+        class Basic(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD)]
+
+        class Extended(ctypes.Structure):
+            _fields_ = [("Basic", Basic), ("Io", IO), ("ProcessMemoryLimit", ctypes.c_size_t),
+                        ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                        ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = Extended()
+        info.Basic.LimitFlags = 0x2000                         # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):   # Extended info
+            k32.CloseHandle(job)
+            return None
+        h = k32.OpenProcess(0x0001 | 0x0100, False, p.pid)     # PROCESS_TERMINATE | PROCESS_SET_QUOTA
+        ok = bool(h) and k32.AssignProcessToJobObject(job, h)
+        if h:
+            k32.CloseHandle(h)
+        if not ok:
+            k32.CloseHandle(job)
+            return None
+        return job                                             # closed by Windows when this process ends
+    except Exception:
+        return None
 
 
 def run_chunk(cmd, cwd, env, log, total_steps, step_offset, prio):
@@ -180,11 +265,12 @@ def run_chunk(cmd, cwd, env, log, total_steps, step_offset, prio):
         lf.flush()
         p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                              encoding="utf-8", errors="replace", **prio)
+        job = windows_kill_with_parent(p)                     # kept open while the chunk runs
         pid_f = Path(log).with_name("child.pid")
         pid_f.write_text(str(p.pid), encoding="utf-8")
         try:
             rc = follow(p, lf, dts, total_steps, step_offset)
-        finally:                                              # a stopped notebook cell must not leave training running
+        finally:          # a stopped notebook cell must not leave training running (Windows: also the job above)
             if p.poll() is None:
                 p.terminate()
                 try:
@@ -192,6 +278,12 @@ def run_chunk(cmd, cwd, env, log, total_steps, step_offset, prio):
                 except Exception:
                     p.kill()
             pid_f.unlink(missing_ok=True)
+            if job:
+                try:
+                    import ctypes
+                    ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(job))
+                except Exception:
+                    pass
     steady = dts[1:] if len(dts) > 1 else dts                     # the first step includes warm-up
     return rc, (sum(steady) / len(steady) if steady else None)
 
@@ -244,7 +336,8 @@ def main(argv=None):
                                                   "continue; full: a folder with base_checkpoints/d8")
     ap.add_argument("--steps", type=int, default=None, help=f"optimizer steps of {TOKENS_PER_STEP:,} tokens (full {FULL_STEPS}, topup {TOPUP_STEPS})")
     ap.add_argument("--chunks", type=int, default=0, help="saved pieces (0: 1 on a GPU, steps/50 on a CPU)")
-    ap.add_argument("--seq", type=int, default=4096, choices=[2048, 4096], help="window (Colab: 4096)")
+    ap.add_argument("--seq", type=int, default=0, choices=[0, 2048, 4096],
+                    help="window (0: 4096 as Colab; 2048 on a CPU PC with less than 10 GB RAM, as notebook cell 2)")
     ap.add_argument("--device-batch", type=int, default=0, help="rows per pass (0: from GPU memory; 1 on a CPU)")
     ap.add_argument("--lr", type=float, default=None, help=f"--init-lr-frac (full {FULL_LR}, topup {TOPUP_LR})")
     ap.add_argument("--smoltalk", type=int, default=None, help=f"general chat rows (full {SMOLTALK_ROWS}, topup 0)")
@@ -266,6 +359,8 @@ def main(argv=None):
     full = a.mode == "full"
     dev, dev_name, mem, cap = device_info()
     gpu = dev == "cuda"
+    seq_given = bool(a.seq)
+    a.seq = a.seq or default_seq(gpu)
     a.steps = a.steps or (FULL_STEPS if full else TOPUP_STEPS)
     if a.measure:
         a.steps, a.chunks = a.measure, 1
@@ -312,6 +407,8 @@ def main(argv=None):
         problems.append("full training needs an NVIDIA GPU (8000 steps; a CPU would take weeks): use --mode topup")
     if gpu and cap and cap < (7, 5) and not a.no_compile:
         problems.append(f"GPU {dev_name} is too old for torch.compile: add --no-compile")
+    if state and not seq_given:
+        a.seq = state["seq"]                                  # no --seq (the nightly task): the run's own window
     if state and (state.get("steps"), state.get("chunks"), state.get("seq")) != (a.steps, a.chunks, a.seq) \
             and not (a.restart or a.check):
         print(f"note: continuing the run in progress ({state['steps']} steps in {state['chunks']} chunks at "
@@ -323,6 +420,13 @@ def main(argv=None):
         accum = TOKENS_PER_STEP // (a.seq * dbs)
     if state and state.get("data_sig") != data_sig(data):
         print("note: the training data changed since this run started; the run continues on the new data")
+    try:
+        _mt = json.loads((data / "render_report.json").read_text(encoding="utf-8"))["settings"]["max_tokens"]
+    except Exception:
+        _mt = None
+    if _mt and _mt > a.seq - 28:
+        print(f"note: the data was rendered for a {_mt + 28}-token window but this run trains at {a.seq}: longer rows "
+              "are skipped (the notebook's cell 3 renders it for this window)")
 
     views, stats, bud, table = T.plan_for_local(str(data), a.mode, a.steps, TOKENS_PER_STEP, smoltalk_rows=a.smoltalk) \
         if data.exists() and (data / "val.jsonl").exists() else ({}, {}, 0, [])
@@ -394,7 +498,8 @@ def main(argv=None):
             shutil.copytree(run_dir / "task_data", wb / "task_data")
         write_script(nano, data, views, a.smoltalk, state.get("seed", 1) + k, compile_ok=not a.no_compile)
         env = dict(os.environ, NANOCHAT_BASE_DIR=str(wb), OOA_TRAINING_DIR=str(HERE.parent), PYTHONUTF8="1",
-                   PYTHONIOENCODING="utf-8", NANOCHAT_DTYPE=dtype, OMP_NUM_THREADS=str(1 if gpu else threads))
+                   PYTHONIOENCODING="utf-8", NANOCHAT_DTYPE=dtype, OMP_NUM_THREADS=str(1 if gpu else threads),
+                   OOA_STEP_OFFSET=str(bounds[k]))
         cmd = [sys.executable, "-m", "scripts.chat_sft_ooa", f"--max-seq-len={a.seq}", f"--device-batch-size={dbs}",
                f"--total-batch-size={TOKENS_PER_STEP}", f"--num-iterations={steps_k * accum}",
                f"--eval-every={100 if gpu else -1}", f"--eval-tokens={a.seq * dbs * 8}", "--chatcore-every=-1",

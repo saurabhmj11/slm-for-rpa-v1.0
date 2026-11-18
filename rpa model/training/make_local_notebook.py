@@ -113,7 +113,8 @@ def run(cmd, check=True):
     return r.returncode
 
 def stream(cmd):
-    """Run a step and show its output as it happens; -> exit code."""
+    """Run a step and show its output as it happens; -> exit code. A stopped cell ends the step with everything it
+    started (Windows: the whole process tree, since terminating a process there does not end its children)."""
     print(">", " ".join(str(c) for c in cmd)[:200])
     p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                          encoding="utf-8", errors="replace", env=dict(os.environ, PYTHONUNBUFFERED="1"))
@@ -122,7 +123,10 @@ def stream(cmd):
             print(line, end="")
     finally:
         if p.poll() is None:
-            p.terminate()
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+            else:
+                p.terminate()
     return p.wait()
 
 GPU, GPU_MEM = False, 0
@@ -223,15 +227,21 @@ if MODE_NOW == "full":
     TRAIN += ["--steps", str(FULL_STEPS), "--chunks", str(FULL_CHUNKS)]
 elif MODE_NOW == "topup":
     steps = TOPUP_STEPS
-    if TOPUP_HOURS > 0 and not (ROOT / "local_run" / "topup" / "state.json").exists():
+    _st = ROOT / "local_run" / "topup" / "state.json"           # a round in progress keeps its own length
+    _going = _st.exists() and not json.loads(_st.read_text(encoding="utf-8")).get("finished")
+    if TOPUP_HOURS > 0 and not (_going and not RESTART_TRAINING):
         print(f"measuring this PC's speed (2 steps, about 5 minutes) to size a {TOPUP_HOURS} h top-up ...")
         out = subprocess.run(TRAIN + ["--measure", "2"], capture_output=True, text=True, encoding="utf-8", errors="replace")
         import re as _re
-        m = _re.search(r"MEASURED: ([\\d.]+) s per step", out.stdout)
+        m = _re.search(r"MEASURED: ([\\d.]+) s per step.*?first step \\+ loading (\\d+) s", out.stdout)
         if m:
-            sps = float(m.group(1)) * 1.15          # low priority, one core left free
-            steps = max(50, int(TOPUP_HOURS * 3600 / sps) // 50 * 50)
-            print(f"  {float(m.group(1)):.0f} s per step -> {steps} steps for about {TOPUP_HOURS} h")
+            # measured as the run trains (low priority, one core left free); every 50-step chunk also loads the model
+            # and the data again, about what the measuring run took beyond its steps
+            sps, total = float(m.group(1)), float(m.group(2))
+            load = max(0.0, total - 2 * sps)
+            steps = max(50, int(TOPUP_HOURS * 3600 / (sps + load / 50)) // 50 * 50)
+            print(f"  {sps:.0f} s per step + {load / 60:.0f} min loading per 50 steps -> {steps} steps for about "
+                  f"{TOPUP_HOURS} h")
         else:
             print(out.stdout[-1500:], out.stderr[-1500:])
             print("  could not measure; using TOPUP_STEPS =", TOPUP_STEPS)

@@ -41,6 +41,18 @@ def row_tokens(seq):
     return seq - 28                                             # Colab cell 1 ROW_TOKENS
 
 
+def render_problems(report, seq, files=None):
+    """Why a rendered data folder does not fit this run: its render_report.json settings differ from Colab cell 6d's
+    for this window, or a NEW_FILES file is missing. files: the file names the folder has (None: not checked).
+    -> list of reasons (empty: it fits)."""
+    st = (report or {}).get("settings") or {}
+    want = {"answer_format": ANSWER_FORMAT, "gold_dropout": GOLD_DROPOUT, "max_tokens": row_tokens(seq)}
+    bad = [f"{k} {st.get(k)!r} (needed {v!r})" for k, v in want.items() if st.get(k) != v]
+    if files is not None:
+        bad += [f"no {f}" for f in T.RENDER_EXTRA if f not in files]
+    return bad
+
+
 def is_copy(path):
     return bool(COPY_RE.search(path.rsplit("/", 1)[-1]))
 
@@ -139,9 +151,13 @@ class Sync:
             if not self.fetch(f"nanochat_base/tokenizer/{name}", Path(root) / "tokenizer" / name):
                 raise SystemExit(f"{name} not found on Drive (nanochat_base/tokenizer)")
 
-    def sft_model(self):
-        """The newest trained model on Drive -> train_data/drive_model (re-downloaded only when Drive's changed).
-        -> (folder on Drive, step) or None."""
+    def sft_model(self, optimizer=True):
+        """The newest trained model on Drive -> train_data/drive_model (re-downloaded only when Drive's changed),
+        with its optimizer state when Drive has it (optimizer: a top-up then continues the momentum buffers).
+        -> (folder on Drive, step) or None.
+        The model is known by its Drive file id: Colab cell 7 moves chatsft_checkpoints to
+        chatsft_checkpoints_before_<date> when a new run starts and Drive keeps the id, so the same model in its new
+        folder is neither downloaded again nor taken for a new one (train_pc.same_drive_model)."""
         folders = ["nanochat_base/chatsft_checkpoints/d8"] + sorted(
             {p.rsplit("/", 1)[0] for p in self.drive.files
              if re.match(r"nanochat_base/chatsft_checkpoints_before_\d+_\d+/d8/", p)}, reverse=True)
@@ -152,9 +168,11 @@ class Sync:
         folder, s = hit
         root = self.td / "drive_model"
         d8 = root / "chatsft_checkpoints" / "d8"
-        ident = f"{folder}/model_{s}.pt:{self.drive.files[f'{folder}/model_{s}.pt'][0]}"
+        fid = self.drive.files[f"{folder}/model_{s}.pt"][0]
+        ident = f"{folder}/model_{s}.pt:{fid}"
         marker = root / ".drive_id"
-        if not (marker.exists() and marker.read_text(encoding="utf-8") == ident and (d8 / f"model_{s}.pt").exists()):
+        old = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+        if not (old.rsplit(":", 1)[-1] == fid and (d8 / f"model_{s}.pt").exists()):
             shutil.rmtree(d8, ignore_errors=True)
             self.log(f"downloading the trained model {folder} step {int(s)} (about 300 MB) ...")
             self.fetch(f"{folder}/model_{s}.pt", d8 / f"model_{s}.pt", refresh=True)
@@ -162,6 +180,11 @@ class Sync:
             marker.write_text(ident, encoding="utf-8")
         else:
             self.log(f"trained model already here: {folder} step {int(s)}")
+            if old != ident:
+                marker.write_text(ident, encoding="utf-8")      # moved on Drive: same model, same id
+        opt = f"{folder}/optim_{s}_rank0.pt"
+        if optimizer and opt in self.drive.files:
+            self.fetch(opt, d8 / f"optim_{s}_rank0.pt")
         self.tokenizer(root)
         if folder != "nanochat_base/chatsft_checkpoints/d8":
             self.log("note: Drive's chatsft_checkpoints has no finished model yet (a Colab run in progress?); "
@@ -184,9 +207,11 @@ class Sync:
         return int(s)
 
     # -- data -----------------------------------------------------------------------------------------------
-    def render_from_drive(self, refresh=False):
+    def render_from_drive(self, refresh=False, seq=4096):
         """Drive sft_render -> train_data/sft_render when Drive has one that differs from the local copy (its
-        render_report.json changes with every render). -> "downloaded" | "up to date" | None (not on Drive)."""
+        render_report.json changes with every render) and fits this run (render_problems: Colab cell 6d's settings
+        for this window, every NEW_FILES file). -> "downloaded" | "up to date" | None (not on Drive, or it does not
+        fit: then the data is rendered here)."""
         rep = "sft_render/render_report.json"
         files = self.listed("sft_render")
         if rep not in self.drive.files or "sft_render/examples.jsonl" not in files:
@@ -194,6 +219,17 @@ class Sync:
         out = self.td / "sft_render"
         tmp_rep = self.td / ".drive_render_report.json"
         self.fetch(rep, tmp_rep, refresh=True)
+        try:
+            report = json.loads(tmp_rep.read_text(encoding="utf-8"))
+        except ValueError:
+            report = {}
+        bad = render_problems(report, seq, {p.rsplit("/", 1)[-1] for p in files})
+        if bad:
+            tmp_rep.unlink()
+            self.log("WARNING: Drive sft_render/ does not fit this run and is not used: " + "; ".join(bad)
+                     + (f" (this PC trains at the {seq} window)" if seq != 4096 else " (a render from an older Colab "
+                        "recipe? run Colab cell 6d again)") + ". The data is rendered here instead (about an hour).")
+            return None
         sha = hashlib.sha1(tmp_rep.read_bytes()).hexdigest()
         marker = out / ".drive_report.sha1"
         if not refresh and marker.exists() and marker.read_text(encoding="utf-8") == sha \
@@ -287,9 +323,13 @@ def add_feedback(rpa, data, log=print):
     if r.returncode != 0 or not rec.exists() or not rec.read_text(encoding="utf-8").strip():
         log("feedback: nothing usable", (r.stdout.strip() or r.stderr.strip())[-300:])
         return 0
+    try:                                                       # the window the data was rendered for
+        seq = json.loads((data / "render_report.json").read_text(encoding="utf-8"))["settings"]["max_tokens"] + 28
+    except (OSError, ValueError, KeyError, TypeError):
+        seq = 4096
     r = subprocess.run([sys.executable, str(rpa / "training" / "render_dataset.py"), str(work / "empty"), str(work / "out"),
-                        "--catalog", str(data / "catalog.jsonl"), "--max-chars", str(row_chars(4096)),
-                        "--max-tokens", str(row_tokens(4096)), "--answer-format", ANSWER_FORMAT,
+                        "--catalog", str(data / "catalog.jsonl"), "--max-chars", str(row_chars(seq)),
+                        "--max-tokens", str(row_tokens(seq)), "--answer-format", ANSWER_FORMAT,
                         "--gold-dropout", str(GOLD_DROPOUT), "--extra", str(rec)], capture_output=True, text=True)
     out = work / "out" / "feedback_records.jsonl"
     if r.returncode != 0 or not out.exists():
@@ -307,16 +347,21 @@ def sync(drive, rpa, mode="topup", refresh=False, seq=4096, log=print, platform=
     s = Sync(drive, rpa, log)
     out = {"copies_ignored": s.copies}
     if mode in ("topup", "install"):
-        out["drive_model"] = s.sft_model()
+        out["drive_model"] = s.sft_model(optimizer=mode == "topup")
     if mode == "full":
         out["base_step"] = s.base_model()
-    how = s.render_from_drive(refresh)
+    how = s.render_from_drive(refresh, seq)
     if how is None:
-        log("Drive has no sft_render/ (or it is incomplete): downloading sft/ and rendering here")
+        log("Drive has no sft_render/ that fits (or it is incomplete): downloading sft/ and rendering here")
         before = s.downloaded
         has_clean = s.raw_data(refresh)
-        mark = Path(rpa) / "train_data" / "sft_render" / ".local_render"
-        if mark.exists() and s.downloaded == before and not refresh:
+        here = Path(rpa) / "train_data" / "sft_render"
+        mark = here / ".local_render"
+        try:
+            here_rep = json.loads((here / "render_report.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            here_rep = {}
+        if mark.exists() and s.downloaded == before and not refresh and not render_problems(here_rep, seq):
             how = "rendered here earlier; sft/ unchanged"
         else:
             render_local(rpa, seq, log, platform, filter_here=not has_clean)
