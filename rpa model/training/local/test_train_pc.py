@@ -577,7 +577,32 @@ def test_copy_tree_when_windows_refuses_the_rename(tmp_path, monkeypatch):
         raise PermissionError(5, "Access is denied", str(a))
     monkeypatch.setattr(setup_pc.os, "replace", refuse)
     monkeypatch.setattr(setup_pc.time, "sleep", lambda s: None)
-    setup_pc.copy_tree(src, dst)
+    setup_pc.copy_tree(src, dst, direct=False)
     assert (dst / "docs" / "a.md").read_text(encoding="utf-8") == "x"
     assert (dst / "README.md").exists()
     assert not (tmp_path / "new" / "platform.copying").exists()
+
+
+def test_windows_copy_is_direct_and_resumes(tmp_path):
+    """Windows: copied straight into place; a copy stopped half-way (marker still there) is finished on the next run,
+    and a leftover .copying folder that cannot be removed does not stop it."""
+    import setup_pc
+    old = tmp_path / "rpa model OLD"
+    (old / "platform" / "docs").mkdir(parents=True)
+    (old / "platform" / "docs" / "a.md").write_text("x", encoding="utf-8")
+    (old / "assistant").mkdir()
+    (old / "assistant" / "app.py").write_text("", encoding="utf-8")
+    new = tmp_path / "rpa model"
+    (new / "platform").mkdir(parents=True)                         # stopped half-way: marker, one file missing
+    (new / "platform" / setup_pc.COPYING_MARK).write_text("", encoding="utf-8")
+    (new / "platform.copying").mkdir()                              # leftover from the old version
+    orig = setup_pc.copy_tree
+    setup_pc.copy_tree = lambda s, d: orig(s, d, direct=True)
+    try:
+        done = setup_pc.adopt_old(new, log=lambda *a: None, olds=[old])
+    finally:
+        setup_pc.copy_tree = orig
+    assert "platform" in done
+    assert (new / "platform" / "docs" / "a.md").exists()
+    assert not (new / "platform" / setup_pc.COPYING_MARK).exists()
+    assert setup_pc.adopt_old(new, log=lambda *a: None, olds=[old]) == [] or "platform" not in setup_pc.adopt_old(new, log=lambda *a: None, olds=[old])
