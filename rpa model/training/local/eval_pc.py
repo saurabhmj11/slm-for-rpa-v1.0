@@ -234,6 +234,18 @@ def compare_main(a):
 
     croot, ccat, cex, cfmt = current_pack(rpa)
     cstep = newest(croot / "chatsft_checkpoints" / "d8")
+    base_label = "installed model"
+    if cstep is None and st.get("start"):
+        # nothing installed yet (a fresh folder): compare with the model this run started from (e.g. Drive's newest),
+        # with the run's own catalog and examples, so a top-up is installed only if it beats where it started
+        sroot = Path(st["start"])
+        sstep = newest(sroot / "chatsft_checkpoints" / "d8")
+        if sstep is not None and (data / "catalog.jsonl").exists():
+            if not (sroot / "tokenizer" / "tokenizer.pkl").exists():
+                shutil.copytree(tok, sroot / "tokenizer", dirs_exist_ok=True)
+            croot, ccat, cfmt, cstep = sroot, data / "catalog.jsonl", "context", sstep
+            cex = data / "examples.jsonl" if (data / "examples.jsonl").exists() else None
+            base_label = "start model"
     old = {}
     if cstep is not None:
         cache_f = rpa / "local_run" / "eval_cache.json"
@@ -242,7 +254,7 @@ def compare_main(a):
         cache = json.loads(cache_f.read_text(encoding="utf-8")) if cache_f.exists() else {}
         old_f = work / "old.json"
         old_f.write_text(json.dumps({k: v for k, v in cache.get(key, {}).items() if k in ids}), encoding="utf-8")
-        old = run_scoring(rpa, "installed model", croot, ccat, cex, cfmt, rows, a.minutes, a.retries, platform, old_f,
+        old = run_scoring(rpa, base_label, croot, ccat, cex, cfmt, rows, a.minutes, a.retries, platform, old_f,
                           a.threads)
         cache[key] = dict(cache.get(key, {}), **old)
         cache_f.parent.mkdir(parents=True, exist_ok=True)
@@ -255,7 +267,7 @@ def compare_main(a):
     print(f"\n== results on the {len(both)} requests both models finished")
     if cstep is not None:
         o_right, o_ver, o_text = summarize(old, both)
-        print(f"  installed model (step {cstep}, {cfmt} prompts): {o_right}/{len(both)} right, {o_ver} verified | {o_text}")
+        print(f"  {base_label} (step {cstep}, {cfmt} prompts): {o_right}/{len(both)} right, {o_ver} verified | {o_text}")
     else:
         o_right = o_ver = -1
         print("  installed model: none")
