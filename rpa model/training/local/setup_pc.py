@@ -117,10 +117,17 @@ def old_folders(rpa):
 
 
 def copy_tree(src, dst):
+    """Copy src to dst. First into dst.copying, then renamed into place (so a stopped copy never looks complete).
+    Windows can refuse that rename for a long time (an antivirus scanning the new files, or the editor watching the
+    folder): then the files are copied straight into dst and the temporary copy is removed when it can be."""
     tmp = Path(str(dst) + ".copying")
     shutil.rmtree(tmp, ignore_errors=True)
     shutil.copytree(src, tmp, ignore=SKIP)
-    replace(tmp, dst)
+    try:
+        replace(tmp, dst, tries=5)
+    except PermissionError:
+        shutil.copytree(tmp, dst, dirs_exist_ok=True)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def replace(src, dst, tries=10):
@@ -150,7 +157,10 @@ def adopt_old(rpa, log=print, olds=None):
             continue
         log(f"copying {item} from the older folder {src.parent if '/' not in item else src.parent.parent} ...")
         if dst.exists():
-            dst.rmdir()
+            shutil.rmtree(dst, ignore_errors=True)     # an empty folder, or what a stopped copy left
+        leftover = Path(str(dst) + ".copying")
+        if leftover.exists():
+            shutil.rmtree(leftover, ignore_errors=True)
         dst.parent.mkdir(parents=True, exist_ok=True)
         copy_tree(src, dst)
         done.append(item)

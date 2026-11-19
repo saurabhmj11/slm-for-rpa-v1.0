@@ -561,3 +561,23 @@ if __name__ == "__main__":
                 print("FAIL", name, ex)
     print("all passed" if not fails else f"{fails} failed")
     sys.exit(1 if fails else 0)
+
+
+def test_copy_tree_when_windows_refuses_the_rename(tmp_path, monkeypatch):
+    """Windows can refuse renaming a just-copied folder (antivirus / editor watching it): copy straight into place."""
+    import setup_pc
+    src = tmp_path / "old" / "platform"
+    (src / "docs").mkdir(parents=True)
+    (src / "docs" / "a.md").write_text("x", encoding="utf-8")
+    (src / "README.md").write_text("y", encoding="utf-8")
+    dst = tmp_path / "new" / "platform"
+    dst.parent.mkdir()
+
+    def refuse(a, b):
+        raise PermissionError(5, "Access is denied", str(a))
+    monkeypatch.setattr(setup_pc.os, "replace", refuse)
+    monkeypatch.setattr(setup_pc.time, "sleep", lambda s: None)
+    setup_pc.copy_tree(src, dst)
+    assert (dst / "docs" / "a.md").read_text(encoding="utf-8") == "x"
+    assert (dst / "README.md").exists()
+    assert not (tmp_path / "new" / "platform.copying").exists()
