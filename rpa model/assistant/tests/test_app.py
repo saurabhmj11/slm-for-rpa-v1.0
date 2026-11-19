@@ -1,3 +1,4 @@
+import os
 """Tests for app.py: starts the server with --fake-model on a free port in a thread and calls every route over HTTP.
 Run: python tests/test_app.py
 
@@ -103,6 +104,16 @@ def test_build_unverified_is_honest():
     assert st == 200
     assert r["verified"] is False and r["flow"] is None and r["problems"]
     assert r["explanation"] is None and r["can_run"] is None
+
+
+def test_build_asks_first_and_sends_the_question():
+    """A request that only points at something the user knows gets a question (shown by the page with an answer box),
+    not a flow and not a checker failure."""
+    st, r = call("POST", "/api/build", {"request": "mail them when its ready", "mode": "smart"})
+    assert st == 200 and not r["verified"] and r["flow"] is None
+    assert isinstance(r.get("question"), str) and r["question"].strip()
+    page = open(os.path.join(os.path.dirname(__file__), "..", "static", "index.html"), encoding="utf-8").read()
+    assert "One question before I build this" in page and "d.question" in page
 
 
 def test_build_in_a_mode():

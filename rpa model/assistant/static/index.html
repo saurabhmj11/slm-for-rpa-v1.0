@@ -590,6 +590,21 @@
           el("ul", null, repairs.map(r => el("li", { text: asText(r) })))));
       }
       out.push(ok);
+    } else if (typeof d.question === "string" && d.question) {
+      // the assistant needs one detail first (a clarifying question, not a failure): ask it, take the answer, build again
+      const ans = el("input", { type: "text", id: "build-answer", maxlength: "200", "aria-label": "Your answer",
+                                placeholder: "Type the missing detail, e.g. the folder, file or email address" });
+      const go = el("button", { type: "button", text: "Answer and build", onclick: () => {
+        const a = ans.value.trim();
+        if (!a) { ans.focus(); return; }
+        buildReq.value = (request + " (" + a + ")").slice(0, 500);
+        $("#build-form").requestSubmit();
+      } });
+      ans.addEventListener("keydown", ev => { if (ev.key === "Enter") { ev.preventDefault(); go.click(); } });
+      out.push(el("div", { class: "box", role: "status" },
+        el("strong", { text: "One question before I build this:" }),
+        el("p", { text: d.question }),
+        el("div", { class: "row" }, ans, go)));
     } else if (d.model_tried === false) {
       out.push(el("div", { class: "box warn", role: "alert" },
         el("strong", { text: "Not built: the model was not tried on this request." }),
