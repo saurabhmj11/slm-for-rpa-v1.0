@@ -97,7 +97,7 @@ SELF_IMPROVE_ROUNDS = 2
 SI_PROMPTS = 20 if PROFILE == "smoke" else 100     # fresh requests per self-improvement round
 SI_SAMPLES = 8
 EVAL_SOURCE = "sft"        # which model the test cell loads: "sft" or "rl"
-SFT_ITERS = 400 if PROFILE == "smoke" else 32000           # counted in MICRO-batches (4 per optimizer step): 32000 = 8000 steps, about 2.5 h on a T4 (was 16000 = 4000 steps)
+SFT_ITERS = 400 if PROFILE == "smoke" else 48000           # counted in MICRO-batches (4 per optimizer step): 48000 = 12000 steps, about 3.5-4.5 h on a T4 (v4: 8000 steps in about 2.5-3 h)
 SFT_STEPS = SFT_ITERS // 4                                   # optimizer steps (--total-batch-size = 4 micro-batches)
 ANSWER_FORMAT = "compact"  # cell 6d: answers carry only what the model decides (no variables list, step ids or descriptions);
                            # the server and cell 8 rebuild the full flow (ooa_format.expand_flow). "full" = the old answers
@@ -111,7 +111,8 @@ SCEN_REPEAT = 15           # whole business processes are long and few: weight t
 RENDER = True              # cell 6d writes the data in the plan-first format with retrieval context (sft_render/); cell 7 trains on it
 NEW_FILES = {"long_train.jsonl": 15, "business2_train.jsonl": 15, "targeted_train.jsonl": 8,   # new files in Drive sft/
              "fix_train.jsonl": 5, "clarify_train.jsonl": 5,                                     # -> times per epoch
-             "beginner_train.jsonl": 4}   # beginner wording: answers start "Clear request: ..." (gen_beginner.py)
+             "beginner_train.jsonl": 4,   # beginner wording: answers start "Clear request: ..." (gen_beginner.py)
+             "v5_train.jsonl": 5}         # v5: business words -> steps, which app / action, natural Hinglish & voice, asking
 ASSISTANT_EVAL = True      # cell 8 also scores the full assistant (real action names only, repair, loop guard), as users get it
 MODE_EVAL = True           # cell 8 also scores the assistant's modes (fast / smart / ultra / auto: serving/ooa_server.MODES)
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only

@@ -46,7 +46,7 @@ def test_chunks_follow_one_run_schedule():
 
 
 def test_render_settings_match_colab():
-    m = re.search(r"NEW_FILES = (\{.*?\})   # beginner", COLAB, re.S)
+    m = re.search(r"NEW_FILES = (\{.*?\})", COLAB, re.S)
     names = set(re.findall(r'"(\w+_train\.jsonl)"', m.group(1)))
     assert names == set(T.RENDER_EXTRA), (names, T.RENDER_EXTRA)
     assert f'ANSWER_FORMAT = "{D.ANSWER_FORMAT}"' in COLAB and f"GOLD_DROPOUT = {D.GOLD_DROPOUT}" in COLAB
@@ -54,7 +54,7 @@ def test_render_settings_match_colab():
     assert "ROW_TOKENS = SFT_SEQ - 28" in COLAB and D.row_tokens(4096) == 4068
     assert f"--cap {D.FILTER_CAP}" in COLAB
     assert f'NANOCHAT_COMMIT = "{P.NANOCHAT_COMMIT}"' in COLAB
-    assert "SFT_ITERS = 400 if PROFILE == \"smoke\" else 32000" in COLAB and P.FULL_STEPS == 32000 // 4
+    assert "SFT_ITERS = 400 if PROFILE == \"smoke\" else 48000" in COLAB and P.FULL_STEPS == 48000 // 4
     assert "SMOLTALK_ROWS = 3000" in COLAB and P.SMOLTALK_ROWS == 3000
     assert P.TOKENS_PER_STEP == 4096 * 2 * 4                        # SFT_SEQ x SFT_DEVICE_BATCH x 4
 

@@ -28,7 +28,7 @@ same data (`sft_render`: plan-first answers, compact flows, gold dropout, beginn
 
 | `MODE` (cell 1) | What it does | Time |
 |---|---|---|
-| `"full"` (default with an NVIDIA GPU) | **the Colab run**: 8000 steps at the 4096 window from the pretrained **base** model | estimated 2-3 h on an RTX 3060/4060 (the Colab T4 takes about 2.5 h); a CPU would need weeks, so it is not offered there |
+| `"full"` (default with an NVIDIA GPU) | **the Colab run**: 12000 steps at the 4096 window from the pretrained **base** model | estimated 3-4.5 h on an RTX 3060/4060 (the Colab T4 takes about 3.5-4.5 h); a CPU would need weeks, so it is not offered there |
 | `"topup"` (default without a GPU) | **continues the newest trained model** (Drive's, or this PC's own when it already grew from it) for `TOPUP_STEPS` steps on the same data, mostly the beginner and long business-process rows | 300 steps: about 5.5-9 h on 4 CPU cores (measured on a 4-core test machine at the 4096 window: 67 s per step at low priority, 55 s with all cores; slower PCs up to about 100 s) |
 | `"install"` | no training: tests Drive's newest model against this PC's and installs it if it is better | the test only (cell 6) |
 
@@ -58,7 +58,7 @@ DRIVE_FOLDER_ID = "{FOLDER_ID}"     # Google Drive folder ooa-nanochat (shared a
 MODE = "auto"              # "auto": "full" with an NVIDIA GPU, "topup" without; or "full", "topup", "install"
 TOPUP_STEPS = 300          # top-up length in steps of 32,768 tokens (4 CPU cores: about 5.5-9 h)
 TOPUP_HOURS = 0            # > 0: measure this PC's speed first (about 5 min) and size the top-up to this many hours
-FULL_STEPS = 8000          # the Colab run (SFT_ITERS 32000 micro-batches = 8000 steps)
+FULL_STEPS = 12000         # the Colab run (SFT_ITERS 48000 micro-batches = 12000 steps)
 FULL_CHUNKS = 1            # 1 = one run exactly as Colab cell 7 (a stop means starting again); e.g. 8 = saved every
                            # 1000 steps and resumable, the same learning-rate schedule (each chunk reloads the data)
 SFT_SEQ = 4096             # training window, as Colab; a CPU PC with less than 10 GB RAM uses 2048 (cell 2)
@@ -232,7 +232,7 @@ if MODE in ("long", "refine", "curriculum", "big"):
     raise SystemExit(f'MODE "{MODE}" was removed: it trained the old plain-prompt format and would undo the v4 model. '
                      'Use "topup" (CPU) or "full" (GPU).')
 if MODE_NOW == "full" and not CUDA:
-    raise SystemExit('MODE "full" needs an NVIDIA GPU (8000 steps; weeks on a CPU). Use MODE = "topup" on this PC.')
+    raise SystemExit('MODE "full" needs an NVIDIA GPU (12000 steps; weeks on a CPU). Use MODE = "topup" on this PC.')
 try:
     import psutil
     RAM_GB = psutil.virtual_memory().total / 2**30

@@ -1,6 +1,6 @@
 """Train the OOA model on this PC with the Colab v4 recipe (cell 7), in saved chunks that resume after any stop.
 
-    python train_pc.py --mode full  --data DIR   the Colab run: 8000 steps at 4096 from the pretrained BASE model
+    python train_pc.py --mode full  --data DIR   the Colab run: 12000 steps at 4096 from the pretrained BASE model
                                                  (NVIDIA GPU: a few hours; on a CPU it would take weeks)
     python train_pc.py --mode topup --data DIR   continue the newest SFT model for a few hundred steps (CPU: a night)
     ... --check                                  only show what would be used
@@ -40,7 +40,7 @@ import sft_setup as T                                          # noqa: E402  (on
 
 NANOCHAT_COMMIT = "92d63d4e8bb4df75c3b71618f31ddde2378b2bcd"   # the nanochat version the patch is written against
 TOKENS_PER_STEP = 32768          # Colab: SFT_SEQ 4096 x device batch 2 x 4 micro-batches; every mode keeps it
-FULL_STEPS = 8000                # Colab SFT_ITERS 32000 micro-batches = 8000 optimizer steps
+FULL_STEPS = 12000               # Colab SFT_ITERS 48000 micro-batches = 12000 optimizer steps
 FULL_LR = 0.8                    # Colab: nanochat's default --init-lr-frac
 TOPUP_LR = 0.3                   # a top-up only adjusts an already trained model
 TOPUP_STEPS = 300                # measured on a 4-core CPU at the 4096 window, no torch.compile: 67 s per step at low
@@ -410,7 +410,7 @@ def main(argv=None):
     if not (data / "examples.jsonl").exists():
         problems.append(f"{data} is not rendered data (no examples.jsonl): run the data cell (data_pc.py) first")
     if full and not gpu and not (a.allow_cpu_full or a.measure):
-        problems.append("full training needs an NVIDIA GPU (8000 steps; a CPU would take weeks): use --mode topup")
+        problems.append("full training needs an NVIDIA GPU (12000 steps; a CPU would take weeks): use --mode topup")
     if gpu and cap and cap < (7, 5) and not a.no_compile:
         problems.append(f"GPU {dev_name} is too old for torch.compile: add --no-compile")
     if state and not seq_given:
