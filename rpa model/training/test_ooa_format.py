@@ -742,3 +742,12 @@ if __name__ == "__main__":
                 print("FAIL", name, type(e).__name__, e)
     print("ALL PASS" if not fails else f"{fails} FAILED")
     sys.exit(1 if fails else 0)
+
+
+def test_plan_coverage_ignores_ids_that_are_not_real_actions():
+    flow = {"steps": [{"id": "s1", "action": "ooa.folder/create", "args": {"path": "C:/x"}}]}
+    plan = ["1. Make the folder (ooa.folder/create_symbolic)", "2. Make it (ooa.folder/create)"]
+    cat = {"ooa.folder/create": {}, "ooa.folder/create_symbolic_link": {}}
+    assert F.plan_coverage(plan, flow, cat) == []                       # a garbled id does not fail the flow
+    assert F.plan_coverage(["1. Zip it (ooa.file/zip)"], flow, {"ooa.file/zip": {}}) == ["ooa.file/zip"]
+    assert F.plan_coverage(plan, flow) == ["ooa.folder/create_symbolic"]   # without a catalog: as before

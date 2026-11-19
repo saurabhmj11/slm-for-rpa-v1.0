@@ -359,7 +359,7 @@ class Router:
             flow = {**flow, "variables": list(flow.get("variables", [])) + extra}   # variables already in the user's open agent
         flow, notes = RP.repair(flow, self.cat)
         problems = R.problems(json.dumps(flow, separators=(",", ":"), ensure_ascii=False))
-        problems += [f"The plan names {a} but no step of the flow uses it." for a in F.plan_coverage(plan, flow)]
+        problems += [f"The plan names {a} but no step of the flow uses it." for a in F.plan_coverage(plan, flow, self.cat)]
         if problems:
             return None, problems
         # the platform writes variables $name$ (Studio saves them so, and only $name$ is replaced inside text)

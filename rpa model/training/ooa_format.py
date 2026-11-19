@@ -804,10 +804,13 @@ def plan_actions(plan):
     return [i["action"] for i in plan_items(plan) if i["action"]]
 
 
-def plan_coverage(plan, flow):
-    """Action ids the plan names that no step of the flow uses (empty: the flow covers the plan)."""
+def plan_coverage(plan, flow, catalog=None):
+    """Action ids the plan names that no step of the flow uses (empty: the flow covers the plan). With a catalog,
+    ids that are not real actions are ignored: a garbled name in the plan text (e.g. "ooa.folder/create_symbolic")
+    says nothing about whether the flow, whose action names the catalog lock keeps real, does the job."""
     have = set(actions_of(flow))
-    return [a for a in dict.fromkeys(plan_actions(plan)) if a not in have]
+    real = None if catalog is None else (catalog if isinstance(catalog, (dict, set)) else set(catalog))
+    return [a for a in dict.fromkeys(plan_actions(plan)) if a not in have and (real is None or a in real)]
 
 
 def plan_groups(plan):
