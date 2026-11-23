@@ -31,6 +31,7 @@ same data (`sft_render`: plan-first answers, compact flows, gold dropout, beginn
 | `"full"` (default with an NVIDIA GPU) | **the Colab run**: 12000 steps at the 4096 window from the pretrained **base** model | estimated 3-4.5 h on an RTX 3060/4060 (the Colab T4 takes about 3.5-4.5 h); a CPU would need weeks, so it is not offered there |
 | `"topup"` (default without a GPU) | **continues the newest trained model** (Drive's, or this PC's own when it already grew from it) for `TOPUP_STEPS` steps on the same data, mostly the beginner and long business-process rows | 300 steps: about 5.5-9 h on 4 CPU cores (measured on a 4-core test machine at the 4096 window: 67 s per step at low priority, 55 s with all cores; slower PCs up to about 100 s) |
 | `"install"` | no training: tests Drive's newest model against this PC's and installs it if it is better | the test only (cell 6) |
+| `"rl"` (NVIDIA GPU only) | **reinforcement learning** on the newest trained model, as Colab cell 9: the model writes 8 answers per fresh request, the platform checker scores them (`training/rl_setup.py`), better answers are reinforced; then cell 6 tests it and installs it only if it is better. Use it after a finished SFT model (v5) is installed or on Drive | `RL_STEPS` 200: estimated about 6 h on an RTX 3060/4060 class GPU (about a T4; range 4-13 h); saved every 25 steps, resumable |
 
 Training is saved in chunks (top-up: every 50 steps; full: one run like Colab, or `FULL_CHUNKS` pieces): after a stop,
 restart or crash run cells 1-5 again and it continues from the last saved chunk. On a CPU it runs at low priority with
@@ -55,7 +56,8 @@ copies the platform files, the installed model, the downloads and your feedback 
 code(f'''
 #@title 1. Settings
 DRIVE_FOLDER_ID = "{FOLDER_ID}"     # Google Drive folder ooa-nanochat (shared as "anyone with the link")
-MODE = "auto"              # "auto": "full" with an NVIDIA GPU, "topup" without; or "full", "topup", "install"
+MODE = "auto"              # "auto": "full" with an NVIDIA GPU, "topup" without; or "full", "topup", "install", "rl"
+RL_STEPS = 200             # MODE "rl" (GPU): RL steps of 8 requests x 8 answers (about 3 h per 100; saved every 25)
 TOPUP_STEPS = 300          # top-up length in steps of 32,768 tokens (4 CPU cores: about 5.5-9 h)
 TOPUP_HOURS = 0            # > 0: measure this PC's speed first (about 5 min) and size the top-up to this many hours
 FULL_STEPS = 12000         # the Colab run (SFT_ITERS 48000 micro-batches = 12000 steps)
@@ -230,7 +232,9 @@ if _rc != 0:
     raise SystemExit("PyTorch does not load:\\n" + err)
 print("PyTorch", _out.strip())
 CUDA = GPU and _out.strip().endswith("True")
-MODE_NOW = MODE if MODE in ("full", "topup", "install") else ("full" if CUDA else "topup")
+MODE_NOW = MODE if MODE in ("full", "topup", "install", "rl") else ("full" if CUDA else "topup")
+if MODE_NOW == "rl" and not CUDA:
+    raise SystemExit('MODE "rl" needs an NVIDIA GPU (each step writes 64 answers: about an hour per step on a CPU).')
 if MODE in ("long", "refine", "curriculum", "big"):
     raise SystemExit(f'MODE "{MODE}" was removed: it trained the old plain-prompt format and would undo the v4 model. '
                      'Use "topup" (CPU) or "full" (GPU).')
@@ -269,7 +273,7 @@ importlib.reload(data_pc)
 assert DRIVE_FOLDER_ID, "set DRIVE_FOLDER_ID in cell 1"
 DRIVE = data_pc.GdownDrive(DRIVE_FOLDER_ID)
 print(len(DRIVE.files), "files on Drive")
-GOT = data_pc.sync(DRIVE, ROOT, MODE_NOW, refresh=REFRESH_DATA, seq=SEQ)
+GOT = data_pc.sync(DRIVE, ROOT, "install" if MODE_NOW == "rl" else MODE_NOW, refresh=REFRESH_DATA, seq=SEQ)  # rl: Drive's model + data
 DATA = Path(GOT["data"])
 # the assistant needs a tokenizer even before the first install
 if not (ROOT / "nanochat_base" / "tokenizer" / "tokenizer.pkl").exists():
@@ -282,7 +286,10 @@ code('''
 #@title 4. Check everything is in place (and size the top-up)
 TRAIN = [sys.executable, "-u", str(LOCAL / "train_pc.py"), "--rpa", str(ROOT), "--mode", MODE_NOW, "--data", str(DATA),
          "--seq", str(SEQ)]
-if MODE_NOW == "full":
+if MODE_NOW == "rl":           # RL (training/local/rl_pc.py, the Colab cell 9 recipe) on the newest trained model
+    TRAIN = [sys.executable, "-u", str(LOCAL / "rl_pc.py"), "--rpa", str(ROOT), "--data", str(DATA),
+             "--steps", str(RL_STEPS)]
+elif MODE_NOW == "full":
     TRAIN += ["--steps", str(FULL_STEPS), "--chunks", str(FULL_CHUNKS)]
 elif MODE_NOW == "topup":
     steps = TOPUP_STEPS

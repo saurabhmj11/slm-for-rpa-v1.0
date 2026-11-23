@@ -12,6 +12,15 @@ files = {
     "gen_flows.py": (H / "gen_flows.py").read_text(encoding="utf-8"),
     "ooa_reward.py": (H / "ooa_reward.py").read_text(encoding="utf-8"),
     "ooa_rl_task.py": (H / "ooa_rl_task.py").read_text(encoding="utf-8"),
+    "rl_setup.py": (H / "rl_setup.py").read_text(encoding="utf-8"),
+    "gen_targeted.py": (H / "gen_targeted.py").read_text(encoding="utf-8"),
+    "gen_long.py": (H / "gen_long.py").read_text(encoding="utf-8"),
+    "gen_clarify.py": (H / "gen_clarify.py").read_text(encoding="utf-8"),
+    "gen_beginner.py": (H / "gen_beginner.py").read_text(encoding="utf-8"),
+    "eval/beginner_requests.jsonl": (H.parent / "eval/beginner_requests.jsonl").read_text(encoding="utf-8"),
+    "eval/plain_requests.jsonl": (H.parent / "eval/plain_requests.jsonl").read_text(encoding="utf-8"),
+    "eval/plain_requests_2.jsonl": (H.parent / "eval/plain_requests_2.jsonl").read_text(encoding="utf-8"),
+    "eval/plain_requests_3.jsonl": (H.parent / "eval/plain_requests_3.jsonl").read_text(encoding="utf-8"),
     "ooa_self_improve.py": (H / "ooa_self_improve.py").read_text(encoding="utf-8"),
     "ingest_feedback.py": (H / "ingest_feedback.py").read_text(encoding="utf-8"),
     "autoresearch/constants.py": (H / "autoresearch/constants.py").read_text(encoding="utf-8"),
@@ -88,11 +97,21 @@ FLOW_REPEAT = 5            # real flows repeated per pass; was 15, which made th
 SYNTH_TRAIN = 1500 if PROFILE == "smoke" else 30000   # generated flows (no LLM), see gen_flows.py
 SYNTH_EVAL = 20            # unseen generated flows scored by exact action sequence
 SYNTH_PATTERN = 2000 if PROFILE == "smoke" else 12000   # long, multi-toolkit flows following real-flow patterns (gen_flows.real_patterns)
-# Reinforcement layer (after SFT)
-RL_PROMPTS = 60 if PROFILE == "smoke" else 400     # requests for RL; each gets RL_SAMPLES answers scored by the verifier
-RL_SAMPLES = 8
-RL_EXAMPLES_PER_STEP = 8
-RL_EVERY = 20 if PROFILE == "smoke" else 25        # evaluate and save every N RL steps
+# Reinforcement layer (cell 9: RL with the platform checker as the reward, in the current plan + compact-flow format)
+RL_V5 = False              # False until the v5 SFT model (cell 7) has finished and cell 8 has scored it. Then set True and
+                           # run cells 9, 9b and 8: RL continues that SFT model (chatrl_checkpoints) and cell 8 tests the RL
+                           # model; keep it only if cell 8 scores it better than the SFT model
+RL_STEPS = 20 if PROFILE == "smoke" else 200       # optimizer steps: estimated about 3 h per 100 steps on a T4 (range
+                           # 2-6.5 h; cell 9 prints it), saved every RL_EVERY steps and resumed after a disconnect
+RL_PROMPTS = 60 if PROFILE == "smoke" else 2400    # fresh requests with a gold answer (never in SFT data or tests)
+RL_SAMPLES = 8             # answers per request, scored by the checker; the group's mean is the baseline
+RL_EXAMPLES_PER_STEP = 2 if PROFILE == "smoke" else 8   # requests per optimizer step
+RL_DEVICE_BATCH = 2        # answers per training pass (2 x 4096 tokens, as SFT); 1 if the T4 runs out of memory
+RL_MAX_NEW = 1536          # new tokens per answer at most (the window's rest when less): the longest gold answers ~1,100
+RL_EVERY = 10 if PROFILE == "smoke" else 25        # evaluate on the held-out RL requests and save every N steps
+RL_LR_FRAC = 0.02          # learning rate as a share of nanochat's base rates (its RL default 0.05 moves a 75M model fast)
+RL_SEED = 1123             # generator seed of the RL requests (the SFT data used 1-41)
+REBUILD_RL_DATA = False    # True: make the RL requests again (they are rebuilt anyway when sft_render changes)
 SELF_IMPROVE_ROUNDS = 2
 SI_PROMPTS = 20 if PROFILE == "smoke" else 100     # fresh requests per self-improvement round
 SI_SAMPLES = 8
@@ -103,7 +122,7 @@ ANSWER_FORMAT = "compact"  # cell 6d: answers carry only what the model decides 
                            # the server and cell 8 rebuild the full flow (ooa_format.expand_flow). "full" = the old answers
 GOLD_DROPOUT = 0.5         # cell 6d: share of flow rows whose context misses 20-45% of the needed actions (retrieval misses
                            # them at serving too); 0 = the needed actions are always listed (the old data)
-OLD_FORMAT_CELLS = False   # cells 9-13 (RL, self-improvement, autoresearch, whole-assistant demo) still use plain prompts and
+OLD_FORMAT_CELLS = False   # cells 10-13 (self-improvement, autoresearch, whole-assistant demo) still use plain prompts and
                            # plain-JSON answers capped at 1024 tokens: they must not run against a model trained on the new
                            # format, so they are off. True runs them anyway (only for a model trained on the old format)
 CLEAN_DATA = True          # cell 6 runs the strict data filter (sft/ -> sft_clean/) and cell 7 trains on the cleaned data
@@ -591,7 +610,7 @@ print("\\nTry it yourself:")
 ''')
 
 def gated(t):
-    """A cell that runs only when OLD_FORMAT_CELLS is True (cell 1): cells 9-13 still send plain prompts and read plain
+    """A cell that runs only when OLD_FORMAT_CELLS is True (cell 1): cells 10-13 still send plain prompts and read plain
     JSON answers capped at 1024 tokens, so against a model trained on the context + plan (+ compact) format they would
     score and train on the wrong thing. Off by default, with a clear note."""
     lines = t.strip("\n").splitlines()
@@ -606,7 +625,7 @@ def gated(t):
 
 
 import colab_rl_cells
-colab_rl_cells.build(md, gated)
+colab_rl_cells.build(md, code, gated)
 
 import base64, zlib
 _frozen = {n: (H / "autoresearch/frozen" / n).read_text(encoding="utf-8") for n in ("frozen_eval.jsonl", "frozen_catalog.jsonl", "frozen_eval.sha256")}
@@ -621,8 +640,9 @@ md("""
 - Checkpoints: `DRIVE_DIR/nanochat_base/base_checkpoints` (pretrained) and `chatsft_checkpoints` (OOA-trained).
 - Weak results on the held-out test are expected with the seed data. The next lever is more and better dialogues
   (edits, error fixing, missing-input questions), validated with the scorer in `eval/flow_check.py`.
-- Reinforcement layer: cells 9-10 (RL with the verifier as reward; self-improvement rounds). They, autoresearch (12) and the
-  whole-assistant demo (13) still use plain prompts and plain-JSON answers, so they are off (`OLD_FORMAT_CELLS = False`)
+- Reinforcement layer: cell 9 (RL with the platform checker as the reward, in the current format; `RL_V5` in cell 1,
+  off until the v5 SFT model is trained and scored). Self-improvement (10), autoresearch (12) and the whole-assistant
+  demo (13) still use plain prompts and plain-JSON answers, so they are off (`OLD_FORMAT_CELLS = False`)
   for models trained on the context + plan format. The full assistant is tested in cell 8. Feed real usage back with `ingest_feedback.py`.
 - For a stronger base, use `PROFILE = "t4"` and let it run (resume after disconnects), or an A100 on Colab Pro.
 """)

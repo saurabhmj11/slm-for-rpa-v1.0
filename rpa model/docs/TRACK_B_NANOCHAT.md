@@ -62,8 +62,14 @@ All loops are scored by a **verifier**, not a human or an LLM judge: `training/o
 (schema 0.15, actions exist 0.15, required inputs and names 0.10, declared variables and unique ids 0.10, valid JSON 0.20,
 object start 0.05, action sequence vs the gold flow 0.25 with partial credit). Empty flows score <= 0.25, so they cannot
 win. `training/test_reward.py` checks this (run: `python test_reward.py PLATFORM_REPO`).
-- **RL (notebook cell 9):** nanochat's own `chat_rl.py`, patched to use `ooa_rl_task.py`. 8 answers per request;
-  answers above the group average are reinforced (REINFORCE, no KL; as nanochat implements it).
+- **RL (notebook cell 9, `RL_V5` in cell 1; PC notebook MODE `rl`):** nanochat's own `chat_rl.py` from the pinned
+  commit, patched by `training/rl_setup.py` (asserted anchors; the 4096 window the SFT model trained with; max new
+  tokens = what the window leaves; resumable checkpoints with the optimizer) and `ooa_rl_task.py`. The prompts are the
+  served ones (`Router.prompt`: request + retrieval context), the answers are read as served (plan + compact flow,
+  expanded), the reward is the checker on the expanded flow plus gold actions in order, plan coverage, ending on its
+  own, minus repetition / length (`rl_setup.REWARD_DOC`; questions earn only on requests that need one). 8 answers per
+  request; answers above the group average are reinforced (REINFORCE, no KL; as nanochat implements it); a request
+  whose answers all score the same is skipped (no signal). The old plain-prompt RL cell is gone.
 - **Self-improvement rounds (cell 10, `ooa_self_improve.py`):** fresh requests each round, K attempts each; verified wins
   go to `self_improved.jsonl`, failures go to `hard_fixed.jsonl` (with the verified gold flow) and are retried. Then SFT
   retrains from the pretrained base on everything. Progress = pass@k on fresh requests, logged in `selfimprove_log.jsonl`.

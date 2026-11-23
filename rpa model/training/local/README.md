@@ -10,6 +10,7 @@ from top to bottom). It drives the three scripts in this folder, which reuse the
 | `train_pc.py` | Trains with nanochat's `scripts/chat_sft.py` from the pinned commit, patched by `sft_setup.patch_chat_sft` (the 4096 attention-window fix, the mixture planned for the step budget, rows longer than the window skipped, "Training data actually read" at the end), in saved chunks that resume after any stop. |
 | `eval_pc.py` | Scores the new model and the installed one through the full assistant (`serving/ooa_server.Router`: catalog lock, repair, verify, 2 self-corrections) on sets 1-3 (`eval/plain_requests*.jsonl`) and the beginner set (`eval/beginner_requests.jsonl`), like Colab cell 8, and installs the new model only if it is better. |
 | `setup_pc.py` | Notebook cell 2's first-run setup (standard library only): checks the Python (64-bit, 3.10+), copies `platform/`, `nanochat_base/`, `sft/`, `train_data/` and `assistant/assistant_data/` from an older `rpa model` folder next to this one (the code-only update zip has none of them), and puts nanochat at the pinned commit in `rpa model/nanochat`: from the older folder, else `git clone`, else GitHub's zip of the commit (Git is not needed). |
+| `rl_pc.py` | MODE `rl` (NVIDIA GPU): reinforcement learning on the newest trained model, the Colab cell 9 recipe (`training/rl_setup.py`): nanochat's `scripts/chat_rl.py` from the pinned commit, patched and written as `scripts/chat_rl_ooa.py`; fresh requests (never in the training data, never close to a test prompt) with the server's prompts; the platform checker scores every expanded answer. Saved every 25 steps, resumes after any stop; the result goes through `eval_pc.py` like a top-up. |
 | `topup_nightly.bat` | Windows: the top-up every night at 01:30 (continues the run, then tests and installs). |
 | `setup_wsl.sh` | Optional: a Python environment in WSL / Linux, where `torch.compile` works (faster full training on a GPU). |
 
@@ -45,6 +46,11 @@ from top to bottom). It drives the three scripts in this folder, which reuse the
   targeted, fix, clarify, beginner); otherwise (an older render, or a 2048 PC) the data is rendered here.
 - Stopping cell 5 or 6 ends the step with everything it started (on Windows the whole process tree; `train_pc.py`
   also puts the training process in a Windows job that ends with it).
+- **`rl`** (NVIDIA GPU only): RL as Colab cell 9 on the newest trained model (`RL_STEPS` (200) steps of 8 requests x 8
+  answers, at most 1536 new tokens per answer, window 4096). Use it on a finished SFT model (v5), then cell 6 tests
+  it and installs it only if it is better. Estimated about 3 hours per 100 steps on an RTX 3060/4060-class GPU (about a
+  T4; range 2-6.5 h: sampling the answers token by token is most of the time, and requests whose answers all score the
+  same are sampled but skipped). State in `local_run/rl/`.
 - **`install`**: no training; tests Drive's newest model against the installed one and installs it if it is better
   (the quickest way to get a new Colab model onto the PC).
 

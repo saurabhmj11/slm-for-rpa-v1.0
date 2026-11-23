@@ -1,72 +1,99 @@
-"""Notebook cells for the reinforcement layer (imported by make_colab_notebook.py)."""
+"""Notebook cells for the reinforcement layer (imported by make_colab_notebook.py).
+Cell 9 is RL in the CURRENT format (plan-first answers, compact flows, retrieval context: rl_setup.py), switched on by
+RL_V5 in cell 1. Cell 10 (self-improvement) still uses plain prompts and stays behind OLD_FORMAT_CELLS (gated). The old
+plain-format RL cell is gone: it sent plain prompts and read plain JSON capped at 1024 tokens."""
 
 
-def build(md, code):
+def build(md, code, gated):
     md("""
 ## Reinforcement layer: the model learns from the platform's own rules
 
-Two loops, both scored by a **verifier** (`ooa_reward.py`: schema, actions exist, required inputs, declared variables,
-action sequence vs the known-good flow). No human labels and no LLM judge are needed.
+**RL (cell 9, `RL_V5` in cell 1):** nanochat's `chat_rl.py` (pinned commit, patched by `rl_setup.py`) writes
+`RL_SAMPLES` answers per request in the format the model is served with: the same prompt the server builds (request +
+retrieval context, `Router.prompt`), a plan and a compact flow that is expanded like the server does it. The platform
+checker (`ooa_reward.py`) scores every expanded flow; answers above their group's average are reinforced. No human
+labels, no LLM judge. Requests are fresh (new generator seeds, beginner rewordings), never in the SFT data and never
+close to a test prompt. Reward per answer (0-1): rules pass 0.25, gold actions in order 0.25, no extra steps 0.10,
+plan names the gold actions 0.10, plan covered by the flow 0.10, ended on its own 0.10, exact 0.10; minus up to 0.2
+for repetition and 0.1 for rambling; questions earn only on requests that need one (`rl_setup.REWARD_DOC`).
 
-1. **RL (cell 9):** nanochat's `chat_rl.py` writes 8 answers per request; answers the verifier scores above the group
-   average are reinforced. Partial credit gives a gradient even when no answer is perfect.
-2. **Self-improvement rounds (cell 10):** each round the model attempts *fresh* requests. Verified successes are kept as new
-   training data; requests it fails on are kept with the verified correct flow and retried next round. Each round then
-   retrains from the pretrained base on all data so far (never only on its own output, which drifts). The pass rate on
-   fresh requests per round is the progress measure.
+When: after the SFT model (cell 7) has finished and cell 8 has scored it. RL continues that model; cell 9b then points
+cell 8 at the RL model (`EVAL_SOURCE = "rl"`) so both scores can be compared. Keep the RL model only if cell 8 scores
+it better. Checkpoints: `chatrl_checkpoints` (saved every `RL_EVERY` steps; after a disconnect run cells 1, 2 and 9
+again and it continues; a new SFT model starts a new RL run and keeps the old one aside).
 
-Run cell 7 (SFT) once before these. Real user feedback joins later through `ingest_feedback.py`.
+**Self-improvement rounds (cell 10)** still use plain prompts: off with `OLD_FORMAT_CELLS = False`.
 """)
 
     code('''
-#@title 9. Reinforcement learning with the verifier as reward
-import json, os, shutil, sys
-os.environ["OOA_CATALOG"] = f"{DRIVE_DIR}/sft/catalog.jsonl"
-os.environ["OOA_SCHEMA"] = "/content/platform/contracts/flow-schema/flow.v1.json"
-sys.path.insert(0, "/content/ooa")
-import gen_flows as G
-catalog = [json.loads(l) for l in open(os.environ["OOA_CATALOG"], encoding="utf-8")]
-used = set()
-for f in ("synth_train.jsonl", "self_improved.jsonl", "hard_fixed.jsonl"):
-    if os.path.exists(f"{DRIVE_DIR}/sft/{f}"):
-        used |= {json.loads(l)["messages"][1]["content"] for l in open(f"{DRIVE_DIR}/sft/{f}")}
-def rows(n, seed, exclude):
-    out = G.generate(catalog, "/content/platform", n, seed, exclude=exclude)
-    out.sort(key=lambda t: len(t[1]["steps"]))      # short (easy) requests first: a simple curriculum
-    return out
-tr = rows(RL_PROMPTS, 3, used)
-va = rows(40, 4, used | {m for _, _, m in tr})
-for name, data in (("rl_train", tr), ("rl_val", va)):
-    with open(f"{DRIVE_DIR}/sft/{name}.jsonl", "w", encoding="utf-8") as f:
-        for q, _, mini in data:
-            f.write(json.dumps({"messages": [{"role": "user", "content": q}, {"role": "assistant", "content": mini}]}) + "\\n")
-print("RL requests:", len(tr), "train /", len(va), "val")
-
-!cp /content/ooa/ooa_rl_task.py /content/nanochat/tasks/ooa_rl.py
-!cd /content/nanochat && git checkout -q -- scripts/chat_rl.py
-p = "/content/nanochat/scripts/chat_rl.py"
-s = open(p).read()
-for old, new in [
-    ("from tasks.gsm8k import GSM8K", "from tasks.ooa_rl import OOAFlowRL"),
-    ('train_task = GSM8K(subset="main", split="train")', f'train_task = OOAFlowRL("{DRIVE_DIR}/sft/rl_train.jsonl")'),
-    ('val_task = GSM8K(subset="main", split="test")', f'val_task = OOAFlowRL("{DRIVE_DIR}/sft/rl_val.jsonl")'),
-    ("max_completion_tokens=256,", "max_completion_tokens=1024,"),
-]:
-    assert old in s, "chat_rl.py changed upstream, cannot patch: " + old
-    s = s.replace(old, new)
-open(p, "w").write(s)
-shutil.rmtree(os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatrl_checkpoints"), ignore_errors=True)
-!cd /content/nanochat && python -m scripts.chat_rl --num-samples={RL_SAMPLES} --device-batch-size={RL_SAMPLES} \\
-    --examples-per-step={RL_EXAMPLES_PER_STEP} --max-new-tokens=1024 --eval-every={RL_EVERY} --eval-examples=40 \\
-    --save-every={RL_EVERY} --num-epochs=1 --run=dummy
+#@title 9. RL with the platform checker as the reward (current format; switch on with RL_V5 in cell 1)
+import glob, json, os, subprocess, sys, importlib
+if not globals().get("RL_V5", False):
+    print("Skipped (RL_V5 = False in cell 1). Switch it on once the SFT model of cell 7 has finished and cell 8 has "
+          "scored it: RL continues that model (chatrl_checkpoints) and cell 9b points cell 8 at the RL model.")
+else:
+    sys.path[:0] = ["/content/ooa", "/content/ooa/serving"]
+    import rl_setup as _RL
+    importlib.reload(_RL)
+    _RD = f"{DRIVE_DIR}/sft_render"           # the data the SFT model trained on: catalog, example index, context budget
+    if not os.path.exists(f"{_RD}/examples.jsonl"):
+        raise SystemExit("cell 9 needs the plan-first data (sft_render/examples.jsonl, cell 6d) and its SFT model (cell 7)")
+    _SCHEMA = "/content/platform/contracts/flow-schema/flow.v1.json"
+    os.environ.update(OOA_CATALOG=f"{_RD}/catalog.jsonl", OOA_SCHEMA=_SCHEMA, OOA_DIR="/content/ooa")
+    _POOL = f"{DRIVE_DIR}/rl"
+    _sig = {"examples_bytes": os.path.getsize(f"{_RD}/examples.jsonl"), "prompts": RL_PROMPTS, "seed": RL_SEED}
+    _old = json.load(open(f"{_POOL}/rl_pool_report.json")) if os.path.exists(f"{_POOL}/rl_pool_report.json") else {}
+    if REBUILD_RL_DATA or _old.get("sig") != _sig:
+        # fresh requests with a gold answer, never in the SFT data (sft_render rows + example index), never close to a
+        # test prompt (eval/*.jsonl and the generated eval sets of cell 6); prompts built by the server's Router.prompt
+        _train_files = [f for f in glob.glob(f"{_RD}/*.jsonl") if not f.endswith(("/catalog.jsonl", "/examples.jsonl"))]
+        _eval_files = [f"{DRIVE_DIR}/sft/{n}" for n in ("eval.jsonl", "eval_synth.jsonl", "eval_pattern.jsonl")]
+        _rep = _RL.prepare(_POOL, f"{_RD}/catalog.jsonl", _SCHEMA, "/content/platform", f"{_RD}/examples.jsonl",
+                           RL_PROMPTS, train_files=_train_files, eval_files=_eval_files, seed=RL_SEED,
+                           eval_dir="/content/ooa/eval")
+        _rep["sig"] = _sig
+        json.dump(_rep, open(f"{_POOL}/rl_pool_report.json", "w"), indent=1)
+    else:
+        _rep = _old
+    print("RL requests:", _rep["train"], "train /", _rep["val"], "held out | by source:", _rep["sources"],
+          "| dropped as in training / close to a test prompt:", _rep.get("leak_detail"))
+    # chat_rl.py straight from the pinned nanochat, then the patch (it stops when nanochat changed upstream)
+    !cd /content/nanochat && git cat-file -e {NANOCHAT_COMMIT} && git show {NANOCHAT_COMMIT}:scripts/chat_rl.py > scripts/chat_rl.py
+    _p = "/content/nanochat/scripts/chat_rl.py"
+    _s = open(_p).read()
+    _miss = _RL.missing_anchors(_s.replace("\\r\\n", "\\n"))
+    if _miss:
+        raise SystemExit(f"chat_rl.py does not match the pinned nanochat (missing: {_miss}): send this line")
+    open(_p, "w").write(_RL.patch_chat_rl(_s))
+    !cp /content/ooa/ooa_rl_task.py /content/nanochat/tasks/ooa_rl.py
+    _cmd = _RL.rl_command(f"{_POOL}/rl_train.jsonl", f"{_POOL}/rl_val.jsonl", RL_STEPS, samples=RL_SAMPLES,
+                          examples_per_step=RL_EXAMPLES_PER_STEP, device_batch=RL_DEVICE_BATCH, max_new=RL_MAX_NEW,
+                          every=RL_EVERY, eval_examples=_rep["val"], init_lr_frac=RL_LR_FRAC)
+    print(f"RL: {RL_STEPS} steps x {RL_EXAMPLES_PER_STEP} requests x {RL_SAMPLES} answers, window 4096, at most "
+          f"{RL_MAX_NEW} new tokens | estimated {_RL.t4_minutes_per_100_steps(RL_EXAMPLES_PER_STEP, RL_SAMPLES)} min per "
+          f"100 steps on a T4 | saved every {RL_EVERY} steps (resumes after a disconnect)")
+    print(_cmd)
+    !cd /content/nanochat && {_cmd}
+    _log = sorted(glob.glob(os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatrl_checkpoints", "*", "rl_log.jsonl")))
+    if _log:
+        print("\\nHeld-out RL requests per evaluation (reward 0-1 | passes every rule | exact | ended on its own):")
+        for _l in open(_log[-1]):
+            _x = json.loads(_l)
+            if "eval" in _x:
+                _e = _x["eval"]
+                print(f"  step {_x['step']:>4}: reward {_e['reward']:.3f} | valid {_e['valid']:.2f} | solved {_e['solved']:.2f} | ended {_e['ended']:.2f}")
 ''')
 
     code('''
 #@title 9b. Point the test at the RL model, then re-run cell 8
-EVAL_SOURCE = "rl"     # cell 8 prints "evaluating model source: rl". Set back to "sft" to test the SFT model.
+if globals().get("RL_V5", False) and glob.glob(os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatrl_checkpoints", "*", "model_*.pt")):
+    EVAL_SOURCE = "rl"     # cell 8 prints "evaluating model source: rl". Set back to "sft" to test the SFT model.
+else:
+    EVAL_SOURCE = "sft"
+print("cell 8 will test:", EVAL_SOURCE)
 ''')
 
-    code('''
+    gated('''
 #@title 10. Self-improvement rounds: attempt fresh requests, keep verified wins, learn from failures, retrain
 import json, os, shutil
 os.environ["OOA_CATALOG"] = f"{DRIVE_DIR}/sft/catalog.jsonl"
