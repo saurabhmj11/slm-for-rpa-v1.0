@@ -210,7 +210,10 @@ probe = "import torch; print(torch.__version__, torch.cuda.is_available())"
 _rc, _out, _err = capture([sys.executable, "-c", probe])
 if _rc != 0 or (GPU and "True" not in _out):
     idx = "https://download.pytorch.org/whl/cu128" if GPU else "https://download.pytorch.org/whl/cpu"
-    run([sys.executable, "-m", "pip", "install", "--upgrade", "torch", "--index-url", idx])
+    # a CPU-only PyTorch (version "...+cpu") already installed has the same version number as the CUDA build, so pip
+    # would keep it: force the CUDA build when this PC has an NVIDIA GPU
+    run([sys.executable, "-m", "pip", "install", "--upgrade", "torch", "--index-url", idx]
+        + (["--force-reinstall", "--no-deps"] if GPU and "+cpu" in _out else []))
 run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--progress-bar", "off",
      "rustbpe", "tiktoken", "filelock", "jsonschema", "wandb", "psutil", "pyarrow", "numpy", "requests", "gdown>=6"])
 importlib.invalidate_caches()
