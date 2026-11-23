@@ -484,7 +484,7 @@ def test_compact_answers_are_expanded():
     assert code == 200 and out["ooa"]["verified"], out
     # a compact answer that fails the checker: the next attempt sees it expanded as its previous flow
     bad = json.loads(json.dumps(CSV_TO_EXCEL))
-    bad["steps"][0]["args"] = {}
+    bad["steps"][0]["action"] = "ooa.csv/no_such_action"     # (an empty args no longer fails: path is optional now)
     m2 = Scripted(lambda req, p, a: compact_answer(bad if a == 0 else CSV_TO_EXCEL))
     res = router(m2, local_retries=1).run(CSV_REQ)
     assert res["verified"] and len(m2.prompts) == 2, res

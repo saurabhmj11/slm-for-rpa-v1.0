@@ -109,8 +109,8 @@ def test_catalog_basics():
 
 
 def test_action_card():
-    c = K.action_card("ooa.csv/read")
-    assert c and c["id"] == "ooa.csv/read" and c["toolkit"]
+    c = K.action_card("ooa.file/read_text")       # path still required (csv/read can now use an open session instead)
+    assert c and c["id"] == "ooa.file/read_text" and c["toolkit"]
     assert {"id", "name", "toolkit", "description", "notes", "required", "optional", "outputs"} <= set(c)
     assert any(i["name"] == "path" for i in c["required"]), c["required"]
     assert all(set(i) == {"name", "type", "description"} for i in c["required"] + c["optional"] + c["outputs"])
