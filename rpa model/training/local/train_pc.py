@@ -28,8 +28,8 @@ never share a state. The result is the newest chunk; eval_pc.py scores it and in
 Broken weights (nan / inf) never go further: the start model is checked before anything runs (also --check), and a
 broken one is refused with what to use instead (--start-from pc / drive; notebook cell 1 REFINE_FROM), never swapped
 silently. The optimizer state saved with the start model is loaded only when it is finite (optimizer_choice). While a
-chunk trains, the loss and validation lines are watched (follow): a loss that is not a number for NAN_STEPS steps in
-a row, or a validation bpb that is not a number, stops the chunk; nothing of it is saved, the state notes it, and the
+chunk trains, its output is watched (follow): the step's own loss not a number for NAN_STEPS steps in a row
+(chat_sft's guard, sft_setup) or a validation bpb that is not a number stops the chunk; nothing of it is saved, the state notes it, and the
 next try of that chunk starts with a fresh optimizer state when the loaded one may be the cause.
 """
 import argparse
@@ -478,13 +478,15 @@ STEP_RE = re.compile(r"step (\d+) \(([\d.]+)%\) \| loss: ([-+]?(?:nan|inf|[\d.]+
 VAL_RE = re.compile(r"Step (\d+) \| Validation bpb: (\S+)")
 
 
-def follow(p, lf, dts, total_steps, step_offset, watch=None, nan_steps=NAN_STEPS):
-    """Copy the chunk's output to the log; a progress line every 10 steps here (and every line once the loss is not a
-    number); collect seconds per step. NaN watchdog: a loss that is not a number in nan_steps step lines in a row,
-    a validation bpb that is not a number, or chat_sft's own NaN stop (sft_setup NAN_MARK) -> the chunk is ended
-    (nothing of it is saved: chat_sft saves only at its last step) and watch["nan"] says what was seen."""
+def follow(p, lf, dts, total_steps, step_offset, watch=None):
+    """Copy the chunk's output to the log; a progress line every 10 steps here (and the first line whose loss is not
+    a number); collect seconds per step. NaN watchdog: a validation bpb that is not a number, or chat_sft's own NaN
+    stop (sft_setup NAN_MARK: the step's own loss not a number for NAN_STEPS steps in a row) -> the chunk is ended
+    (nothing of it is saved: chat_sft saves only at its last step) and watch["nan"] says what was seen. The loss on
+    the step lines is NOT counted: it is chat_sft's running average, which stays nan for good after one nan step
+    (a float16 run's GradScaler skips such a step and the model stays fine)."""
     watch = {} if watch is None else watch
-    bad = 0
+    shown_nan = False
     for line in p.stdout:
         lf.write(line)
         lf.flush()
@@ -495,14 +497,15 @@ def follow(p, lf, dts, total_steps, step_offset, watch=None, nan_steps=NAN_STEPS
             s, dt = int(m.group(1)), float(m.group(4)) / 1000
             dts.append(dt)
             is_nan = nan_value(m.group(3))
-            bad = bad + 1 if is_nan else 0
-            if s % 10 == 0 or s <= 3 or is_nan:
+            first_nan = is_nan and not shown_nan
+            if s % 10 == 0 or s <= 3 or first_nan:
                 left = (total_steps - step_offset - s) * (sum(dts[-10:]) / len(dts[-10:])) / 3600
                 print(f"   step {step_offset + s}/{total_steps} | loss {m.group(3)} | {dt:.1f} s per step"
                       f" | about {left:.1f} h to go ({time.strftime('%H:%M')})", flush=True)
-            if bad >= nan_steps:
-                why = (f"the loss was not a number ({m.group(3)}) for {bad} steps in a row (from step "
-                       f"{step_offset + s - bad + 1})")
+            if first_nan:
+                shown_nan = True
+                print("   (the loss shown is a running average: one step that was not a number keeps it nan; the "
+                      f"training stops by itself if {NAN_STEPS} steps in a row are nan)", flush=True)
         elif v and nan_value(v.group(2)):
             print("   " + line.rstrip(), flush=True)
             why = (f"Validation bpb is {v.group(2)} at step {step_offset + int(v.group(1))}"
@@ -511,6 +514,10 @@ def follow(p, lf, dts, total_steps, step_offset, watch=None, nan_steps=NAN_STEPS
         elif T.NAN_MARK in line:
             print("   " + line.rstrip(), flush=True)
             why = line.split(":", 1)[-1].strip()
+            for tail in ("Stopped; nothing was saved", "the training went unstable"):   # said in nan_stop()
+                why = why.rstrip(" :.")
+                why = why[:-len(tail)] if why.endswith(tail) else why
+            why = why.rstrip(" :.")
         elif any(k in line for k in ("SFT attention window", "OOA training mixture", "Traceback", "Error",
                                      "Training data actually read", "views", "skipped as longer", "Validation bpb",
                                      "optimizer")):
@@ -541,9 +548,9 @@ def nan_stop(state, state_f, k, why, loaded, log):
     else:
         nxt = "Send"
     raise SystemExit(
-        f"\nSTOPPED: chunk {k + 1} went unstable: {why}. Nothing of this chunk was saved (the chunks before it are "
-        f"kept, and the installed model is not touched). {nxt} the lines above (the 'step ... | loss' lines and the "
-        f"'Validation bpb' lines) and the end of {log}.")
+        f"\nSTOPPED: chunk {k + 1} went unstable: {why.rstrip(' .')}. Nothing of this chunk was saved (the chunks "
+        f"before it are kept, and the installed model is not touched). {nxt} the lines above (the 'step ... | loss' "
+        f"lines and the 'Validation bpb' lines) and the end of {log}.")
 
 
 def main(argv=None):

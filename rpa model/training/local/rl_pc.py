@@ -36,6 +36,7 @@ EXAMPLES_PER_STEP = 8
 MAX_NEW = 1536
 EVERY = 25
 LR_FRAC = 0.02
+REFUSED = 3                      # exit code: nothing started (a broken / missing start model, missing files)
 
 
 def pinned_chat_rl(nano):
@@ -154,8 +155,10 @@ def main(argv=None):
           f"saved every {a.every} steps")
     for p in problems:
         print("  !", p)
-    if a.check or problems:
+    if a.check:
         return 1 if problems else 0
+    if problems:            # nothing started: running it again will not change that (the notebook says so)
+        return REFUSED
 
     run_dir.mkdir(parents=True, exist_ok=True)
     kill_leftover(run_dir)

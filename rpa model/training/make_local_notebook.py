@@ -421,13 +421,21 @@ if _rl_after == "done":
     print("the refine and its RL run are both trained and tested: nothing left to do here. Cell 7 starts the "
           "assistant (running cells 5 and 6 again would start a new refine).")
 elif MODE_NOW == "refine" and rc == 0 and REFINE_THEN_RL:
-    # RL starts from the newest installed model (the refined one when it was installed above, else the Colab model)
-    print("\\nREFINE_THEN_RL: reinforcement learning on the newest model (about 3 h per 100 steps) ...")
+    # RL starts from the newest installed model (the refined one when it was installed above, else the Colab model).
+    # REFINE_FROM = "pc": always this PC's installed model (a refine from it keeps the PC's old Drive origin, so
+    # "auto" would go back to Drive's model, the one refused as broken); otherwise "auto" (after a refine from Drive's
+    # model was installed, "auto" picks it).
+    _rl_from = "pc" if REFINE_FROM == "pc" else "auto"
+    print(f"\\nREFINE_THEN_RL: reinforcement learning on the newest model (start {_rl_from}; about 3 h per 100 "
+          "steps) ...")
     _rl_rc = stream([sys.executable, "-u", str(LOCAL / "rl_pc.py"), "--rpa", str(ROOT), "--data", str(DATA),
-                     "--steps", str(RL_STEPS)] + (["--restart"] if RESTART_TRAINING else []))
+                     "--steps", str(RL_STEPS), "--start-from", _rl_from] + (["--restart"] if RESTART_TRAINING else []))
     if _rl_rc == 0:
         rc = stream([sys.executable, "-u", str(LOCAL / "eval_pc.py"), "--rpa", str(ROOT), "--data", str(DATA),
                      "--run-state", str(ROOT / "local_run" / "rl" / "state.json")] + _EV_OPTS)
+    elif _rl_rc == 3:       # rl_pc.REFUSED: nothing started
+        print("RL did NOT start: the lines marked ! above say why. Running this cell again will not change that: fix "
+              "what they name first (a setting in cell 1: change it, run cell 1, then this cell again).")
     else:
         print("RL stopped: run this cell again to continue it (saved every 25 steps; cells 1-4 first after a restart "
               "are fine, cell 5 then skips the finished refine)")

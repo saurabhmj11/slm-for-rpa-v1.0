@@ -90,10 +90,14 @@ A run that goes unstable leaves weights that are not numbers (nan / inf). Nothin
   itself. A run in progress whose saved chunk is broken (from an older version) starts over.
 - The optimizer state saved with the start model is loaded only when it is finite (`optimizer_choice`; `--optimizer
   auto|load|fresh`); after a chunk went nan with it loaded, the next try starts with a fresh one.
-- While a chunk trains, a loss that is nan for 5 steps in a row or a nan validation stops it (train_pc `follow`, and
-  the same guard inside chat_sft from `sft_setup.patch_chat_sft`, exit code 86): nothing of it is saved, the state
-  notes it (`nan_stops`), and a STOPPED line says what to send. A saved chunk is checked again before it counts.
-- `eval_pc.py` never scores or installs a broken model (exit code 2); `rl_pc.py` refuses a broken start model.
+- While a chunk trains, the step's own loss nan for 5 steps in a row or a nan validation stops it (the guard inside
+  chat_sft from `sft_setup.patch_chat_sft`, exit code 86; train_pc `follow` also ends the chunk on a nan validation
+  line). The loss on the step lines is a running average that stays nan after one bad step, so it is shown, never
+  counted. Nothing of the chunk is saved, the state notes it (`nan_stops`), and a STOPPED line says what to send. A
+  saved chunk is checked again before it counts.
+- `eval_pc.py` never scores or installs a broken model (exit code 2); `rl_pc.py` refuses a broken start model (exit
+  code 3: nothing started; notebook cell 6 then says rerunning will not help). `REFINE_THEN_RL` runs RL on this PC's
+  model when `REFINE_FROM = "pc"`, else on the newest (`auto`).
 - Colab cell 7 checks the model it saved: a broken one is moved to `chatsft_checkpoints_broken_<date>` (so the PC
   never downloads it as the newest), and cell 8 refuses to test one.
 

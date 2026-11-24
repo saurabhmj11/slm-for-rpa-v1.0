@@ -837,6 +837,8 @@ def test_notebook_refine_mode():
     assert 'data_pc.choose_mode("auto", CUDA, DRIVE.files, ROOT)' in code[2]
     assert '"--steps", str(REFINE_STEPS), "--chunks", str(REFINE_CHUNKS)' in code[3]
     assert '"rl_pc.py"' in code[5] and "REFINE_THEN_RL" in code[5]
+    assert '"--start-from", _rl_from' in code[5] and '_rl_from = "pc" if REFINE_FROM == "pc" else "auto"' in code[5]
+    assert "_rl_rc == 3" in code[5] and "will not change that" in code[5]
     assert "After a Colab run" in text and '`"refine"`' in text
 
 
@@ -1057,17 +1059,21 @@ def step_line(i, loss):
 
 def test_follow_nan_watchdog(capsys):
     import io
-    # the incident: loss nan from step 1 (the running average stays nan); the user saw no step lines at all
-    p = FakeProc(["Step 00000 | Validation bpb: 1.2345\n"] + [step_line(i, "nan") for i in range(1, 300)])
-    watch = {}
-    rc = P.follow(p, io.StringIO(), [], 1500, 250, watch)
-    out = capsys.readouterr().out
-    assert p.terminated and rc != 0 and "loss nan" in out and "step 251/1500" in out
-    assert watch["nan"] == "the loss was not a number (nan) for 5 steps in a row (from step 251)", watch
-    # 4 bad steps then finite ones: no stop (a passing inf in a float16 run is skipped by GradScaler)
-    p = FakeProc([step_line(i, "inf" if i < 5 else "2.500000") for i in range(1, 12)])
+    # the incident: loss nan from step 1; the user saw no step lines at all. The printed loss is a running average
+    # (stays nan for good after one nan step), so it is shown but never counted: chat_sft's own guard counts the
+    # step's own loss and stops (its NAN_MARK line below)
+    p = FakeProc(["Step 00000 | Validation bpb: 1.2345\n"] + [step_line(i, "nan") for i in range(1, 30)])
     watch, dts = {}, []
-    assert P.follow(p, io.StringIO(), dts, 1500, 0, watch) == 0 and not watch and not p.terminated and len(dts) == 11
+    rc = P.follow(p, io.StringIO(), dts, 1500, 250, watch)
+    out = capsys.readouterr().out
+    assert rc == 0 and not watch and not p.terminated and len(dts) == 29
+    assert "loss nan" in out and "step 251/1500" in out and "running average" in out
+    assert out.count("loss nan") == 5, out          # steps 1-3 (shown always), 10, 20: not every nan line
+    # the reviewer's case: a float16 run where GradScaler skipped one nan step; the average stays nan: no stop
+    p = FakeProc([step_line(i, "2.500000" if i < 3 else "nan") for i in range(1, 20)])
+    watch = {}
+    assert P.follow(p, io.StringIO(), [], 1500, 0, watch) == 0 and not watch and not p.terminated
+    capsys.readouterr()
     # validation nan before any step: the start model gives nan
     p = FakeProc(["Step 00000 | Validation bpb: nan\n", step_line(1, "2.0")])
     watch = {}
@@ -1078,7 +1084,24 @@ def test_follow_nan_watchdog(capsys):
     p = FakeProc([f"{T.NAN_MARK}: the training loss was not a number (nan/inf) for 5 steps in a row (step 7): x\n"])
     watch = {}
     P.follow(p, io.StringIO(), [], 1500, 0, watch)
-    assert "for 5 steps in a row (step 7)" in watch["nan"]
+    assert "for 5 steps in a row (step 7)" in watch["nan"] and "Stopped" not in watch["nan"], watch
+    st = {}
+    with tempfile.TemporaryDirectory() as t:
+        import pytest
+        with pytest.raises(SystemExit) as ex:
+            P.nan_stop(st, Path(t) / "state.json", 0, watch["nan"], False, "train.log")
+    msg = str(ex.value)
+    assert "(step 7): x. Nothing of this chunk was saved" in msg and "x.." not in msg, msg
+    p = FakeProc([f"{T.NAN_MARK}: the training loss was not a number (nan/inf) for 5 steps in a row (step 7): "
+                  "the training went unstable. Stopped; nothing was saved.\n"])
+    watch = {}
+    P.follow(p, io.StringIO(), [], 1500, 0, watch)
+    assert watch["nan"] == "the training loss was not a number (nan/inf) for 5 steps in a row (step 7)", watch
+    p = FakeProc([f"{T.NAN_MARK}: Validation bpb is not a number (nan) at step 0: the start model is broken before "
+                  "any training step. Stopped; nothing was saved.\n"])
+    watch = {}
+    P.follow(p, io.StringIO(), [], 1500, 0, watch)
+    assert watch["nan"].endswith("the start model is broken before any training step"), watch
     # normal lines: parsed as before
     p = FakeProc([step_line(10, "1.234567"), "Step 00100 | Validation bpb: 0.9876\n"])
     watch, dts = {}, []
@@ -1186,6 +1209,16 @@ def test_rl_refuses_a_broken_start_model(monkeypatch, capsys):
         assert R.main(["--rpa", str(rpa), "--data", str(data), "--check", "--start-from", "drive"]) == 1
         out = capsys.readouterr().out
         assert "has broken weights (nan)" in out and 'to run RL on it instead, set REFINE_FROM = "pc"' in out
+        # REFINE_THEN_RL after a refine from the PC model (its Drive origin is the old Drive model's): "auto" goes back
+        # to Drive's broken model, so cell 6 passes "pc"; a refusal has its own exit code (rerunning will not help)
+        (rpa / "train_data/drive_model/.drive_id").write_text("NEWID", encoding="utf-8")
+        (rpa / "nanochat_base/chatsft_checkpoints/d8/meta_008300.json").write_text(
+            json.dumps({"ooa_local": {"drive_origin": "OLDID"}}), encoding="utf-8")
+        assert R.main(["--rpa", str(rpa), "--data", str(data), "--allow-cpu"]) == R.REFUSED == 3
+        assert "has broken weights (nan)" in capsys.readouterr().out
+        R.main(["--rpa", str(rpa), "--data", str(data), "--check", "--start-from", "pc"])
+        out = capsys.readouterr().out
+        assert "broken weights" not in out and "nanochat_base step 8300" in out, out
 
 
 def test_notebooks_check_weights():
