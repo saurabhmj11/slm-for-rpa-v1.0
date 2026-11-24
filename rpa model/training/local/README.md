@@ -22,14 +22,17 @@ from top to bottom). It drives the three scripts in this folder, which reuse the
 - **`refine`** (NVIDIA GPU; the step after a Colab run): continues the **finished Colab model** (v5; or this PC's own
   when it already grew from that Drive model, `train_pc.topup_start`) for `REFINE_STEPS` (1500, 1/8 of the Colab
   run) steps, saved every 250 steps (`REFINE_CHUNKS` 6, resumable), learning rate 0.35 (the Colab run peaked at 0.8
-  and ended at 0: restarting at 0.8 would shake what it learned; 0.35 with its own warmdown lets the new rows settle).
+  and ended at 0: restarting at 0.8 would shake what it learned; 0.35 with its own warmdown lets the new rows settle). Every chunk passes Colab's base rates (embedding 0.3,
+  unembedding 0.008, matrix 0.02, from the base model's meta when it is on the PC) explicitly: a saved SFT checkpoint
+  stores them as None and chat_sft would otherwise fall back to unembedding 0.004.
   Mixture `sft_setup.REFINE_SHARES`: v5 14%, session 8% (the v5 model never saw it), beginner 20%, long 13%,
   business2 8%, targeted 6%, clarify 5%, fix 5%, feedback 3% when there is some; `REFINE_REPLAY` 18% replays every
   other file in the full mix's proportions. State in `local_run/refine/` (never shared with a top-up or full run).
   Estimated 40-65 minutes on a T4-class GPU (RTX 3060/4060; the Colab T4 with `torch.compile` trains 12000 steps in
   3.5-4.5 h, so 1500 steps take about 30-35 min there), plus 1-2 minutes of loading per chunk. Cell 6 then installs
   it only if it beats the Colab model it started from (and the model this PC had); if it does not, the Colab model is
-  installed when it beats the PC's older one. `REFINE_THEN_RL = True` runs RL (MODE `rl`) and its test right after.
+  installed when it beats the PC's older one. `REFINE_THEN_RL = True` runs RL (MODE `rl`) and its test right after. If RL stops, run cell 6 again:
+  it continues RL without testing the refine again (cell 5 skips the finished refine meanwhile).
 - New files Colab's render lacks (e.g. `session_train.jsonl`, made after the v5 run): every mode but `full` takes them
   from Drive `sft/` when uploaded, else from the repo (`data/extra_sft/`), and renders only them here
   (`data_pc.render_extras`: Colab's settings, catalog and example index first; byte-identical to rendering them with

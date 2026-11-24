@@ -721,6 +721,38 @@ def test_refine_check_and_state_dir_separation(monkeypatch, capsys):
     assert P.lr_for_chunk(0, 6, P.REFINE_LR)[0] == P.REFINE_LR and 0.3 <= P.REFINE_LR <= 0.4
 
 
+def test_chunks_pass_colabs_base_learning_rates(monkeypatch):
+    """A saved SFT checkpoint stores the lrs as None, so chat_sft would fall back to unembedding 0.004 (half of the
+    0.008 Colab's run inherited from the base model): every chunk passes the base rates explicitly."""
+    with tempfile.TemporaryDirectory() as t:
+        rpa = Path(t)
+        data = fake_train_setup(rpa)
+        assert P.base_lrs(rpa) == {"embedding_lr": 0.3, "unembedding_lr": 0.008, "matrix_lr": 0.02}
+        cmds = []
+
+        def fake_chunk(cmd, *a, **k):
+            cmds.append(cmd)
+            raise KeyboardInterrupt()
+        monkeypatch.setattr(P, "device_info", lambda: ("cuda", "Fake T4", 15.0, (7, 5)))
+        monkeypatch.setattr(P, "run_chunk", fake_chunk)
+        monkeypatch.setattr(P, "write_script", lambda *a, **k: None)
+        monkeypatch.setattr(P, "kill_leftover", lambda *a, **k: None)
+        try:
+            P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data)])
+        except KeyboardInterrupt:
+            pass
+        assert cmds and "--unembedding-lr=0.008" in cmds[0] and "--embedding-lr=0.3" in cmds[0] \
+            and "--matrix-lr=0.02" in cmds[0], cmds
+        st = json.loads((rpa / "local_run/refine/state.json").read_text(encoding="utf-8"))
+        assert st["base_lrs"]["unembedding_lr"] == 0.008
+        # the base model's own record wins when it is on the PC
+        b = rpa / "train_data/base/base_checkpoints/d8"
+        b.mkdir(parents=True)
+        (b / "model_005000.pt").write_bytes(b"m")
+        (b / "meta_005000.json").write_text(json.dumps({"user_config": {"unembedding_lr": 0.006}}), encoding="utf-8")
+        assert P.base_lrs(rpa)["unembedding_lr"] == 0.006 and P.base_lrs(rpa)["matrix_lr"] == 0.02
+
+
 def session_rows(n):
     rows = (RPA / "data/extra_sft/session_train.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(rows) == 733
@@ -806,6 +838,42 @@ def test_notebook_refine_mode():
     assert '"--steps", str(REFINE_STEPS), "--chunks", str(REFINE_CHUNKS)' in code[3]
     assert '"rl_pc.py"' in code[5] and "REFINE_THEN_RL" in code[5]
     assert "After a Colab run" in text and '`"refine"`' in text
+
+
+def test_notebook_rerun_of_cell_6_continues_rl_without_testing_the_refine_again():
+    """REFINE_THEN_RL: after RL stops, cell 6 runs again; it must not score the finished refine again (up to 2 x
+    EVAL_MINUTES), and cell 5 must not start a new refine while that RL run is going."""
+    code = [s for s, k in notebook_cells() if k == "code"]
+    fn = next(n for n in ast.parse(code[3]).body if isinstance(n, ast.FunctionDef) and n.name == "_refine_states")
+    assert "_refine_states()[1] == \"going\"" in code[4]
+    assert "_ref_tested and not RESTART_TRAINING" in code[5] and code[5].index("_ref_tested and") < \
+        code[5].index("rc = stream(EVAL + _EV_OPTS)")
+    with tempfile.TemporaryDirectory() as t:
+        root = Path(t)
+        g = {"ROOT": root, "json": json}
+        exec(compile(ast.Module([fn], []), "cell4", "exec"), g)
+        rs, ls = root / "local_run/refine/state.json", root / "local_run/rl/state.json"
+        assert g["_refine_states"]() == (False, None)
+        ls.parent.mkdir(parents=True)
+        ls.write_text(json.dumps({"done": 0, "finished": "old"}), encoding="utf-8")   # an RL run from before
+        rs.parent.mkdir(parents=True)
+        rs.write_text(json.dumps({"result": "x"}), encoding="utf-8")
+        assert g["_refine_states"]() == (False, None)                                   # refine not tested yet
+        rs.write_text(json.dumps({"result": "x", "finished": "now"}), encoding="utf-8")
+        os.utime(ls, (1, 1))
+        assert g["_refine_states"]() == (True, None)                                    # old RL does not count
+        ls.write_text(json.dumps({"done": 0}), encoding="utf-8")
+        assert g["_refine_states"]() == (True, "going")
+        ls.write_text(json.dumps({"done": 1, "finished": "later"}), encoding="utf-8")
+        assert g["_refine_states"]() == (True, "done")
+
+
+def test_notebook_generator_refuses_options():
+    r = subprocess.run([sys.executable, str(HERE.parent / "make_local_notebook.py"), "--help"], capture_output=True,
+                       text=True)
+    assert r.returncode != 0
+    shipped = json.loads((HERE.parent.parent / "ooa_local_pc.ipynb").read_text(encoding="utf-8"))
+    assert 'DRIVE_FOLDER_ID = ""' in "".join(shipped["cells"][1]["source"])
 
 
 def test_eval_gate_after_a_refine(monkeypatch, capsys):

@@ -328,7 +328,8 @@ def compare_main(a):
             # the start model (Drive's newer one) beats the older installed model: install it instead, so the PC
             # uses the Colab model and the next refine / RL starts from it
             sroot, _, _, _, sstep = packs["start model"]
-            print("  the start model (Drive's newer one) is better than the installed one: installing it instead")
+            print("  the start model (Drive's newer one) " + ("is better than the installed one"
+                  if "installed model" in sums else "is installed (this PC had no model yet)") + ": installing it instead")
             info = {"mode": "install", "drive_origin": st.get("drive_origin"), "tokenizer": str(tok)}
             rec["installed"] = str(install(rpa, sroot / "chatsft_checkpoints" / "d8", sstep, data, info, stamp))
             rec["installed_start_model"] = True

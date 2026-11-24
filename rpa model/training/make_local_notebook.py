@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 
 H = Path(__file__).resolve().parent
+if any(x.startswith("-") for x in sys.argv[1:]):                 # e.g. --help: never written into the notebook
+    raise SystemExit(__doc__)
 FOLDER_ID = sys.argv[1] if len(sys.argv) > 1 else ""
 OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else H.parent / "ooa_local_pc.ipynb"
 cells = []
@@ -315,6 +317,15 @@ code('''
 #@title 4. Check everything is in place (and size the top-up)
 TRAIN = [sys.executable, "-u", str(LOCAL / "train_pc.py"), "--rpa", str(ROOT), "--mode", MODE_NOW, "--data", str(DATA),
          "--seq", str(SEQ)]
+def _refine_states():
+    """(refine tested, RL after it: None / "going" / "done") for REFINE_THEN_RL."""
+    _rs, _ls = ROOT / "local_run" / "refine" / "state.json", ROOT / "local_run" / "rl" / "state.json"
+    _r = json.loads(_rs.read_text(encoding="utf-8")) if _rs.exists() else {}
+    if not _r.get("finished"):
+        return False, None
+    if not _ls.exists() or _ls.stat().st_mtime < _rs.stat().st_mtime:      # an RL run from before this refine
+        return True, None
+    return True, "done" if json.loads(_ls.read_text(encoding="utf-8")).get("finished") else "going"
 if MODE_NOW == "rl":           # RL (training/local/rl_pc.py, the Colab cell 9 recipe) on the newest trained model
     TRAIN = [sys.executable, "-u", str(LOCAL / "rl_pc.py"), "--rpa", str(ROOT), "--data", str(DATA),
              "--steps", str(RL_STEPS)]
@@ -357,6 +368,8 @@ code('''
 # Keep the PC on and plugged in (it is kept awake while this runs). The installed model is not touched here.
 if MODE_NOW == "install":
     print("MODE install: nothing to train")
+elif MODE_NOW == "refine" and REFINE_THEN_RL and not RESTART_TRAINING and _refine_states()[1] == "going":
+    print("the refine is trained and tested; its RL run is in progress: run cell 6 to continue it (nothing to do here)")
 else:
     rc = stream(TRAIN)
     print("\\nexit code", rc, "| log:", ROOT / "local_run" / MODE_NOW / "train.log")
@@ -381,9 +394,19 @@ else:
     EVAL = [sys.executable, "-u", str(LOCAL / "eval_pc.py"), "--rpa", str(ROOT), "--new", _res, "--data", str(DATA),
             "--run-state", str(_st)]
 _EV_OPTS = ["--per-set", str(0 if CUDA else EVAL_PER_SET), "--minutes", str(EVAL_MINUTES), "--install"]
-rc = stream(EVAL + _EV_OPTS)
+_ref_tested, _rl_after = _refine_states() if MODE_NOW == "refine" and REFINE_THEN_RL else (False, None)
+if _ref_tested and not RESTART_TRAINING:
+    # this cell runs again to continue a stopped RL run: the refine was tested already, do not test it again
+    print("the refine was tested already (see the history below): going on with RL")
+    rc = 0
+else:
+    _rl_after = None
+    rc = stream(EVAL + _EV_OPTS)
 print("\\nexit code", rc, "| history:", ROOT / "nanochat_base" / "topup_history.jsonl")
-if MODE_NOW == "refine" and rc == 0 and REFINE_THEN_RL:
+if _rl_after == "done":
+    print("the refine and its RL run are both trained and tested: nothing left to do here. Cell 7 starts the "
+          "assistant (running cells 5 and 6 again would start a new refine).")
+elif MODE_NOW == "refine" and rc == 0 and REFINE_THEN_RL:
     # RL starts from the newest installed model (the refined one when it was installed above, else the Colab model)
     print("\\nREFINE_THEN_RL: reinforcement learning on the newest model (about 3 h per 100 steps) ...")
     _rl_rc = stream([sys.executable, "-u", str(LOCAL / "rl_pc.py"), "--rpa", str(ROOT), "--data", str(DATA),
@@ -392,7 +415,8 @@ if MODE_NOW == "refine" and rc == 0 and REFINE_THEN_RL:
         rc = stream([sys.executable, "-u", str(LOCAL / "eval_pc.py"), "--rpa", str(ROOT), "--data", str(DATA),
                      "--run-state", str(ROOT / "local_run" / "rl" / "state.json")] + _EV_OPTS)
     else:
-        print("RL stopped: run this cell again to continue it (saved every 25 steps)")
+        print("RL stopped: run this cell again to continue it (saved every 25 steps; cells 1-4 first after a restart "
+              "are fine, cell 5 then skips the finished refine)")
 elif MODE_NOW == "refine" and rc == 0:
     print('\\nNext (optional): MODE = "rl" in cell 1, then run cells 1-6 again: RL continues the newest installed '
           "model. Then cell 7 starts the assistant.")

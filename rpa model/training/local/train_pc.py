@@ -96,6 +96,32 @@ def lr_for_span(g0, g1, lr):
     return lr, (g1 - 0.5) / (g1 - g0), f(g1)
 
 
+BASE_LRS = {"embedding_lr": 0.3, "unembedding_lr": 0.008, "matrix_lr": 0.02}   # base_train.py defaults (pinned)
+
+
+def base_lrs(rpa):
+    """The learning rates Colab's SFT run used: chat_sft inherits them from the base model's meta (user_config).
+    Passed explicitly to every chunk, because a saved SFT checkpoint stores them as None (chat_sft saves its
+    user_config before it fills them in) and chat_sft then falls back to its own defaults, which halve the output
+    layer's rate (unembedding 0.004 instead of base_train's 0.008)."""
+    out = dict(BASE_LRS)
+    d = Path(rpa) / "train_data" / "base" / "base_checkpoints" / "d8"
+    step = newest(d)
+    if step is not None:
+        try:
+            uc = json.loads((d / f"meta_{step:06d}.json").read_text(encoding="utf-8")).get("user_config") or {}
+            for k in out:
+                if isinstance(uc.get(k), (int, float)) and uc[k] > 0:
+                    out[k] = float(uc[k])
+        except (OSError, ValueError):
+            pass
+    return out
+
+
+def lr_flags(lrs):
+    return [f"--{k.replace('_', '-')}={v:g}" for k, v in lrs.items()]
+
+
 def drive_id(root):
     f = Path(root) / ".drive_id"
     return f.read_text(encoding="utf-8").strip() if f.exists() else None
@@ -477,6 +503,8 @@ def main(argv=None):
     print(f"plan             : {a.steps} steps x {TOKENS_PER_STEP:,} tokens at window {a.seq} (device batch {dbs}, "
           f"{accum} micro-batches per step) in {a.chunks} chunk(s) of up to {chunk}; {done} done | lr {a.lr} | "
           f"SmolTalk rows {a.smoltalk}")
+    print("base rates       :", " ".join(lr_flags(state.get("base_lrs") or base_lrs(rpa))),
+          "(Colab's, times the lr above)")
     if table:
         print(f"data mixture     : about {bud / 1e6:.1f}M tokens of conversations; views per row:")
         print("\n".join("   " + l for l in table))
@@ -508,6 +536,7 @@ def main(argv=None):
                  "drive_origin": drive_id(src_root) or (local_origin(rpa) if src_root == rpa / "nanochat_base" else None)}
     else:
         state["views"] = views                               # same plan unless the data changed
+    state.setdefault("base_lrs", base_lrs(rpa))               # one set of rates for every chunk of this run
     state_f.write_text(json.dumps(state, indent=1), encoding="utf-8")
     log = run_dir / "train.log"
     threads = a.threads or (os.cpu_count() or 4) if (a.full_speed or gpu) else (a.threads or max(1, (os.cpu_count() or 2) - 1))
@@ -541,7 +570,7 @@ def main(argv=None):
                f"--total-batch-size={TOKENS_PER_STEP}", f"--num-iterations={steps_k * accum}",
                f"--eval-every={100 if gpu else -1}", f"--eval-tokens={a.seq * dbs * 8}", "--chatcore-every=-1",
                "--run=dummy", f"--init-lr-frac={lr0:.6f}", f"--warmdown-ratio={wd:.6f}", f"--final-lr-frac={final:.6f}",
-               "--model-tag=d8", f"--model-step={from_step}"]
+               "--model-tag=d8", f"--model-step={from_step}"] + lr_flags(state["base_lrs"])
         if not gpu:
             cmd.append("--device-type=cpu")
         t0 = time.time()
