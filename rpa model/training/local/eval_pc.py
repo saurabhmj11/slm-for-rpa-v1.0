@@ -23,6 +23,10 @@ newer model, e.g. the Colab v5, while the PC has an older one or none), that sta
 examples move to nanochat_base/old_model_<date>; the new model goes to nanochat_base/chatsft_checkpoints/d8 and its
 catalog.jsonl + examples.jsonl to rpa/sft/ (where assistant/app.py and start_assistant.bat read them, so the app
 uses the context + plan format). History: nanochat_base/topup_history.jsonl.
+
+A model whose weights are not all finite (nan / inf: a run that went unstable) is never scored or installed: the new
+model is checked first (refused with the reason, exit code 2), a broken start model is left out of the comparison
+and never installed instead, and a broken installed model is not a reference (any finite better model replaces it).
 """
 import argparse
 import hashlib
@@ -36,8 +40,18 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
 SETS = [("plain_requests.jsonl", "set 1"), ("plain_requests_2.jsonl", "set 2"),
         ("plain_requests_3.jsonl", "set 3"), ("beginner_requests.jsonl", "beginner")]
+
+
+def weights_problem(d8, step):
+    """None when model_<step>.pt in d8 is fine (or cannot be checked here), else the names of its tensors with
+    nan / inf, as text."""
+    from train_pc import model_health
+    status, names = model_health(d8, step)
+    return None if status != "broken" else names
 
 
 def newest(d):
@@ -253,6 +267,22 @@ def compare_main(a):
     nstep = newest(new_dir)
     if nstep is None:
         raise SystemExit(f"no model_<N>.pt + meta_<N>.json in {new_dir}")
+    bad = weights_problem(new_dir, nstep)
+    if bad:
+        from train_pc import broken_message
+        import sft_setup as T
+        rpa_ = Path(a.rpa).resolve()
+        drive_d8 = (rpa_ / "train_data" / "drive_model" / "chatsft_checkpoints" / "d8").resolve()
+        why = (broken_message(rpa_, rpa_ / "train_data" / "drive_model", nstep, bad, "refine")
+               if new_dir == drive_d8 else
+               f"the new model ({new_dir}, step {nstep}) has broken weights (nan/inf) in: {T.short_list(bad)}")
+        print(f"NOT TESTED, NOT INSTALLED: {why}")
+        hist = rpa_ / "nanochat_base" / "topup_history.jsonl"
+        hist.parent.mkdir(parents=True, exist_ok=True)
+        with open(hist, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"time": time.strftime("%Y%m%d_%H%M%S"), "new": str(new_dir), "new_step": nstep,
+                                "broken": bad[:20], "installed": False}) + "\n")
+        return 2
     work = rpa / "local_run" / "eval"
     shutil.rmtree(work, ignore_errors=True)
     (work / "new" / "chatsft_checkpoints" / "d8").mkdir(parents=True)
@@ -275,8 +305,17 @@ def compare_main(a):
     cstep = newest(croot / "chatsft_checkpoints" / "d8")
     packs = {}                                    # label -> (root, catalog, examples, format, step)
     if cstep is not None:
-        packs["installed model"] = (croot, ccat, cex, cfmt, cstep)
+        cbad = weights_problem(croot / "chatsft_checkpoints" / "d8", cstep)
+        if cbad:
+            print(f"  note: the installed model (step {cstep}) has broken weights (nan/inf in {len(cbad)} tensors): it is "
+                  "not a reference; a new model that works replaces it")
+        else:
+            packs["installed model"] = (croot, ccat, cex, cfmt, cstep)
     sp = start_pack(rpa, st, data, tok)
+    if sp is not None and weights_problem(sp[0] / "chatsft_checkpoints" / "d8", sp[4]):
+        print(f"  note: the model this run started from ({sp[0]}, step {sp[4]}) has broken weights (nan/inf): it is "
+              "left out of the comparison and never installed")
+        sp = None
     if sp is not None:
         # the run started from a model that is not the installed one (Drive's newest, e.g. the Colab v5, while the
         # PC still has an older model): the new model must beat THAT model, not only the older installed one

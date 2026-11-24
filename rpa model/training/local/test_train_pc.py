@@ -825,7 +825,7 @@ def test_eval_compares_with_the_start_model_not_an_older_installed_one():
 
 def test_rl_starts_from_the_newest_model():
     src = (HERE / "rl_pc.py").read_text(encoding="utf-8")
-    assert 'src_root = Path(a.start).resolve() if a.start else topup_start(rpa)' in src   # never an old run's start
+    assert "src_root = Path(a.start).resolve() if a.start else start_root(rpa, a.start_from)" in src   # never an old run's start
     assert "local_origin(rpa) if src_root == rpa / \"nanochat_base\"" in src                # keeps the Drive origin
 
 
@@ -930,3 +930,274 @@ def test_eval_gate_after_a_refine(monkeypatch, capsys):
             else:
                 assert got == ["meta_008300.json", "model_008300.pt"], got
             assert json.loads(st.read_text(encoding="utf-8"))["finished"]
+
+
+# ------------------------------------------------------------------------------------- broken weights (nan / inf)
+def fake_nonfinite(path):
+    """sft_setup.nonfinite_tensors without torch: a file whose bytes start with b"nan" is a broken state dict."""
+    return ["resid_lambdas (nan)", "x0_lambdas (nan)", "transformer.wte.weight (nan)"] \
+        if Path(path).read_bytes().startswith(b"nan") else []
+
+
+def put_model(d8, step, data=b"m", optim=None):
+    d8 = Path(d8)
+    d8.mkdir(parents=True, exist_ok=True)
+    (d8 / f"model_{step:06d}.pt").write_bytes(data)
+    (d8 / f"meta_{step:06d}.json").write_text("{}", encoding="utf-8")
+    if optim is not None:
+        (d8 / f"optim_{step:06d}_rank0.pt").write_bytes(optim)
+
+
+def test_nonfinite_tensors_on_real_state_dicts(tmp_path):
+    torch = __import__("pytest").importorskip("torch")
+    good = {"_orig_mod.transformer.h.0.attn.c_q.weight": torch.ones(4, 4), "resid_lambdas": torch.ones(2),
+            "idx": torch.arange(3)}
+    bad = dict(good, resid_lambdas=torch.tensor([1.0, float("nan")]),
+               **{"transformer.wte.weight": torch.tensor([[float("inf"), 0.0]])})
+    torch.save(good, tmp_path / "good.pt")
+    torch.save(bad, tmp_path / "bad.pt")
+    assert T.nonfinite_tensors(tmp_path / "good.pt") == []
+    assert T.nonfinite_tensors(tmp_path / "bad.pt") == ["resid_lambdas (nan)", "transformer.wte.weight (inf)"]
+    opt = {"state": {0: {"exp_avg": torch.zeros(3), "exp_avg_sq": torch.tensor([0.0, float("nan"), 1.0])},
+                     1: {"momentum_buffer": torch.ones(2, 2)}},
+           "param_groups": [{"lr": 0.02, "params": [0, 1]}]}
+    torch.save(opt, tmp_path / "optim_000010_rank0.pt")
+    assert T.nonfinite_tensors(tmp_path / "optim_000010_rank0.pt") == ["state.0.exp_avg_sq (nan)"]
+    d8 = tmp_path / "d8"
+    d8.mkdir()
+    torch.save(bad, d8 / "model_000300.pt")
+    (d8 / "meta_000300.json").write_text("{}", encoding="utf-8")
+    torch.save(good, d8 / "model_000200.pt")
+    (d8 / "meta_000200.json").write_text("{}", encoding="utf-8")
+    assert T.check_model_dir(d8) == (300, ["resid_lambdas (nan)", "transformer.wte.weight (inf)"])
+    assert T.check_model_dir(tmp_path / "none") == (None, None)
+    assert P.model_health(d8, 300)[0] == "broken" and P.model_health(d8, 200) == ("ok", [])
+    (d8 / "model_000100.pt").write_bytes(b"not a checkpoint")
+    assert P.model_health(d8, 100)[0] == "unchecked"         # nanochat reports a file it cannot read itself
+    # the optimizer choice reads the real file too
+    load, why = P.optimizer_choice(tmp_path, 10)
+    assert not load and "exp_avg_sq" in why
+
+
+def test_refine_refuses_a_broken_start_model_and_names_the_other(monkeypatch, capsys):
+    import pytest
+    monkeypatch.setattr(T, "nonfinite_tensors", fake_nonfinite)
+    monkeypatch.setattr(P, "device_info", lambda: ("cuda", "RTX 4060 Laptop", 8.0, (8, 9)))
+    with tempfile.TemporaryDirectory() as t:
+        rpa = Path(t)
+        data = fake_train_setup(rpa)
+        put_model(rpa / "train_data/drive_model/chatsft_checkpoints/d8", 12000, b"nan")      # the Colab run diverged
+        with pytest.raises(SystemExit):
+            P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data), "--check"])
+        out = capsys.readouterr().out
+        assert "Drive's newest model (the Colab run) (step 12000) has broken weights (nan) in: resid_lambdas (nan)" \
+            in out and "it cannot be trained or installed" in out and "send its cell 7 loss lines" in out
+        assert "No other trained model on this PC is usable" in out and "BROKEN (nan/inf)" in out
+        # this PC has a fine model: the exact setting is named, nothing switches by itself
+        put_model(rpa / "nanochat_base/chatsft_checkpoints/d8", 8300, b"m")
+        with pytest.raises(SystemExit):
+            P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data), "--check"])
+        out = capsys.readouterr().out
+        assert 'This PC\'s installed model (step 8300) is fine: to refine it instead, set REFINE_FROM = "pc" in ' \
+               'notebook cell 1 (--start-from pc)' in out, out
+        (rpa / "nanochat_base/tokenizer").mkdir(parents=True)
+        for f in ("tokenizer.pkl", "token_bytes.pt"):
+            (rpa / "nanochat_base/tokenizer" / f).write_bytes(b"t")
+        assert P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data), "--check", "--start-from",
+                       "pc"]) == 0
+        out = capsys.readouterr().out
+        assert "nanochat_base" in out and "step 8300" in out and "(--start-from pc: notebook cell 1 REFINE_FROM)" in out
+        assert P.start_root(rpa, "drive") == rpa / "train_data/drive_model"
+        assert P.start_root(rpa, "pc") == rpa / "nanochat_base" and P.start_root(rpa, "auto") == P.topup_start(rpa)
+        # the PC's model broken, Drive's fine: the message names "drive"
+        msg = P.broken_message(rpa, rpa / "nanochat_base", 8300, ["x (inf)"], "topup")
+        assert "this PC's installed model (step 8300) has broken weights (inf)" in msg
+        put_model(rpa / "train_data/drive_model/chatsft_checkpoints/d8", 12000, b"m")
+        assert 'set REFINE_FROM = "drive"' in P.broken_message(rpa, rpa / "nanochat_base", 8300, ["x (nan)"])
+
+
+def test_optimizer_choice(monkeypatch, tmp_path):
+    monkeypatch.setattr(T, "nonfinite_tensors", fake_nonfinite)
+    d8 = tmp_path / "d8"
+    put_model(d8, 12000)
+    assert P.optimizer_choice(d8, 12000)[0] is False                                     # none saved: fresh
+    (d8 / "optim_012000_rank0.pt").write_bytes(b"ok")
+    load, why = P.optimizer_choice(d8, 12000)
+    assert load and "finite" in why
+    assert P.optimizer_choice(d8, 12000, "fresh") == (False, "fresh optimizer state (--optimizer fresh)")
+    load, why = P.optimizer_choice(d8, 12000, nan_before=True)                            # the last try went nan
+    assert not load and "went nan" in why
+    assert P.optimizer_choice(d8, 12000, "load", nan_before=True)[0] is True              # asked for explicitly
+    (d8 / "optim_012000_rank0.pt").write_bytes(b"nan")
+    for policy in ("auto", "load"):                                                       # never a nan state
+        load, why = P.optimizer_choice(d8, 12000, policy)
+        assert not load and "nan/inf in 3 tensor(s)" in why
+
+
+class FakeProc:
+    def __init__(self, lines):
+        self.stdout, self.terminated = iter(lines), False
+
+    def poll(self):
+        return -15 if self.terminated else None
+
+    def terminate(self):
+        self.terminated = True
+
+    kill = terminate
+
+    def wait(self, timeout=None):
+        return -15 if self.terminated else 0
+
+
+def step_line(i, loss):
+    return (f"step {i:05d} ({i * 0.4:.2f}%) | loss: {loss} | lrm: 1.00 | dt: 1500.00ms | tok/sec: 21,845 | mfu: 3.10 "
+            f"| epoch: 0 | total time: 0.10m\n")
+
+
+def test_follow_nan_watchdog(capsys):
+    import io
+    # the incident: loss nan from step 1 (the running average stays nan); the user saw no step lines at all
+    p = FakeProc(["Step 00000 | Validation bpb: 1.2345\n"] + [step_line(i, "nan") for i in range(1, 300)])
+    watch = {}
+    rc = P.follow(p, io.StringIO(), [], 1500, 250, watch)
+    out = capsys.readouterr().out
+    assert p.terminated and rc != 0 and "loss nan" in out and "step 251/1500" in out
+    assert watch["nan"] == "the loss was not a number (nan) for 5 steps in a row (from step 251)", watch
+    # 4 bad steps then finite ones: no stop (a passing inf in a float16 run is skipped by GradScaler)
+    p = FakeProc([step_line(i, "inf" if i < 5 else "2.500000") for i in range(1, 12)])
+    watch, dts = {}, []
+    assert P.follow(p, io.StringIO(), dts, 1500, 0, watch) == 0 and not watch and not p.terminated and len(dts) == 11
+    # validation nan before any step: the start model gives nan
+    p = FakeProc(["Step 00000 | Validation bpb: nan\n", step_line(1, "2.0")])
+    watch = {}
+    P.follow(p, io.StringIO(), [], 1500, 0, watch)
+    assert p.terminated and "Validation bpb is nan at step 0" in watch["nan"] and "before any training step" in \
+        watch["nan"]
+    # chat_sft's own guard (sft_setup NAN_MARK)
+    p = FakeProc([f"{T.NAN_MARK}: the training loss was not a number (nan/inf) for 5 steps in a row (step 7): x\n"])
+    watch = {}
+    P.follow(p, io.StringIO(), [], 1500, 0, watch)
+    assert "for 5 steps in a row (step 7)" in watch["nan"]
+    # normal lines: parsed as before
+    p = FakeProc([step_line(10, "1.234567"), "Step 00100 | Validation bpb: 0.9876\n"])
+    watch, dts = {}, []
+    assert P.follow(p, io.StringIO(), dts, 100, 0, watch) == 0 and not watch and dts == [1.5]
+    assert "loss 1.234567" in capsys.readouterr().out
+    assert P.nan_value("nan") and P.nan_value("-inf") and not P.nan_value("1e-3") and not P.nan_value("2.5")
+
+
+def test_a_nan_chunk_is_never_saved_and_is_retried_with_a_fresh_optimizer(monkeypatch, capsys):
+    import pytest
+    monkeypatch.setattr(T, "nonfinite_tensors", fake_nonfinite)
+    monkeypatch.setattr(P, "device_info", lambda: ("cuda", "RTX 4060 Laptop", 8.0, (8, 9)))
+    monkeypatch.setattr(P, "write_script", lambda *a, **k: None)
+    monkeypatch.setattr(P, "kill_leftover", lambda *a, **k: None)
+    with tempfile.TemporaryDirectory() as t:
+        rpa = Path(t)
+        data = fake_train_setup(rpa)
+        (rpa / "train_data/drive_model/chatsft_checkpoints/d8/optim_012000_rank0.pt").write_bytes(b"ok")
+        cmds = []
+
+        def went_nan(cmd, cwd, env, log, total, offset, prio, watch):
+            cmds.append(cmd)
+            watch["nan"] = "the loss was not a number (nan) for 5 steps in a row (from step 1)"
+            return -15, 1.5
+        monkeypatch.setattr(P, "run_chunk", went_nan)
+        with pytest.raises(SystemExit) as ex:
+            P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data)])
+        assert "STOPPED: chunk 1 went unstable" in str(ex.value) and "fresh optimizer state" in str(ex.value)
+        assert "--load-optimizer=1" in cmds[0]
+        run = rpa / "local_run/refine"
+        st = json.loads((run / "state.json").read_text(encoding="utf-8"))
+        assert st["done"] == 0 and st["nan_stops"][0]["optimizer"] == "loaded" and not (run / "chunks").exists()
+        assert "saved optimizer state is finite: loaded" in capsys.readouterr().out
+        # the next try of chunk 1: fresh optimizer; if it goes nan again, it says rerunning will not help
+        with pytest.raises(SystemExit) as ex:
+            P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data)])
+        assert "--load-optimizer=0" in cmds[1] and "went nan with the saved optimizer state" in capsys.readouterr().out
+        assert "running it again will not help" in str(ex.value)
+        # the watchdog missed it but the saved model is nan: still not saved, the run does not advance
+        shutil.rmtree(run)
+
+        def saved_nan(cmd, cwd, env, log, total, offset, prio, watch):
+            put_model(Path(env["NANOCHAT_BASE_DIR"]) / "chatsft_checkpoints/d8", 250, b"nan")
+            return 0, 1.5
+        monkeypatch.setattr(P, "run_chunk", saved_nan)
+        with pytest.raises(SystemExit) as ex:
+            P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data)])
+        assert "the model it saved has nan/inf" in str(ex.value)
+        assert not (run / "chunks").exists() and json.loads((run / "state.json").read_text(encoding="utf-8"))["done"] == 0
+
+
+def test_a_broken_run_in_progress_starts_over_and_start_from_starts_a_new_run(monkeypatch, capsys):
+    monkeypatch.setattr(T, "nonfinite_tensors", fake_nonfinite)
+    monkeypatch.setattr(P, "device_info", lambda: ("cuda", "RTX 4060 Laptop", 8.0, (8, 9)))
+    with tempfile.TemporaryDirectory() as t:
+        rpa = Path(t)
+        data = fake_train_setup(rpa)
+        run = rpa / "local_run/refine"
+        put_model(run / "chunks/chunk_000", 12250, b"nan")             # saved by the version without the check
+        state = {"mode": "refine", "steps": 1500, "chunks": 6, "seq": 4096, "done": 1, "lr": 0.35, "device_batch": 1,
+                 "start": str(rpa / "train_data/drive_model"), "start_step": 12000}
+        (run / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        assert P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data), "--check"]) == 0
+        out = capsys.readouterr().out
+        assert "the run in progress is broken" in out and "0 done" in out
+        assert (run / "state.json").exists()                                  # --check deletes nothing
+        # a fine run in progress continues, unless REFINE_FROM names another start model
+        put_model(run / "chunks/chunk_000", 12250, b"m")
+        put_model(rpa / "nanochat_base/chatsft_checkpoints/d8", 8300)
+        shutil.copytree(rpa / "train_data/drive_model/tokenizer", rpa / "nanochat_base/tokenizer")
+        assert P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data), "--check"]) == 0
+        assert "1 done" in capsys.readouterr().out
+        assert P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data), "--check", "--start-from",
+                       "pc"]) == 0
+        out = capsys.readouterr().out
+        assert "a new run starts from it" in out and "0 done" in out and "step 8300" in out
+
+
+def test_eval_never_installs_a_broken_model(monkeypatch, capsys):
+    monkeypatch.setattr(T, "nonfinite_tensors", fake_nonfinite)
+    with tempfile.TemporaryDirectory() as t:
+        rpa = Path(t)
+        put_model(rpa / "nanochat_base/chatsft_checkpoints/d8", 8300)
+        dm = rpa / "train_data/drive_model/chatsft_checkpoints/d8"
+        put_model(dm, 12000, b"nan")
+        monkeypatch.setattr(E, "run_scoring", lambda *a, **k: (_ for _ in ()).throw(AssertionError("scored")))
+        assert E.main(["--rpa", str(rpa), "--new", str(dm), "--data", str(rpa / "x"), "--install"]) == 2
+        out = capsys.readouterr().out
+        assert "NOT TESTED, NOT INSTALLED: Drive's newest model (the Colab run) (step 12000) has broken weights" in out
+        assert sorted(p.name for p in (rpa / "nanochat_base/chatsft_checkpoints/d8").iterdir()) == \
+            ["meta_008300.json", "model_008300.pt"]
+        hist = [json.loads(l) for l in (rpa / "nanochat_base/topup_history.jsonl").read_text().splitlines()]
+        assert hist[-1]["broken"] and hist[-1]["installed"] is False
+
+
+def test_rl_refuses_a_broken_start_model(monkeypatch, capsys):
+    import rl_pc as R
+    monkeypatch.setattr(T, "nonfinite_tensors", fake_nonfinite)
+    monkeypatch.setattr(R, "device_info", lambda: ("cuda", "RTX 4060 Laptop", 8.0, (8, 9)))
+    with tempfile.TemporaryDirectory() as t:
+        rpa = Path(t)
+        data = fake_train_setup(rpa)
+        put_model(rpa / "train_data/drive_model/chatsft_checkpoints/d8", 12000, b"nan")
+        put_model(rpa / "nanochat_base/chatsft_checkpoints/d8", 8300)
+        assert R.main(["--rpa", str(rpa), "--data", str(data), "--check", "--start-from", "drive"]) == 1
+        out = capsys.readouterr().out
+        assert "has broken weights (nan)" in out and 'to run RL on it instead, set REFINE_FROM = "pc"' in out
+
+
+def test_notebooks_check_weights():
+    code = [s for s, k in notebook_cells() if k == "code"]
+    assert 'REFINE_FROM = "auto"' in code[0] and '"drive"' in code[0] and '"pc"' in code[0]
+    assert 'REFINE_FROM not in ("auto", "drive", "pc")' in code[1]
+    assert 'TRAIN += ["--start-from", REFINE_FROM]' in code[3] and '"--start-from", REFINE_FROM]' in code[3]
+    c7 = COLAB[COLAB.index("#@title 7."):COLAB.index("#@title 8.")]
+    assert "_T.check_model_dir(" in c7 and "THE TRAINED MODEL IS BROKEN" in c7 and "_broken_" in c7
+    assert c7.index("!python -m scripts.chat_sft") < c7.index("_T.check_model_dir(")
+    assert '"loss line": _T.LOSS_LOG_ANCHOR' in c7
+    c8 = COLAB[COLAB.index("#@title 8."):]
+    assert c8.index("check_model_dir(") < c8.index("_load_model(EVAL_SOURCE")
+    # the Drive model a broken Colab run leaves aside is never taken for the newest model on the PC
+    assert not D.SFT_ON_DRIVE.match("nanochat_base/chatsft_checkpoints_broken_20261124_101010/d8/model_012000.pt")

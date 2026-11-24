@@ -15,7 +15,11 @@ locally (test_sft_setup.py) and copied into the notebook like the other training
    sequence_len to --max-seq-len right after loading and recomputes the window sizes (and the rotary table when it is
    too short), prints the windows, and saves "trained_window" in the checkpoint meta for the serving check
    (assistant/model_backend.window_check). (b) our data mixture, (c) rows longer than the window are skipped, not cut,
-   (d) per-file consumption is counted and printed at the end.
+   (d) per-file consumption is counted and printed at the end, (e) a NaN guard: the run stops (exit code
+   NAN_EXIT, before anything is saved) when the training loss is not a number for NAN_STEPS steps in a row or the
+   validation bpb is not a number, so a run that went unstable never saves a broken model over a good one.
+3. nonfinite_tensors / check_model_dir: which tensors of a saved model or optimizer state hold nan / inf (torch is
+   imported only there: Colab cells 7-8 and the PC scripts check a model before they train, test or install it).
 """
 import json
 import os
@@ -157,7 +161,8 @@ print0(f"SFT attention window: base config sequence_len {_base_seq} -> {model.co
 '''
 META_ANCHOR = '                "user_config": user_config, # inputs to the training script\n'
 META_FIX = ('                "user_config": user_config, # inputs to the training script\n'
-            '                "trained_window": orig_model.window_sizes[-1][0], # OOA: the window SFT trained with\n')
+            '                "trained_window": orig_model.window_sizes[-1][0], # OOA: the window SFT trained with\n'
+            '                "compute_dtype": str(COMPUTE_DTYPE).replace("torch.", ""), # OOA: bfloat16 / float16\n')
 TASKS_START = "train_tasks = ["
 TASKS_END = "# total: 24K"
 IMPORT_ANCHOR = "from tasks.smoltalk import SmolTalk"
@@ -175,6 +180,28 @@ END_REPORT = '''print0(f"Conversations skipped as longer than the window (not cu
 print0("Training data actually read (rows fetched / rows in the file = views per row):")
 for _i, (_name, _rows) in enumerate(_task_files):
     print0(f"  {_name:28s} {_seen[_i]:8d} / {_rows:6d} = {_seen[_i] / max(1, _rows):5.2f} views")
+'''
+
+
+NAN_STEPS = 5                        # consecutive steps with a training loss that is not a number -> stop
+NAN_EXIT = 86                        # chat_sft's exit code then (train_pc.py and Colab cell 7 recognise it)
+NAN_MARK = "OOA NAN STOP"            # the line it prints first
+LOSS_LOG_ANCHOR = '    print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f}'
+VAL_ANCHOR = '        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")\n'
+LOSS_GUARD = f'''    # OOA: a loss that is not a number (nan / inf) for {NAN_STEPS} steps in a row means the run went unstable: stop
+    # before anything is saved (a checkpoint is written only at the last step), so a broken model never replaces a
+    # good one. train_loss is the step's own loss (the printed loss is a running average that stays nan for good).
+    _ooa_bad_loss[0] = 0 if _ooa_math.isfinite(train_loss.item()) else _ooa_bad_loss[0] + 1
+    if _ooa_bad_loss[0] >= {NAN_STEPS}:
+        print0(f"{NAN_MARK}: the training loss was not a number (nan/inf) for {NAN_STEPS} steps in a row (step {{step}}): "
+               "the training went unstable. Stopped; nothing was saved.")
+        raise SystemExit({NAN_EXIT})
+'''
+VAL_GUARD = f'''        if not _ooa_math.isfinite(val_bpb):   # OOA: the model gives nan / inf: stop before anything is saved
+            print0(f"{NAN_MARK}: Validation bpb is not a number ({{val_bpb}}) at step {{step}}"
+                   + (": the start model is broken before any training step" if step == 0 else
+                      ": the training went unstable") + ". Stopped; nothing was saved.")
+            raise SystemExit({NAN_EXIT})
 '''
 
 
@@ -201,9 +228,10 @@ def patch_chat_sft(s, sft_dir, views, smoltalk_rows=0, seed=1, window_fix=True):
     """chat_sft.py text (pinned nanochat) -> the patched text. Raises AssertionError when an anchor is missing
     (nanochat changed upstream): the notebook must stop rather than train without the window fix.
     window_fix=False leaves the window as nanochat has it (only for the comparison test)."""
-    for a in (WINDOW_ANCHOR, META_ANCHOR, TASKS_START, TASKS_END, IMPORT_ANCHOR, LOADER_OLD, STEP_ANCHOR, END_ANCHOR):
+    for a in (WINDOW_ANCHOR, META_ANCHOR, TASKS_START, TASKS_END, IMPORT_ANCHOR, LOADER_OLD, STEP_ANCHOR, END_ANCHOR,
+              LOSS_LOG_ANCHOR, VAL_ANCHOR):
         assert s.count(a) >= 1, "chat_sft.py changed upstream, cannot patch: " + a[:60]
-    s = s.replace(IMPORT_ANCHOR, IMPORT_ANCHOR + "\nfrom tasks.ooa import OOADialogues", 1)
+    s = s.replace(IMPORT_ANCHOR, IMPORT_ANCHOR + "\nfrom tasks.ooa import OOADialogues\nimport math as _ooa_math", 1)
     a = s.index(TASKS_START)
     b = s.index("\n", s.index(TASKS_END))
     s = s[:a] + tasks_block(sft_dir, views, smoltalk_rows, seed) + s[b:]
@@ -211,9 +239,61 @@ def patch_chat_sft(s, sft_dir, views, smoltalk_rows=0, seed=1, window_fix=True):
         s = s.replace(WINDOW_ANCHOR, WINDOW_FIX + WINDOW_ANCHOR, 1)
         s = s.replace(META_ANCHOR, META_FIX, 1)
     s = s.replace(LOADER_OLD, LOADER_NEW, 1)
-    s = s.replace(STEP_ANCHOR, "skipped_long = [0]\n" + STEP_ANCHOR, 1)
+    s = s.replace(STEP_ANCHOR, "skipped_long = [0]\n_ooa_bad_loss = [0]\n" + STEP_ANCHOR, 1)
     s = s.replace(END_ANCHOR, END_REPORT + END_ANCHOR, 1)
+    i = s.index("\n", s.index(LOSS_LOG_ANCHOR)) + 1                  # after the whole "step ... | loss:" line
+    s = s[:i] + LOSS_GUARD + s[i:]
+    s = s.replace(VAL_ANCHOR, VAL_ANCHOR + VAL_GUARD, 1)
     return s
+
+
+# ---------------------------------------------------------------------------------------------- broken weights
+def nonfinite_tensors(path):
+    """Names of the floating-point tensors with nan / inf in a saved model_<N>.pt or optim_<N>_rank0.pt (nested
+    optimizer state is walked: "state.3.exp_avg"), each with "(nan)" or "(inf)". [] = all finite. Loaded on the CPU
+    with weights_only=True. Raises what torch.load raises for a file that is not a saved state."""
+    import torch
+    sd = torch.load(str(path), map_location="cpu", weights_only=True)
+    bad = []
+
+    def walk(name, v):
+        if torch.is_tensor(v):
+            if v.is_floating_point() and not bool(torch.isfinite(v).all()):
+                bad.append(f"{name} ({'nan' if bool(torch.isnan(v).any()) else 'inf'})")
+        elif isinstance(v, dict):
+            for k, x in v.items():
+                walk(f"{name}.{k}" if name else str(k).removeprefix("_orig_mod."), x)
+        elif isinstance(v, (list, tuple)):
+            for i, x in enumerate(v):
+                walk(f"{name}[{i}]", x)
+    walk("", sd)
+    return bad
+
+
+def newest_step(d8):
+    """Highest N with model_N.pt and meta_N.json in d8, or None."""
+    import re
+    best = None
+    if os.path.isdir(d8):
+        for f in os.listdir(d8):
+            m = re.match(r"model_(\d+)\.pt$", f)
+            if m and os.path.exists(os.path.join(d8, f"meta_{m.group(1)}.json")):
+                best = max(best or 0, int(m.group(1)))
+    return best
+
+
+def check_model_dir(d8):
+    """(step, names of broken tensors) of the newest model in a chatsft_checkpoints/d8 folder; (None, None) when
+    there is no model there."""
+    step = newest_step(str(d8))
+    if step is None:
+        return None, None
+    return step, nonfinite_tensors(os.path.join(str(d8), f"model_{step:06d}.pt"))
+
+
+def short_list(names, n=6):
+    """At most n names, then "and K more"."""
+    return ", ".join(names[:n]) + (f" and {len(names) - n} more" if len(names) > n else "")
 
 
 def plan_for_notebook(sft_dir, steps, tokens_per_step, smoltalk_rows=0, smoltalk_tokens=500, want=None):

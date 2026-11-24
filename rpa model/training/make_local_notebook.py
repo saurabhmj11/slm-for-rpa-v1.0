@@ -52,6 +52,12 @@ Training is saved in chunks (top-up: every 50 steps; refine: every 250; full: on
 restart or crash run cells 1-5 again and it continues from the last saved chunk. On a CPU it runs at low priority with
 one core left free, so the PC stays usable.
 
+Broken weights: before training, cell 4 checks that the start model's weights are all numbers. A model with nan
+(a run that went unstable, e.g. on Colab) is refused with the setting to use instead: `REFINE_FROM = "pc"` (this PC's
+installed model) or `"drive"` (Drive's newest) in cell 1; nothing switches by itself. While cell 5 trains, a loss
+that stays nan (5 steps) or a nan validation stops the chunk before it is saved, with a STOPPED line saying what to
+send; the next try of that chunk starts with a fresh optimizer state. Cell 6 never installs a model with nan weights.
+
 Cell 6 scores the new model and the installed one through the full assistant (catalog lock, repair, verify,
 self-correction), on sets 1-3 and the beginner set, as Colab cell 8 does; on a CPU a sample (`EVAL_PER_SET` requests
 per set, at most `EVAL_MINUTES` per model; a request takes 2-70 s on 4 cores, about 15-25 minutes per model). The new
@@ -76,6 +82,9 @@ MODE = "auto"              # "auto": GPU + a trained model (Drive / this PC) -> 
 REFINE_STEPS = 1500        # MODE "refine" (GPU): steps on top of the Colab model (T4-class GPU: about 40-65 min)
 REFINE_CHUNKS = 6          # saved every REFINE_STEPS / REFINE_CHUNKS steps (250): after a stop it continues
 REFINE_THEN_RL = False     # True: after a refine, cell 6 also runs RL on the newest installed model and tests it
+REFINE_FROM = "auto"       # the trained model refine / topup / rl continue: "auto" the newest (Drive's, or this PC's
+                           # when it already grew from it); "drive" Drive's newest (the Colab run); "pc" this PC's
+                           # installed model. Cell 4 refuses a model with broken weights (nan) and names the other one
 RL_STEPS = 200             # MODE "rl" (GPU): RL steps of 8 requests x 8 answers (about 3 h per 100; saved every 25)
 TOPUP_STEPS = 300          # top-up length in steps of 32,768 tokens (4 CPU cores: about 5.5-9 h)
 TOPUP_HOURS = 0            # > 0: measure this PC's speed first (about 5 min) and size the top-up to this many hours
@@ -262,6 +271,8 @@ if MODE_NOW == "auto":
 elif MODE == "auto":
     MODE_NOW = "topup"
     print('MODE "auto" -> "topup": no NVIDIA GPU (a CPU top-up of the newest trained model)')
+if REFINE_FROM not in ("auto", "drive", "pc"):
+    raise SystemExit(f'REFINE_FROM "{REFINE_FROM}" is not known: use "auto", "drive" or "pc"')
 if MODE_NOW == "rl" and not CUDA:
     raise SystemExit('MODE "rl" needs an NVIDIA GPU (each step writes 64 answers: about an hour per step on a CPU).')
 if MODE_NOW == "refine" and not CUDA:
@@ -317,6 +328,8 @@ code('''
 #@title 4. Check everything is in place (and size the top-up)
 TRAIN = [sys.executable, "-u", str(LOCAL / "train_pc.py"), "--rpa", str(ROOT), "--mode", MODE_NOW, "--data", str(DATA),
          "--seq", str(SEQ)]
+if MODE_NOW in ("refine", "topup"):
+    TRAIN += ["--start-from", REFINE_FROM]   # its weights are checked first: a broken (nan) model is refused
 def _refine_states():
     """(refine tested, RL after it: None / "going" / "done") for REFINE_THEN_RL."""
     _rs, _ls = ROOT / "local_run" / "refine" / "state.json", ROOT / "local_run" / "rl" / "state.json"
@@ -328,7 +341,7 @@ def _refine_states():
     return True, "done" if json.loads(_ls.read_text(encoding="utf-8")).get("finished") else "going"
 if MODE_NOW == "rl":           # RL (training/local/rl_pc.py, the Colab cell 9 recipe) on the newest trained model
     TRAIN = [sys.executable, "-u", str(LOCAL / "rl_pc.py"), "--rpa", str(ROOT), "--data", str(DATA),
-             "--steps", str(RL_STEPS)]
+             "--steps", str(RL_STEPS), "--start-from", REFINE_FROM]
 elif MODE_NOW == "full":
     TRAIN += ["--steps", str(FULL_STEPS), "--chunks", str(FULL_CHUNKS)]
 elif MODE_NOW == "refine":     # continue the finished Colab model (train_pc.py --mode refine, state local_run/refine)
@@ -374,7 +387,8 @@ else:
     rc = stream(TRAIN)
     print("\\nexit code", rc, "| log:", ROOT / "local_run" / MODE_NOW / "train.log")
     if rc != 0:
-        raise SystemExit("training stopped; run this cell again to continue from the last saved chunk")
+        raise SystemExit("training stopped (the lines above say why; a STOPPED line says what to do and send); run "
+                         "this cell again to continue from the last saved chunk")
 ''')
 
 code('''

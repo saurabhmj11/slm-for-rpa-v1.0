@@ -24,6 +24,13 @@ mixture for the whole run and reads its own share of it with a different shuffle
 average. With --chunks 1 (default on a GPU) the run is Colab cell 7.
 The state is kept in RPA/local_run/<mode>/ (state.json, the last two chunks, train.log): full, topup and refine runs
 never share a state. The result is the newest chunk; eval_pc.py scores it and installs it only if it is better.
+
+Broken weights (nan / inf) never go further: the start model is checked before anything runs (also --check), and a
+broken one is refused with what to use instead (--start-from pc / drive; notebook cell 1 REFINE_FROM), never swapped
+silently. The optimizer state saved with the start model is loaded only when it is finite (optimizer_choice). While a
+chunk trains, the loss and validation lines are watched (follow): a loss that is not a number for NAN_STEPS steps in
+a row, or a validation bpb that is not a number, stops the chunk; nothing of it is saved, the state notes it, and the
+next try of that chunk starts with a fresh optimizer state when the loaded one may be the cause.
 """
 import argparse
 import hashlib
@@ -58,6 +65,10 @@ REFINE_LR = 0.35                 # the Colab run peaked at 0.8 and ended at 0 (w
                                  # 0.8 would shake what it learned. A top-up of 300 steps uses 0.3; a refine is 5x longer
                                  # with its own warmdown over the second half, so a little more (0.35, 44% of the peak)
                                  # lets the new rows (v5, session) settle while the replay holds the rest
+
+
+NAN_STEPS = T.NAN_STEPS          # loss lines in a row that are not a number -> the chunk is stopped
+START_FROM = ("auto", "drive", "pc")     # notebook cell 1 REFINE_FROM (topup / refine)
 
 
 def newest(d):
@@ -166,6 +177,110 @@ def start_label(rpa, root):
     return str(root)
 
 
+def start_root(rpa, start_from="auto"):
+    """The model a top-up / refine continues: "auto" the newest (topup_start), "drive" Drive's newest model as
+    downloaded (train_data/drive_model), "pc" this PC's installed model (nanochat_base)."""
+    rpa = Path(rpa)
+    if start_from == "drive":
+        return rpa / "train_data" / "drive_model"
+    if start_from == "pc":
+        return rpa / "nanochat_base"
+    return topup_start(rpa)
+
+
+def model_health(d8, step):
+    """Are the weights of model_<step>.pt in d8 all finite? -> ("ok", []), ("broken", [tensor names with nan/inf]) or
+    ("unchecked", [why]) when this Python has no torch or the file is not a saved state (nanochat then says so
+    itself when it loads it)."""
+    if step is None:
+        return "unchecked", ["no model"]
+    try:
+        bad = T.nonfinite_tensors(Path(d8) / f"model_{step:06d}.pt")
+    except ImportError:
+        return "unchecked", ["torch is not installed in this Python"]
+    except Exception as ex:                                     # noqa: BLE001  (not a saved state dict)
+        return "unchecked", [f"could not read it ({type(ex).__name__}: {str(ex)[:120]})"]
+    return ("broken", bad) if bad else ("ok", [])
+
+
+def model_name(rpa, root):
+    rpa, root = Path(rpa), Path(root)
+    if root == rpa / "train_data" / "drive_model":
+        return "Drive's newest model (the Colab run)"
+    if root == rpa / "nanochat_base":
+        return "this PC's installed model"
+    return f"the model in {root}"
+
+
+def broken_message(rpa, root, step, bad, mode="refine"):
+    """The plain refusal for a start model with nan / inf weights, with the setting to use instead (never a silent
+    switch to another model)."""
+    rpa, root = Path(rpa), Path(root)
+    kinds = sorted({b.rsplit("(", 1)[-1].rstrip(")") for b in bad}) or ["nan"]
+    msg = (f"{model_name(rpa, root)} (step {step}) has broken weights ({'/'.join(kinds)}) in: {T.short_list(bad)}; "
+           "it cannot be trained or installed.")
+    if root == rpa / "train_data" / "drive_model":
+        msg += (" The Colab run went unstable: send its cell 7 loss lines (the 'step ... | loss:' and 'Validation "
+                "bpb' lines, mainly the first ones that are nan).")
+    others = {"pc": rpa / "nanochat_base", "drive": rpa / "train_data" / "drive_model"}
+    for key, other in others.items():
+        if other == root:
+            continue
+        d8 = other / "chatsft_checkpoints" / "d8"
+        ostep = newest(d8)
+        if ostep is None:
+            continue
+        status, _ = model_health(d8, ostep)
+        if status == "ok":
+            msg += (f" {model_name(rpa, other)[0].upper() + model_name(rpa, other)[1:]} (step {ostep}) is fine: to "
+                    f"{mode} it instead, set REFINE_FROM = \"{key}\" in notebook cell 1 (--start-from {key})"
+                    " and run cells 1-5 again.")
+            return msg
+    msg += (" No other trained model on this PC is usable: train again on Colab (cell 7) from a good model, or MODE "
+            "\"full\" on this GPU.")
+    return msg
+
+
+def optimizer_choice(d8, step, policy="auto", nan_before=False):
+    """Load the optimizer state saved with the model a chunk starts from (nanochat --load-optimizer)? -> (load, why).
+
+    The state is loaded when it is there and finite: chat_sft has no learning-rate warmup, and a fresh AdamW's first
+    steps move every embedding / scalar by about its full learning rate (its first update is lr x sign of the
+    gradient), while the saved second moments damp them; the Muon momentum and AdamW moments are averages over the
+    last ~10-20 steps, so their value is that smooth start, nothing more. A float16 run (Colab T4, GradScaler)
+    leaves no trace in them: GradScaler unscales the gradients before the optimizer step, so the moments are in real
+    units and carry over to bfloat16. Fresh instead: policy "fresh", no saved state, a state that is not finite or
+    cannot be read, or (policy "auto") nan_before: an earlier try of this chunk went nan with the state loaded."""
+    f = Path(d8) / f"optim_{step:06d}_rank0.pt"
+    if policy == "fresh":
+        return False, "fresh optimizer state (--optimizer fresh)"
+    if not f.exists():
+        return False, f"no optimizer state saved with the start model ({f.name}): a fresh one"
+    if nan_before and policy == "auto":
+        return False, ("the last try of this chunk went nan with the saved optimizer state loaded: this try starts "
+                       "with a fresh optimizer state")
+    try:
+        bad = T.nonfinite_tensors(f)
+    except ImportError:
+        bad = []
+    except Exception as ex:                                     # noqa: BLE001
+        return False, f"the saved optimizer state could not be read ({type(ex).__name__}): a fresh one"
+    if bad:
+        return False, (f"the saved optimizer state has nan/inf in {len(bad)} tensor(s) ({T.short_list(bad, 3)}): "
+                       "a fresh optimizer state instead")
+    return True, ("the saved optimizer state is finite: loaded (--optimizer load)" if policy == "load" else
+                  "the saved optimizer state is finite: loaded, as nanochat does (a fresh one if this chunk goes nan)")
+
+
+def nan_value(t):
+    """A loss / bpb text that is not a finite number ("nan", "inf", "-inf")."""
+    try:
+        v = float(t)
+    except ValueError:
+        return True
+    return v != v or v in (float("inf"), float("-inf"))
+
+
 def pinned_chat_sft(nano):
     """scripts/chat_sft.py of the pinned commit: from git when nanochat is a clone (like Colab cell 7), else the file
     as it is, which must be the unpatched pinned version (the zip ships it so)."""
@@ -205,7 +320,8 @@ def write_script(nano, data, views, smoltalk, seed, compile_ok):
     s = pinned_chat_sft(nano)
     missing = [k for k, a in {"window": T.WINDOW_ANCHOR, "meta": T.META_ANCHOR, "tasks start": T.TASKS_START,
                               "tasks end": T.TASKS_END, "import": T.IMPORT_ANCHOR, "loader": T.LOADER_OLD,
-                              "step": T.STEP_ANCHOR, "end": T.END_ANCHOR}.items() if a not in s]
+                              "step": T.STEP_ANCHOR, "end": T.END_ANCHOR, "loss line": T.LOSS_LOG_ANCHOR,
+                              "validation line": T.VAL_ANCHOR}.items() if a not in s]
     if missing:
         raise SystemExit(f"chat_sft.py does not match the pinned nanochat; missing: {missing}")
     s = T.patch_chat_sft(s, Path(data).as_posix(), views, smoltalk_rows=smoltalk, seed=seed)
@@ -308,9 +424,11 @@ def windows_kill_with_parent(p):
         return None
 
 
-def run_chunk(cmd, cwd, env, log, total_steps, step_offset, prio):
-    """Run one chat_sft chunk; full output to the log, a progress line every 10 steps here. -> (rc, seconds per step)."""
+def run_chunk(cmd, cwd, env, log, total_steps, step_offset, prio, watch=None):
+    """Run one chat_sft chunk; full output to the log, a progress line every 10 steps here. -> (rc, seconds per step).
+    watch (a dict) gets "nan": what was seen when follow() stopped the chunk because the loss went nan."""
     dts = []
+    watch = {} if watch is None else watch
     with open(log, "a", encoding="utf-8") as lf:
         lf.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(cmd)}\n")
         lf.flush()
@@ -320,7 +438,7 @@ def run_chunk(cmd, cwd, env, log, total_steps, step_offset, prio):
         pid_f = Path(log).with_name("child.pid")
         pid_f.write_text(str(p.pid), encoding="utf-8")
         try:
-            rc = follow(p, lf, dts, total_steps, step_offset)
+            rc = follow(p, lf, dts, total_steps, step_offset, watch)
         finally:          # a stopped notebook cell must not leave training running (Windows: also the job above)
             if p.poll() is None:
                 p.terminate()
@@ -355,23 +473,77 @@ def kill_leftover(run_dir):
     pid_f.unlink(missing_ok=True)
 
 
-def follow(p, lf, dts, total_steps, step_offset):
-    """Copy the chunk's output to the log; a progress line every 10 steps here; collect seconds per step."""
+STEP_RE = re.compile(r"step (\d+) \(([\d.]+)%\) \| loss: ([-+]?(?:nan|inf|[\d.]+(?:e[-+]?\d+)?))"
+                     r".*?dt: ([\d.]+)ms", re.I)
+VAL_RE = re.compile(r"Step (\d+) \| Validation bpb: (\S+)")
+
+
+def follow(p, lf, dts, total_steps, step_offset, watch=None, nan_steps=NAN_STEPS):
+    """Copy the chunk's output to the log; a progress line every 10 steps here (and every line once the loss is not a
+    number); collect seconds per step. NaN watchdog: a loss that is not a number in nan_steps step lines in a row,
+    a validation bpb that is not a number, or chat_sft's own NaN stop (sft_setup NAN_MARK) -> the chunk is ended
+    (nothing of it is saved: chat_sft saves only at its last step) and watch["nan"] says what was seen."""
+    watch = {} if watch is None else watch
+    bad = 0
     for line in p.stdout:
         lf.write(line)
         lf.flush()
-        m = re.match(r"step (\d+) \(([\d.]+)%\) \| loss: ([\d.]+).*?dt: ([\d.]+)ms", line)
+        m = STEP_RE.match(line)
+        v = VAL_RE.search(line)
+        why = None
         if m:
             s, dt = int(m.group(1)), float(m.group(4)) / 1000
             dts.append(dt)
-            if s % 10 == 0 or s <= 3:
+            is_nan = nan_value(m.group(3))
+            bad = bad + 1 if is_nan else 0
+            if s % 10 == 0 or s <= 3 or is_nan:
                 left = (total_steps - step_offset - s) * (sum(dts[-10:]) / len(dts[-10:])) / 3600
                 print(f"   step {step_offset + s}/{total_steps} | loss {m.group(3)} | {dt:.1f} s per step"
                       f" | about {left:.1f} h to go ({time.strftime('%H:%M')})", flush=True)
-        elif any(k in line for k in ("SFT attention window", "OOA training mixture", "Traceback", "Error",
-                                     "Training data actually read", "views", "skipped as longer", "Validation bpb")):
+            if bad >= nan_steps:
+                why = (f"the loss was not a number ({m.group(3)}) for {bad} steps in a row (from step "
+                       f"{step_offset + s - bad + 1})")
+        elif v and nan_value(v.group(2)):
             print("   " + line.rstrip(), flush=True)
+            why = (f"Validation bpb is {v.group(2)} at step {step_offset + int(v.group(1))}"
+                   + (" (before any training step of this chunk: the model it started from gives nan)"
+                      if int(v.group(1)) == 0 else ""))
+        elif T.NAN_MARK in line:
+            print("   " + line.rstrip(), flush=True)
+            why = line.split(":", 1)[-1].strip()
+        elif any(k in line for k in ("SFT attention window", "OOA training mixture", "Traceback", "Error",
+                                     "Training data actually read", "views", "skipped as longer", "Validation bpb",
+                                     "optimizer")):
+            print("   " + line.rstrip(), flush=True)
+        if why:
+            watch["nan"] = why
+            if p.poll() is None:
+                p.terminate()
+            try:
+                p.wait(timeout=60)
+            except Exception:                                      # noqa: BLE001
+                p.kill()
+            return p.wait()
     return p.wait()
+
+
+def nan_stop(state, state_f, k, why, loaded, log):
+    """A chunk stopped because the training went nan: note it in the state and stop with what to do and send."""
+    state.setdefault("nan_stops", []).append({"chunk": k, "why": why, "optimizer": "loaded" if loaded else "fresh",
+                                              "time": time.strftime("%Y-%m-%d %H:%M")})
+    state_f.write_text(json.dumps(state, indent=1), encoding="utf-8")
+    fresh_too = any(e["chunk"] == k and e["optimizer"] == "fresh" for e in state["nan_stops"])
+    if loaded:
+        nxt = ("Run cell 5 again (train_pc.py again): this chunk is retried with a fresh optimizer state, the likely "
+               "cause. If it goes nan again, send")
+    elif fresh_too and len([e for e in state["nan_stops"] if e["chunk"] == k]) > 1:
+        nxt = "It went nan with a fresh optimizer state too, so running it again will not help. Send"
+    else:
+        nxt = "Send"
+    raise SystemExit(
+        f"\nSTOPPED: chunk {k + 1} went unstable: {why}. Nothing of this chunk was saved (the chunks before it are "
+        f"kept, and the installed model is not touched). {nxt} the lines above (the 'step ... | loss' lines and the "
+        f"'Validation bpb' lines) and the end of {log}.")
 
 
 def main(argv=None):
@@ -385,6 +557,12 @@ def main(argv=None):
     ap.add_argument("--data", required=True, help="the rendered training data (sft_render)")
     ap.add_argument("--start", default=None, help="topup: a model folder with chatsft_checkpoints/d8 (+ tokenizer) to "
                                                   "continue; full: a folder with base_checkpoints/d8")
+    ap.add_argument("--start-from", choices=START_FROM, default="auto",
+                    help="topup / refine: auto = the newest trained model; drive = Drive's newest (the Colab run); "
+                         "pc = this PC's installed model (notebook cell 1 REFINE_FROM)")
+    ap.add_argument("--optimizer", choices=["auto", "load", "fresh"], default="auto",
+                    help="the optimizer state saved with the model a chunk starts from: auto = load it when it is "
+                         "finite (fresh after a nan try), load, fresh")
     ap.add_argument("--steps", type=int, default=None, help=f"optimizer steps of {TOKENS_PER_STEP:,} tokens (full "
                                                             f"{FULL_STEPS}, topup {TOPUP_STEPS}, refine {REFINE_STEPS})")
     ap.add_argument("--chunks", type=int, default=0, help=f"saved pieces (0: refine steps/{REFINE_CHUNK}; else 1 on a "
@@ -435,13 +613,31 @@ def main(argv=None):
     state = json.loads(state_f.read_text(encoding="utf-8")) if state_f.exists() else {}
     if state.get("finished"):
         state = {}                                    # the last run is complete (eval_pc.py took it): a new one
+    if state and not full and not a.start and a.start_from != "auto" and \
+            Path(state["start"]) != start_root(rpa, a.start_from):
+        print(f"note: the run in progress started from {model_name(rpa, state['start'])}; --start-from "
+              f"{a.start_from} (REFINE_FROM) asks for {model_name(rpa, start_root(rpa, a.start_from))}: a new run "
+              "starts from it")
+        state = {}
+        if not a.check:
+            shutil.rmtree(run_dir, ignore_errors=True)
+    if state and state.get("done"):                 # a chunk saved by an older version could be broken (nan)
+        _last = run_dir / "chunks" / f"chunk_{state['done'] - 1:03d}"
+        _st, _bad = model_health(_last, newest(_last))
+        if _st == "broken":
+            print(f"note: the run in progress is broken: its saved chunk {state['done']} has nan/inf in "
+                  f"{T.short_list(_bad, 3)} (saved before the NaN check existed). It is thrown away and the run "
+                  "starts over.")
+            state = {}
+            if not a.check:
+                shutil.rmtree(run_dir, ignore_errors=True)
 
     # where the run starts: the base model (full) or the newest SFT model (topup)
     if state:
         src_root, src_step = Path(state["start"]), state["start_step"]
     else:
         src_root = Path(a.start).expanduser().resolve() if a.start else (
-            rpa / "train_data" / "base" if full else topup_start(rpa))
+            rpa / "train_data" / "base" if full else start_root(rpa, a.start_from))
         src_step = newest(src_root / ("base_checkpoints" if full else "chatsft_checkpoints") / "d8")
     src_d8 = src_root / ("base_checkpoints" if full else "chatsft_checkpoints") / "d8"
     tok = next((p for p in (src_root / "tokenizer", rpa / "nanochat_base" / "tokenizer")
@@ -466,6 +662,11 @@ def main(argv=None):
     if refine and not gpu and not (a.allow_cpu or a.measure):
         problems.append(f"refine is sized for an NVIDIA GPU ({a.steps} steps; about a day per 1500 steps on a CPU): "
                         "use --mode topup on this PC")
+    health = model_health(src_d8, src_step) if src_step is not None else ("unchecked", [])
+    if health[0] == "broken":
+        problems.append(broken_message(rpa, src_root, src_step, health[1], a.mode) if not full else
+                        f"the base model in {src_d8} (step {src_step}) has broken weights (nan/inf) in: "
+                        f"{T.short_list(health[1])}; download it again (notebook cell 3 with REFRESH_DATA = True)")
     if gpu and cap and cap < (7, 5) and not a.no_compile:
         problems.append(f"GPU {dev_name} is too old for torch.compile: add --no-compile")
     if state and not seq_given:
@@ -498,7 +699,16 @@ def main(argv=None):
     print("device           :", dev_name, f"({mem:.0f} GB)" if gpu else "", "| torch.compile", "off" if a.no_compile else "on")
     print("mode             :", a.mode, "| from", src_d8, f"step {src_step}")
     if not full:
-        print("start model      :", start_label(rpa, src_root))
+        print("start model      :", start_label(rpa, src_root) if a.start_from == "auto" or a.start else
+              f"{model_name(rpa, src_root)} (--start-from {a.start_from}: notebook cell 1 REFINE_FROM)")
+    print("weights          :", {"ok": "all finite (checked)", "broken": "BROKEN (nan/inf), see below"}.get(
+        health[0], "not checked: " + "; ".join(health[1])))
+    _k = state.get("done", 0)                              # the next chunk: from the start model or the last chunk
+    _fd = src_d8 if _k == 0 else run_dir / "chunks" / f"chunk_{_k - 1:03d}"
+    _fs = src_step if _k == 0 else newest(_fd)
+    if _fs is not None and health[0] != "broken":
+        print("optimizer        :", optimizer_choice(_fd, _fs, a.optimizer, any(
+            e["chunk"] == _k and e["optimizer"] == "loaded" for e in state.get("nan_stops", [])))[1])
     print("training data    :", data, f"(render {data_sig(data)})")
     print(f"plan             : {a.steps} steps x {TOKENS_PER_STEP:,} tokens at window {a.seq} (device batch {dbs}, "
           f"{accum} micro-batches per step) in {a.chunks} chunk(s) of up to {chunk}; {done} done | lr {a.lr} | "
@@ -562,6 +772,14 @@ def main(argv=None):
         shutil.copytree(tok, wb / "tokenizer", dirs_exist_ok=True)     # dirs_exist_ok: Windows may leave a
         if (run_dir / "task_data").exists():                             # locked leftover of the last chunk
             shutil.copytree(run_dir / "task_data", wb / "task_data", dirs_exist_ok=True)
+        f_status, f_bad = model_health(from_dir, from_step)
+        if f_status == "broken":                     # never train on (or save over) a broken model
+            raise SystemExit(broken_message(rpa, src_root, from_step, f_bad, a.mode) if k == 0 else
+                             f"chunk {k} of this run (in {from_dir}) has nan/inf in {T.short_list(f_bad, 3)}: run "
+                             "again with --restart (notebook: RESTART_TRAINING = True)")
+        nan_before = any(e["chunk"] == k and e["optimizer"] == "loaded" for e in state.get("nan_stops", []))
+        load_opt, why_opt = optimizer_choice(from_dir, from_step, a.optimizer, nan_before)
+        print("   optimizer:", why_opt, flush=True)
         write_script(nano, data, views, a.smoltalk, state.get("seed", 1) + k, compile_ok=not a.no_compile)
         env = dict(os.environ, NANOCHAT_BASE_DIR=str(wb), OOA_TRAINING_DIR=str(HERE.parent), PYTHONUTF8="1",
                    PYTHONIOENCODING="utf-8", NANOCHAT_DTYPE=dtype, OMP_NUM_THREADS=str(1 if gpu else threads),
@@ -570,11 +788,16 @@ def main(argv=None):
                f"--total-batch-size={TOKENS_PER_STEP}", f"--num-iterations={steps_k * accum}",
                f"--eval-every={100 if gpu else -1}", f"--eval-tokens={a.seq * dbs * 8}", "--chatcore-every=-1",
                "--run=dummy", f"--init-lr-frac={lr0:.6f}", f"--warmdown-ratio={wd:.6f}", f"--final-lr-frac={final:.6f}",
-               "--model-tag=d8", f"--model-step={from_step}"] + lr_flags(state["base_lrs"])
+               "--model-tag=d8", f"--model-step={from_step}", f"--load-optimizer={int(load_opt)}"] \
+            + lr_flags(state["base_lrs"])
         if not gpu:
             cmd.append("--device-type=cpu")
         t0 = time.time()
-        rc, sps = run_chunk(cmd, nano, env, log, a.steps, bounds[k], prio)
+        watch = {}
+        rc, sps = run_chunk(cmd, nano, env, log, a.steps, bounds[k], prio, watch)
+        if watch.get("nan") or rc == T.NAN_EXIT:
+            nan_stop(state, state_f, k, watch.get("nan") or "chat_sft stopped on a loss that is not a number",
+                     load_opt, log)
         if rc != 0:
             raise SystemExit(f"chunk {k + 1} stopped with an error (see the end of {log}). Run again to retry it; the "
                              "chunks before it are kept.")
@@ -582,6 +805,9 @@ def main(argv=None):
         cstep = newest(out_d8)
         if cstep is None:
             raise SystemExit(f"chunk {k + 1} produced no model (see {log}); run again to retry it")
+        o_status, o_bad = model_health(out_d8, cstep)
+        if o_status == "broken":                     # the watchdog missed it: still never saved or advanced
+            nan_stop(state, state_f, k, f"the model it saved has nan/inf in {T.short_list(o_bad, 3)}", load_opt, log)
         if sps:
             speeds.append(sps)
         if a.measure:

@@ -348,7 +348,8 @@ print("\\n".join(_lines))
 p = "/content/nanochat/scripts/chat_sft.py"
 _s = open(p).read().replace("\\r\\n", "\\n")
 _need = {"window": _T.WINDOW_ANCHOR, "meta": _T.META_ANCHOR, "tasks start": _T.TASKS_START, "tasks end": _T.TASKS_END,
-         "import": _T.IMPORT_ANCHOR, "loader": _T.LOADER_OLD, "step": _T.STEP_ANCHOR, "end": _T.END_ANCHOR}
+         "import": _T.IMPORT_ANCHOR, "loader": _T.LOADER_OLD, "step": _T.STEP_ANCHOR, "end": _T.END_ANCHOR,
+         "loss line": _T.LOSS_LOG_ANCHOR, "validation line": _T.VAL_ANCHOR}
 _miss = [k for k, a in _need.items() if a not in _s]
 if _miss:      # say exactly what differs, so it can be fixed from this output
     print("chat_sft.py does not match the pinned nanochat; missing:", _miss, "| sha1 of the file:",
@@ -362,6 +363,7 @@ open(p, "w").write(_T.patch_chat_sft(_s, SFT_DIR, VIEWS, smoltalk_rows=SMOLTALK_
 print("patched chat_sft.py")
 # keep the previous model: nanochat loads the highest step in chatsft_checkpoints, so move it aside (never deleted)
 _ck = os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatsft_checkpoints")
+_keep = None
 if os.path.exists(_ck):
     _keep = _ck + "_before_" + time.strftime("%Y%m%d_%H%M%S")
     shutil.move(_ck, _keep)
@@ -369,6 +371,28 @@ if os.path.exists(_ck):
 !python -m scripts.chat_sft --max-seq-len={SFT_SEQ} --device-batch-size={SFT_DEVICE_BATCH} \\
     --total-batch-size={SFT_SEQ*SFT_DEVICE_BATCH*4} --num-iterations={SFT_ITERS} \\
     --eval-every=100 --eval-tokens={SFT_SEQ*SFT_DEVICE_BATCH*8} --chatcore-every=-1 --run=dummy
+# Is the trained model usable? The patch stops a run whose loss stays nan (5 steps) or whose validation is nan before
+# it saves anything ("OOA NAN STOP" above). A saved model with nan / inf weights is moved aside, so neither cell 8 nor
+# the PC notebook takes it for the newest model.
+_step, _bad = _T.check_model_dir(os.path.join(_ck, "d8"))
+if _step is None:
+    print("!" * 110)
+    print("NO MODEL WAS SAVED: the run stopped before its end. An 'OOA NAN STOP' line above means the loss became nan:")
+    print("the training went unstable. Send the first 'step ... | loss' lines and the 'Validation bpb' lines of this cell.")
+    print("The previous model is kept in", _keep or "(there was none)")
+    print("!" * 110)
+    raise SystemExit("cell 7: no trained model was saved (see the lines above)")
+if _bad:
+    _broken = _ck + "_broken_" + time.strftime("%Y%m%d_%H%M%S")
+    shutil.move(_ck, _broken)
+    print("!" * 110)
+    print(f"THE TRAINED MODEL IS BROKEN: step {_step} has nan/inf weights in {_T.short_list(_bad)}.")
+    print("The training went unstable. It was moved to", _broken, "so nothing uses it; the previous model is kept in",
+          _keep or "(there was none)")
+    print("Send the first 'step ... | loss' lines and the 'Validation bpb' lines of this cell.")
+    print("!" * 110)
+    raise SystemExit("cell 7: the trained model has broken weights (see the lines above)")
+print(f"trained model step {_step}: all weights are finite (checked)")
 ''')
 
 code('''
@@ -376,6 +400,16 @@ code('''
 import os, subprocess, json, sys
 EVAL_SOURCE = globals().get("EVAL_SOURCE", "sft")
 print("evaluating model source:", EVAL_SOURCE)
+sys.path.insert(0, "/content/ooa")
+import sft_setup as _T8
+if EVAL_SOURCE == "sft":           # never test (or hand on) a model whose weights are nan: the run went unstable
+    _s8, _b8 = _T8.check_model_dir(os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatsft_checkpoints", "d8"))
+    if _s8 is None:
+        raise SystemExit("no trained model in chatsft_checkpoints/d8: cell 7 did not save one (see its output)")
+    if _b8:
+        raise SystemExit(f"THE TRAINED MODEL (step {_s8}) HAS BROKEN WEIGHTS (nan/inf in {_T8.short_list(_b8)}): the "
+                         "training went unstable; it cannot be tested or used. Send cell 7's loss lines.")
+    print(f"model step {_s8}: all weights are finite (checked)")
 # chat_cli stops after 256 new tokens; flows are longer, so raise the limit
 cli = "/content/nanochat/scripts/chat_cli.py"
 t = open(cli).read()

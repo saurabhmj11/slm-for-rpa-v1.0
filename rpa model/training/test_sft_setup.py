@@ -117,6 +117,57 @@ def test_patch_chat_sft_pinned_nanochat():
         assert "changed upstream" in str(ex)
 
 
+def test_nan_guard_stops_before_saving():
+    """The guard patch_chat_sft puts after the loss line / the validation line: a loss that is not a number for
+    NAN_STEPS steps in a row (or a nan validation) ends chat_sft with NAN_EXIT before its last step saves anything."""
+    import math
+    printed = []
+    g = {"_ooa_math": math, "_ooa_bad_loss": [0], "print0": printed.append}
+    exec("def step_(train_loss, step):\n" + T.LOSS_GUARD, g)
+    exec("def val_(val_bpb, step):\n    if True:\n" + T.VAL_GUARD, g)
+
+    class Loss:
+        def __init__(self, v):
+            self.v = v
+
+        def item(self):
+            return self.v
+    nan = float("nan")
+    for i, v in enumerate([2.0, nan, float("inf"), nan, nan, 1.9, nan, nan, nan, nan], 1):   # never 5 in a row
+        g["step_"](Loss(v), i)
+    assert not printed
+    try:
+        g["step_"](Loss(nan), 11)
+        raise RuntimeError("the 5th nan step in a row must stop")
+    except SystemExit as ex:
+        assert ex.code == T.NAN_EXIT == 86
+    assert printed[0].startswith(T.NAN_MARK) and "(step 11)" in printed[0] and "nothing was saved" in printed[0]
+    g["val_"](1.23, 0)
+    try:
+        g["val_"](nan, 0)
+        raise RuntimeError("a nan validation must stop")
+    except SystemExit as ex:
+        assert ex.code == T.NAN_EXIT
+    assert "the start model is broken before any training step" in printed[-1]
+    if not NANOCHAT:
+        print("  (pinned-nanochat part skipped: give the nanochat checkout as an argument or env NANOCHAT_DIR)")
+        return
+    src = open(os.path.join(NANOCHAT, "scripts/chat_sft.py"), encoding="utf-8").read()
+    out = T.patch_chat_sft(src, "/d", {"a.jsonl": 1.0})
+    compile(out, "chat_sft.py", "exec")
+    loss_line = out.index(T.LOSS_LOG_ANCHOR)
+    assert loss_line < out.index("_ooa_bad_loss[0] = 0 if") < out.index("if step % 10 == 0:", loss_line)
+    assert out.index(T.VAL_ANCHOR) < out.index("if not _ooa_math.isfinite(val_bpb)") < out.index("save_checkpoint(\n")
+    assert out.index("_ooa_bad_loss = [0]") < out.index("while True:") and "import math as _ooa_math" in out
+    assert '"compute_dtype": str(COMPUTE_DTYPE)' in out
+    for anchor in (T.LOSS_LOG_ANCHOR, T.VAL_ANCHOR):
+        try:
+            T.patch_chat_sft(src.replace(anchor, "    pass\n"), "/d", {"a.jsonl": 1.0})
+            raise RuntimeError("a missing anchor must stop the patch")
+        except AssertionError as ex:
+            assert "changed upstream" in str(ex)
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

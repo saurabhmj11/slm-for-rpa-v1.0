@@ -82,6 +82,21 @@ The old modes `long`, `curriculum` and `big` and the old plain-prompt `refine` (
 `curriculum_local.py`, `big_local.py`, `train_local.py`, `topup_local.py`) are gone: they trained the old plain-prompt
 format with plain-JSON answers and a 2048 window without the window fix, so their result would undo the v4 model.
 
+## Broken weights (nan)
+
+A run that goes unstable leaves weights that are not numbers (nan / inf). Nothing passes them on:
+- `train_pc.py` (also `--check`, notebook cell 4) loads the start model's tensors and refuses a broken one by name,
+  with the setting to use instead (cell 1 `REFINE_FROM = "pc"` / `"drive"`, `--start-from`); it never switches by
+  itself. A run in progress whose saved chunk is broken (from an older version) starts over.
+- The optimizer state saved with the start model is loaded only when it is finite (`optimizer_choice`; `--optimizer
+  auto|load|fresh`); after a chunk went nan with it loaded, the next try starts with a fresh one.
+- While a chunk trains, a loss that is nan for 5 steps in a row or a nan validation stops it (train_pc `follow`, and
+  the same guard inside chat_sft from `sft_setup.patch_chat_sft`, exit code 86): nothing of it is saved, the state
+  notes it (`nan_stops`), and a STOPPED line says what to send. A saved chunk is checked again before it counts.
+- `eval_pc.py` never scores or installs a broken model (exit code 2); `rl_pc.py` refuses a broken start model.
+- Colab cell 7 checks the model it saved: a broken one is moved to `chatsft_checkpoints_broken_<date>` (so the PC
+  never downloads it as the newest), and cell 8 refuses to test one.
+
 ## Run order
 
 1. Settings (`DRIVE_FOLDER_ID`, `MODE`). 2. Check this PC (installs PyTorch and the packages). 3. Download (and
