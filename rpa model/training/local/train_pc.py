@@ -3,6 +3,9 @@
     python train_pc.py --mode full  --data DIR   the Colab run: 12000 steps at 4096 from the pretrained BASE model
                                                  (NVIDIA GPU: a few hours; on a CPU it would take weeks)
     python train_pc.py --mode topup --data DIR   continue the newest SFT model for a few hundred steps (CPU: a night)
+    python train_pc.py --mode refine --data DIR  NVIDIA GPU: continue the finished Colab model (v5) for 1500 steps on
+                                                 the newest data (v5, session) and the weak areas, with replay of the
+                                                 rest (sft_setup.REFINE_SHARES); saved every 250 steps
     ... --check                                  only show what would be used
     ... --measure 3                              train 3 steps, print seconds per step, change nothing
     ... --restart                                throw away a run in progress and start over
@@ -19,8 +22,8 @@ then the linear warmdown over the second half, exactly the shape of one long run
 mixture for the whole run and reads its own share of it with a different shuffle (seed + k; a full run starts at seed
 1 like Colab, every top-up round at a new seed), so over the run every file is seen the planned number of times on
 average. With --chunks 1 (default on a GPU) the run is Colab cell 7.
-The state is kept in RPA/local_run/<mode>/ (state.json, the last two chunks, train.log). The result is the newest
-chunk; eval_pc.py scores it and installs it only if it is better.
+The state is kept in RPA/local_run/<mode>/ (state.json, the last two chunks, train.log): full, topup and refine runs
+never share a state. The result is the newest chunk; eval_pc.py scores it and installs it only if it is better.
 """
 import argparse
 import hashlib
@@ -46,6 +49,15 @@ TOPUP_LR = 0.3                   # a top-up only adjusts an already trained mode
 TOPUP_STEPS = 300                # measured on a 4-core CPU at the 4096 window, no torch.compile: 67 s per step at low
                                  # priority with 3 threads (55 s with all 4) -> about 5.6 h; slower PCs up to about 9 h
 SMOLTALK_ROWS = 3000             # Colab cell 1 SMOLTALK_ROWS (downloads SmolTalk once); top-ups use none
+REFINE_STEPS = 1500              # GPU refine of the finished Colab model: 1/8 of its 12000 steps. The Colab T4 trains
+                                 # 12000 steps in about 3.5-4.5 h (1.1-1.35 s per step with torch.compile), so 1500 steps
+                                 # take about 30-35 min there; on Windows without torch.compile, or an 8 GB GPU (1 row per
+                                 # pass), about 1.5-2.5 s per step -> 40-65 min, plus 1-2 min of loading per chunk
+REFINE_CHUNK = 250               # saved every 250 steps (a PC can stop: run again and it continues)
+REFINE_LR = 0.35                 # the Colab run peaked at 0.8 and ended at 0 (warmdown); restarting a trained model at
+                                 # 0.8 would shake what it learned. A top-up of 300 steps uses 0.3; a refine is 5x longer
+                                 # with its own warmdown over the second half, so a little more (0.35, 44% of the peak)
+                                 # lets the new rows (v5, session) settle while the replay holds the rest
 
 
 def newest(d):
@@ -116,6 +128,16 @@ def topup_start(rpa):
     if newest(here / "chatsft_checkpoints" / "d8") is not None and same_drive_model(local_origin(rpa), drive_id(drive)):
         return here
     return drive
+
+
+def start_label(rpa, root):
+    """Where a top-up / refine / RL run starts, in words."""
+    rpa, root = Path(rpa), Path(root)
+    if root == rpa / "train_data" / "drive_model":
+        return "Drive's newest trained model (e.g. the Colab v5 run)"
+    if root == rpa / "nanochat_base":
+        return "this PC's installed model (it is Drive's newest or already grew from it)"
+    return str(root)
 
 
 def pinned_chat_sft(nano):
@@ -333,23 +355,27 @@ def main(argv=None):
         pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rpa", default=str(RPA_DEFAULT), help='the "rpa model" folder')
-    ap.add_argument("--mode", choices=["full", "topup"], required=True)
+    ap.add_argument("--mode", choices=["full", "topup", "refine"], required=True)
     ap.add_argument("--data", required=True, help="the rendered training data (sft_render)")
     ap.add_argument("--start", default=None, help="topup: a model folder with chatsft_checkpoints/d8 (+ tokenizer) to "
                                                   "continue; full: a folder with base_checkpoints/d8")
-    ap.add_argument("--steps", type=int, default=None, help=f"optimizer steps of {TOKENS_PER_STEP:,} tokens (full {FULL_STEPS}, topup {TOPUP_STEPS})")
-    ap.add_argument("--chunks", type=int, default=0, help="saved pieces (0: 1 on a GPU, steps/50 on a CPU)")
+    ap.add_argument("--steps", type=int, default=None, help=f"optimizer steps of {TOKENS_PER_STEP:,} tokens (full "
+                                                            f"{FULL_STEPS}, topup {TOPUP_STEPS}, refine {REFINE_STEPS})")
+    ap.add_argument("--chunks", type=int, default=0, help=f"saved pieces (0: refine steps/{REFINE_CHUNK}; else 1 on a "
+                                                          "GPU, steps/50 on a CPU)")
     ap.add_argument("--seq", type=int, default=0, choices=[0, 2048, 4096],
                     help="window (0: 4096 as Colab; 2048 on a CPU PC with less than 10 GB RAM, as notebook cell 2)")
     ap.add_argument("--device-batch", type=int, default=0, help="rows per pass (0: from GPU memory; 1 on a CPU)")
-    ap.add_argument("--lr", type=float, default=None, help=f"--init-lr-frac (full {FULL_LR}, topup {TOPUP_LR})")
+    ap.add_argument("--lr", type=float, default=None, help=f"--init-lr-frac (full {FULL_LR}, topup {TOPUP_LR}, "
+                                                           f"refine {REFINE_LR})")
     ap.add_argument("--smoltalk", type=int, default=None, help=f"general chat rows (full {SMOLTALK_ROWS}, topup 0)")
     ap.add_argument("--threads", type=int, default=0, help="CPU threads (0: all but one at low priority)")
     ap.add_argument("--full-speed", action="store_true", help="CPU: all threads, normal priority")
     ap.add_argument("--no-compile", action="store_true", default=(os.name == "nt"),
                     help="run without torch.compile (automatic on Windows)")
     ap.add_argument("--compile", dest="no_compile", action="store_false")
-    ap.add_argument("--allow-cpu-full", action="store_true", help="full mode on a CPU (weeks; only for testing)")
+    ap.add_argument("--allow-cpu-full", "--allow-cpu", dest="allow_cpu", action="store_true",
+                    help="full or refine on a CPU (days to weeks; only for testing)")
     ap.add_argument("--measure", type=int, default=0, help="train this many steps, print seconds per step, keep nothing")
     ap.add_argument("--restart", action="store_true")
     ap.add_argument("--check", action="store_true")
@@ -359,17 +385,17 @@ def main(argv=None):
     rpa = Path(a.rpa).expanduser().resolve()
     data = Path(a.data).expanduser().resolve()
     nano = rpa / "nanochat"
-    full = a.mode == "full"
+    full, refine = a.mode == "full", a.mode == "refine"
     dev, dev_name, mem, cap = device_info()
     gpu = dev == "cuda"
     seq_given = bool(a.seq)
     a.seq = a.seq or default_seq(gpu)
-    a.steps = a.steps or (FULL_STEPS if full else TOPUP_STEPS)
+    a.steps = a.steps or (FULL_STEPS if full else REFINE_STEPS if refine else TOPUP_STEPS)
     if a.measure:
         a.steps, a.chunks = a.measure, 1
-    a.chunks = a.chunks or (1 if gpu else max(1, round(a.steps / 50)))
+    a.chunks = a.chunks or (max(1, round(a.steps / REFINE_CHUNK)) if refine else 1 if gpu else max(1, round(a.steps / 50)))
     a.chunks = max(1, min(a.chunks, a.steps))
-    a.lr = a.lr if a.lr is not None else (FULL_LR if full else TOPUP_LR)
+    a.lr = a.lr if a.lr is not None else (FULL_LR if full else REFINE_LR if refine else TOPUP_LR)
     a.smoltalk = a.smoltalk if a.smoltalk is not None else (SMOLTALK_ROWS if full and not a.measure else 0)
     dbs = a.device_batch or (gpu_batch(mem, a.seq) if gpu else 1)
     if TOKENS_PER_STEP % (a.seq * dbs):
@@ -409,8 +435,11 @@ def main(argv=None):
                         f"needed), or: python \"{HERE / 'setup_pc.py'}\" --rpa \"{rpa}\"")
     if not (data / "examples.jsonl").exists():
         problems.append(f"{data} is not rendered data (no examples.jsonl): run the data cell (data_pc.py) first")
-    if full and not gpu and not (a.allow_cpu_full or a.measure):
+    if full and not gpu and not (a.allow_cpu or a.measure):
         problems.append("full training needs an NVIDIA GPU (12000 steps; a CPU would take weeks): use --mode topup")
+    if refine and not gpu and not (a.allow_cpu or a.measure):
+        problems.append(f"refine is sized for an NVIDIA GPU ({a.steps} steps; about a day per 1500 steps on a CPU): "
+                        "use --mode topup on this PC")
     if gpu and cap and cap < (7, 5) and not a.no_compile:
         problems.append(f"GPU {dev_name} is too old for torch.compile: add --no-compile")
     if state and not seq_given:
@@ -442,6 +471,8 @@ def main(argv=None):
     print("assistant folder :", rpa)
     print("device           :", dev_name, f"({mem:.0f} GB)" if gpu else "", "| torch.compile", "off" if a.no_compile else "on")
     print("mode             :", a.mode, "| from", src_d8, f"step {src_step}")
+    if not full:
+        print("start model      :", start_label(rpa, src_root))
     print("training data    :", data, f"(render {data_sig(data)})")
     print(f"plan             : {a.steps} steps x {TOKENS_PER_STEP:,} tokens at window {a.seq} (device batch {dbs}, "
           f"{accum} micro-batches per step) in {a.chunks} chunk(s) of up to {chunk}; {done} done | lr {a.lr} | "

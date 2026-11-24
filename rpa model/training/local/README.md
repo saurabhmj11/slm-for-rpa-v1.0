@@ -16,7 +16,26 @@ from top to bottom). It drives the three scripts in this folder, which reuse the
 
 ## Modes (cell 1 `MODE`)
 
-- **`full`** (default with an NVIDIA GPU): exactly Colab cell 7. 8000 steps of 32,768 tokens at the 4096 window from
+- **`auto`** (default): cell 3 picks and says why (`data_pc.choose_mode`): an NVIDIA GPU and a finished trained model
+  on Drive (`chatsft_checkpoints/d8`, or a kept `chatsft_checkpoints_before_*`) or on this PC -> `refine`; a GPU and
+  no trained model anywhere -> `full`; no GPU -> `topup`.
+- **`refine`** (NVIDIA GPU; the step after a Colab run): continues the **finished Colab model** (v5; or this PC's own
+  when it already grew from that Drive model, `train_pc.topup_start`) for `REFINE_STEPS` (1500, 1/8 of the Colab
+  run) steps, saved every 250 steps (`REFINE_CHUNKS` 6, resumable), learning rate 0.35 (the Colab run peaked at 0.8
+  and ended at 0: restarting at 0.8 would shake what it learned; 0.35 with its own warmdown lets the new rows settle).
+  Mixture `sft_setup.REFINE_SHARES`: v5 14%, session 8% (the v5 model never saw it), beginner 20%, long 13%,
+  business2 8%, targeted 6%, clarify 5%, fix 5%, feedback 3% when there is some; `REFINE_REPLAY` 18% replays every
+  other file in the full mix's proportions. State in `local_run/refine/` (never shared with a top-up or full run).
+  Estimated 40-65 minutes on a T4-class GPU (RTX 3060/4060; the Colab T4 with `torch.compile` trains 12000 steps in
+  3.5-4.5 h, so 1500 steps take about 30-35 min there), plus 1-2 minutes of loading per chunk. Cell 6 then installs
+  it only if it beats the Colab model it started from (and the model this PC had); if it does not, the Colab model is
+  installed when it beats the PC's older one. `REFINE_THEN_RL = True` runs RL (MODE `rl`) and its test right after.
+- New files Colab's render lacks (e.g. `session_train.jsonl`, made after the v5 run): every mode but `full` takes them
+  from Drive `sft/` when uploaded, else from the repo (`data/extra_sft/`), and renders only them here
+  (`data_pc.render_extras`: Colab's settings, catalog and example index first; byte-identical to rendering them with
+  the rest), instead of rendering everything again. `full` stays exactly the Colab data.
+- **`full`** (NVIDIA GPU, explicit or `auto` without any trained model): exactly Colab cell 7, from the base model (it
+  does not use the Colab model). 8000 steps of 32,768 tokens at the 4096 window from
   the **pretrained base model**, the full mixture planned for that budget (`sft_setup.plan_for_notebook`), 3000
   SmolTalk rows, learning rate 0.8 of the base one. The device batch follows the GPU memory (2 x 4096 on 14+ GB like
   the Colab T4, 1 below, 4 on 30+ GB); the tokens per step stay the same. About 2-3 hours on an RTX 3060/4060.
@@ -46,7 +65,9 @@ from top to bottom). It drives the three scripts in this folder, which reuse the
   targeted, fix, clarify, beginner); otherwise (an older render, or a 2048 PC) the data is rendered here.
 - Stopping cell 5 or 6 ends the step with everything it started (on Windows the whole process tree; `train_pc.py`
   also puts the training process in a Windows job that ends with it).
-- **`rl`** (NVIDIA GPU only): RL as Colab cell 9 on the newest trained model (`RL_STEPS` (200) steps of 8 requests x 8
+- **`rl`** (NVIDIA GPU only): RL as Colab cell 9 on the newest trained model (always `train_pc.topup_start` now: after
+  a refine that cell 6 installed, the refined model; an RL run in progress from an older start model is replaced by a
+  new run, its result kept) (`RL_STEPS` (200) steps of 8 requests x 8
   answers, at most 1536 new tokens per answer, window 4096). Use it on a finished SFT model (v5), then cell 6 tests
   it and installs it only if it is better. Estimated about 3 hours per 100 steps on an RTX 3060/4060-class GPU (about a
   T4; range 2-6.5 h: sampling the answers token by token is most of the time, and requests whose answers all score the
@@ -54,7 +75,7 @@ from top to bottom). It drives the three scripts in this folder, which reuse the
 - **`install`**: no training; tests Drive's newest model against the installed one and installs it if it is better
   (the quickest way to get a new Colab model onto the PC).
 
-The old modes `long`, `refine`, `curriculum` and `big` (and their scripts `train_long.py`, `refine_local.py`,
+The old modes `long`, `curriculum` and `big` and the old plain-prompt `refine` (and their scripts `train_long.py`, `refine_local.py`,
 `curriculum_local.py`, `big_local.py`, `train_local.py`, `topup_local.py`) are gone: they trained the old plain-prompt
 format with plain-JSON answers and a 2048 window without the window fix, so their result would undo the v4 model.
 

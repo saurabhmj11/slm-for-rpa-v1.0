@@ -3,6 +3,7 @@
     python render_dataset.py SRC_DIR OUT_DIR --catalog CATALOG.jsonl [--k 12] [--seed 7] [--extra FILE ...]
                              [--variables-rate 0.3] [--reply-context 0.5] [--max-chars 6500] [--max-tokens 2020]
                              [--no-parts] [--answer-format compact|full] [--gold-dropout 0.5] [--dropout-frac 0.2,0.45]
+                             [--examples-from EARLIER/examples.jsonl]
 
 Reads every chat file SRC_DIR/*.jsonl ({"messages": [...]} rows, e.g. sft_clean/) and every neutral-record file given
 with --extra ({"kind": "flow"|"fix"|"clarify", ...}), and writes OUT_DIR/<same name>.jsonl in chat format:
@@ -120,7 +121,10 @@ def load_items(path, extra, cat, fixes):
 
 def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.3, reply_context=0.5,
            max_chars=F.MAX_ROW_CHARS, parts=True, log=print, max_tokens=F.MAX_ROW_TOKENS, answer_format=F.ANSWER_COMPACT,
-           gold_dropout=F.GOLD_DROPOUT, dropout_frac=F.GOLD_DROPOUT_FRAC):
+           gold_dropout=F.GOLD_DROPOUT, dropout_frac=F.GOLD_DROPOUT_FRAC, examples_from=None):
+    """examples_from: an examples.jsonl of an earlier render (e.g. Colab's sft_render); its requests come first in the
+    example index, then this render's, so a file rendered alone (training/local/data_pc.py: a new --extra file that
+    Colab's render lacks) sees the same examples as in one render of everything."""
     t0 = time.time()
     src, out = Path(src), Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -158,6 +162,9 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
             if rec and rec.get("kind") in ("flow", "rewrite") and isinstance(rec.get("flow"), dict):
                 pairs.append((rec["request"], rec["flow"]))
     ex_index = F.ExampleIndex.from_flows(pairs)
+    if examples_from:
+        with open(examples_from, encoding="utf-8") as f:
+            ex_index = F.ExampleIndex([json.loads(l) for l in f if l.strip()] + ex_index.rows)
     ex_index.save(out / "examples.jsonl")
     log(f"example index: {len(ex_index)} requests ({time.time() - t0:.0f}s)")
 
@@ -265,10 +272,13 @@ def main(argv=None):
                     help="share of flow rows whose context misses some needed actions (0 = never)")
     ap.add_argument("--dropout-frac", default=",".join(str(x) for x in F.GOLD_DROPOUT_FRAC),
                     help="low,high share of the needed actions such a row misses")
+    ap.add_argument("--examples-from", default=None,
+                    help="examples.jsonl of an earlier render: its requests join the example index first")
     a = ap.parse_args(argv)
     frac = tuple(float(x) for x in a.dropout_frac.split(","))
     render(a.src, a.out, a.catalog, a.k, a.seed, a.extra, a.variables_rate, a.reply_context, a.max_chars, not a.no_parts,
-           max_tokens=a.max_tokens, answer_format=a.answer_format, gold_dropout=a.gold_dropout, dropout_frac=frac)
+           max_tokens=a.max_tokens, answer_format=a.answer_format, gold_dropout=a.gold_dropout, dropout_frac=frac,
+           examples_from=a.examples_from)
 
 
 if __name__ == "__main__":

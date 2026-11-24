@@ -16,7 +16,10 @@ from seconds to a few minutes, so a sample is scored: --per-set requests of each
 spread evenly over the set, taken in turn from each set) and at most --minutes per model; the comparison uses the
 requests both models finished. Scores of the installed model are cached (local_run/eval_cache.json).
 
-Better = more requests right in total, ties broken by more verified flows. Install: the old model and its catalog /
+Better = more requests right in total, ties broken by more verified flows. The reference is the installed model, or,
+when the run (--run-state) started from a model that is not the installed one (a refine / top-up / RL of Drive's
+newer model, e.g. the Colab v5, while the PC has an older one or none), that start model: the new model must beat it
+(and the installed one). When it does not, the start model is installed instead if it beats the installed one. Install: the old model and its catalog /
 examples move to nanochat_base/old_model_<date>; the new model goes to nanochat_base/chatsft_checkpoints/d8 and its
 catalog.jsonl + examples.jsonl to rpa/sft/ (where assistant/app.py and start_assistant.bat read them, so the app
 uses the context + plan format). History: nanochat_base/topup_history.jsonl.
@@ -199,6 +202,42 @@ def install(rpa, new_dir, new_step, data, info, stamp, log=print):
     return d8 / f"model_{final_step:06d}.pt"
 
 
+def start_pack(rpa, st, data, tok):
+    """The model a training run started from, as a pack to score (root, catalog, examples, format, step), when it is
+    not the installed model: a refine / top-up / RL of Drive's newest model (train_data/drive_model) while the PC has
+    nothing installed or an older model. It is scored with the run's own catalog and examples (the context it was
+    trained with). None when the run started from the installed model (then the installed one is the reference)."""
+    rpa = Path(rpa)
+    if not st.get("start") or st.get("mode") == "full":
+        return None
+    sroot = Path(st["start"])
+    if sroot.resolve() == (rpa / "nanochat_base").resolve():
+        return None
+    sstep = newest(sroot / "chatsft_checkpoints" / "d8")
+    if sstep is None or not (Path(data) / "catalog.jsonl").exists():
+        return None
+    if not (sroot / "tokenizer" / "tokenizer.pkl").exists():
+        shutil.copytree(tok, sroot / "tokenizer", dirs_exist_ok=True)
+    ex = Path(data) / "examples.jsonl"
+    return sroot, Path(data) / "catalog.jsonl", (ex if ex.exists() else None), "context", sstep
+
+
+def score_cached(rpa, label, root, cat, ex, fmt, step, rows, ids, a, platform, work):
+    """Scores of a model that is not new (installed / start), cached in local_run/eval_cache.json by model file,
+    catalog, examples, prompt format and retries."""
+    cache_f = Path(rpa) / "local_run" / "eval_cache.json"
+    key = hashlib.sha1(json.dumps([file_id(Path(root) / "chatsft_checkpoints" / "d8" / f"model_{step:06d}.pt"),
+                                   file_id(cat), file_id(ex) if ex else "-", fmt, a.retries]).encode()).hexdigest()[:16]
+    cache = json.loads(cache_f.read_text(encoding="utf-8")) if cache_f.exists() else {}
+    out_f = Path(work) / (label.replace(" ", "_") + ".json")
+    out_f.write_text(json.dumps({k: v for k, v in cache.get(key, {}).items() if k in ids}), encoding="utf-8")
+    res = run_scoring(rpa, label, root, cat, ex, fmt, rows, a.minutes, a.retries, platform, out_f, a.threads)
+    cache[key] = dict(cache.get(key, {}), **res)
+    cache_f.parent.mkdir(parents=True, exist_ok=True)
+    cache_f.write_text(json.dumps(cache), encoding="utf-8")
+    return res
+
+
 def compare_main(a):
     rpa = Path(a.rpa).resolve()
     platform = Path(a.platform) if a.platform else rpa / "platform"
@@ -234,49 +273,44 @@ def compare_main(a):
 
     croot, ccat, cex, cfmt = current_pack(rpa)
     cstep = newest(croot / "chatsft_checkpoints" / "d8")
-    base_label = "installed model"
-    if cstep is None and st.get("start"):
-        # nothing installed yet (a fresh folder): compare with the model this run started from (e.g. Drive's newest),
-        # with the run's own catalog and examples, so a top-up is installed only if it beats where it started
-        sroot = Path(st["start"])
-        sstep = newest(sroot / "chatsft_checkpoints" / "d8")
-        if sstep is not None and (data / "catalog.jsonl").exists():
-            if not (sroot / "tokenizer" / "tokenizer.pkl").exists():
-                shutil.copytree(tok, sroot / "tokenizer", dirs_exist_ok=True)
-            croot, ccat, cfmt, cstep = sroot, data / "catalog.jsonl", "context", sstep
-            cex = data / "examples.jsonl" if (data / "examples.jsonl").exists() else None
-            base_label = "start model"
-    old = {}
+    packs = {}                                    # label -> (root, catalog, examples, format, step)
     if cstep is not None:
-        cache_f = rpa / "local_run" / "eval_cache.json"
-        key = hashlib.sha1(json.dumps([file_id(croot / "chatsft_checkpoints" / "d8" / f"model_{cstep:06d}.pt"),
-                                       file_id(ccat), file_id(cex) if cex else "-", cfmt, a.retries]).encode()).hexdigest()[:16]
-        cache = json.loads(cache_f.read_text(encoding="utf-8")) if cache_f.exists() else {}
-        old_f = work / "old.json"
-        old_f.write_text(json.dumps({k: v for k, v in cache.get(key, {}).items() if k in ids}), encoding="utf-8")
-        old = run_scoring(rpa, base_label, croot, ccat, cex, cfmt, rows, a.minutes, a.retries, platform, old_f,
-                          a.threads)
-        cache[key] = dict(cache.get(key, {}), **old)
-        cache_f.parent.mkdir(parents=True, exist_ok=True)
-        cache_f.write_text(json.dumps(cache), encoding="utf-8")
+        packs["installed model"] = (croot, ccat, cex, cfmt, cstep)
+    sp = start_pack(rpa, st, data, tok)
+    if sp is not None:
+        # the run started from a model that is not the installed one (Drive's newest, e.g. the Colab v5, while the
+        # PC still has an older model): the new model must beat THAT model, not only the older installed one
+        packs["start model"] = sp
+    ref = "start model" if "start model" in packs else ("installed model" if "installed model" in packs else None)
+    scores = {}
+    for label, (root, cat, ex, fmt, step) in packs.items():
+        scores[label] = score_cached(rpa, label, root, cat, ex, fmt, step, rows, ids, a, platform, work)
     new = run_scoring(rpa, "new model", work / "new", data / "catalog.jsonl", data / "examples.jsonl", "context",
                       rows, a.minutes, a.retries, platform, work / "new.json", a.threads)
 
-    both = [i for i in ids if i in new and (cstep is None or i in old)]
-    n_right, n_ver, n_text = summarize(new, both)
-    print(f"\n== results on the {len(both)} requests both models finished")
-    if cstep is not None:
-        o_right, o_ver, o_text = summarize(old, both)
-        print(f"  {base_label} (step {cstep}, {cfmt} prompts): {o_right}/{len(both)} right, {o_ver} verified | {o_text}")
-    else:
-        o_right = o_ver = -1
+    both = [i for i in ids if i in new and all(i in sc for sc in scores.values())]
+    print(f"\n== results on the {len(both)} requests {'all models' if packs else 'the new model'} finished")
+    sums = {}
+    for label, (root, cat, ex, fmt, step) in packs.items():
+        r_, v_, t_ = summarize(scores[label], both)
+        sums[label] = (r_, v_)
+        print(f"  {label} (step {step}, {fmt} prompts): {r_}/{len(both)} right, {v_} verified | {t_}")
+    if not packs:
         print("  installed model: none")
+    n_right, n_ver, n_text = summarize(new, both)
     print(f"  new model (step {nstep}): {n_right}/{len(both)} right, {n_ver} verified | {n_text}")
+    o_right, o_ver = sums.get(ref, (-1, -1))
     better = bool(both) and (n_right, n_ver) > (o_right, o_ver)
+    if "installed model" in sums and ref != "installed model":
+        better = better and (n_right, n_ver) > sums["installed model"]
+    if ref and packs:
+        print(f"  compared with: the {ref}" + (" (where this run started: Drive's newer model)" if ref == "start model"
+                                              else ""))
     if not both:
-        print("  no request finished for both models: not installing (raise --minutes)")
+        print("  no request finished for every model: not installing (raise --minutes)")
     stamp = time.strftime("%Y%m%d_%H%M%S")
     rec = {"time": stamp, "new": str(new_dir), "new_step": nstep, "old_step": cstep, "requests": len(both),
+           "compared_with": ref, "scores": {k: list(v) for k, v in sums.items()},
            "old_score": [o_right, o_ver], "new_score": [n_right, n_ver], "better": better, "installed": False}
     if better and a.install:
         info = json.loads(a.info) if a.info else {}
@@ -288,7 +322,18 @@ def compare_main(a):
     elif better:
         print("  the new model is BETTER (not installed: --install not given)")
     else:
-        print("  the new model is NOT better: the installed one stays. The new one is kept in", new_dir)
+        print("  the new model is NOT better: it is not installed. It is kept in", new_dir)
+        s_ = sums.get("start model")
+        if a.install and s_ and both and s_ > sums.get("installed model", (-1, -1)):
+            # the start model (Drive's newer one) beats the older installed model: install it instead, so the PC
+            # uses the Colab model and the next refine / RL starts from it
+            sroot, _, _, _, sstep = packs["start model"]
+            print("  the start model (Drive's newer one) is better than the installed one: installing it instead")
+            info = {"mode": "install", "drive_origin": st.get("drive_origin"), "tokenizer": str(tok)}
+            rec["installed"] = str(install(rpa, sroot / "chatsft_checkpoints" / "d8", sstep, data, info, stamp))
+            rec["installed_start_model"] = True
+        elif packs:
+            print("  the model in use stays")
     hist = rpa / "nanochat_base" / "topup_history.jsonl"
     hist.parent.mkdir(parents=True, exist_ok=True)
     with open(hist, "a", encoding="utf-8") as f:

@@ -28,12 +28,25 @@ same data (`sft_render`: plan-first answers, compact flows, gold dropout, beginn
 
 | `MODE` (cell 1) | What it does | Time |
 |---|---|---|
-| `"full"` (default with an NVIDIA GPU) | **the Colab run**: 12000 steps at the 4096 window from the pretrained **base** model | estimated 3-4.5 h on an RTX 3060/4060 (the Colab T4 takes about 3.5-4.5 h); a CPU would need weeks, so it is not offered there |
-| `"topup"` (default without a GPU) | **continues the newest trained model** (Drive's, or this PC's own when it already grew from it) for `TOPUP_STEPS` steps on the same data, mostly the beginner and long business-process rows | 300 steps: about 5.5-9 h on 4 CPU cores (measured on a 4-core test machine at the 4096 window: 67 s per step at low priority, 55 s with all cores; slower PCs up to about 100 s) |
+| `"auto"` (default) | picks for you and says why in cell 3: NVIDIA GPU + a finished trained model on Drive or this PC -> `"refine"`; NVIDIA GPU and no trained model anywhere -> `"full"`; no GPU -> `"topup"` | |
+| `"refine"` (NVIDIA GPU) | **continues the finished Colab model** (v5; or this PC's model when it already grew from it) for `REFINE_STEPS` (1500) steps, saved every 250 steps: about 80% of the training goes to the newest rows (v5, session: sign in once and reuse it) and the weak areas (beginner wording, long business processes, clarify, targeted, fix, your feedback), about 18% replays everything else so nothing is forgotten. Learning rate 0.35 (a gentle continue, not a restart) | estimated 40-65 min on a T4-class GPU (RTX 3060/4060; the Colab T4 with torch.compile about 30-35 min), plus 1-2 min of loading per chunk |
+| `"full"` (NVIDIA GPU) | **the Colab run again**: 12000 steps at the 4096 window from the pretrained **base** model. It does NOT use the Colab model: only for a fresh start | estimated 3-4.5 h on an RTX 3060/4060 (the Colab T4 takes about 3.5-4.5 h); a CPU would need weeks, so it is not offered there |
+| `"topup"` (no GPU) | **continues the newest trained model** (Drive's, or this PC's own when it already grew from it) for `TOPUP_STEPS` steps on the same data, mostly the beginner and long business-process rows | 300 steps: about 5.5-9 h on 4 CPU cores (measured on a 4-core test machine at the 4096 window: 67 s per step at low priority, 55 s with all cores; slower PCs up to about 100 s) |
 | `"install"` | no training: tests Drive's newest model against this PC's and installs it if it is better | the test only (cell 6) |
-| `"rl"` (NVIDIA GPU only) | **reinforcement learning** on the newest trained model, as Colab cell 9: the model writes 8 answers per fresh request, the platform checker scores them (`training/rl_setup.py`), better answers are reinforced; then cell 6 tests it and installs it only if it is better. Use it after a finished SFT model (v5) is installed or on Drive | `RL_STEPS` 200: estimated about 6 h on an RTX 3060/4060 class GPU (about a T4; range 4-13 h); saved every 25 steps, resumable |
+| `"rl"` (NVIDIA GPU only) | **reinforcement learning** on the newest trained model (after a refine: the refined model once cell 6 installed it), as Colab cell 9: the model writes 8 answers per fresh request, the platform checker scores them (`training/rl_setup.py`), better answers are reinforced; then cell 6 tests it and installs it only if it is better. Use it after a refine (or on Drive's v5) | `RL_STEPS` 200: estimated about 6 h on an RTX 3060/4060 class GPU (about a T4; range 4-13 h); saved every 25 steps, resumable |
 
-Training is saved in chunks (top-up: every 50 steps; full: one run like Colab, or `FULL_CHUNKS` pieces): after a stop,
+### After a Colab run (the Colab model is trained: refine it here)
+
+1. Cell 1: `MODE = "refine"` (or leave `"auto"`: with an NVIDIA GPU and the Colab model on Drive it picks refine).
+2. Run cells 1, 2, 3, 4, 5, 6 in order. Cell 3 downloads the Colab model and its data (and adds the session rows if
+   Drive does not have them yet); cell 5 refines (about an hour); cell 6 tests.
+3. Look at the score lines at the end of cell 6: the refined model is installed only if it scores more right answers
+   than the Colab model (and than the model this PC had). If not, the Colab model is installed when it beats the old one.
+4. Optional, for more: `MODE = "rl"` in cell 1, run cells 1-6 again (RL starts from the newest installed model;
+   about 6 h). Or set `REFINE_THEN_RL = True` before step 2 and cell 6 runs RL and its test right after the refine.
+5. Cell 7 starts the assistant.
+
+Training is saved in chunks (top-up: every 50 steps; refine: every 250; full: one run like Colab, or `FULL_CHUNKS` pieces): after a stop,
 restart or crash run cells 1-5 again and it continues from the last saved chunk. On a CPU it runs at low priority with
 one core left free, so the PC stays usable.
 
@@ -56,7 +69,11 @@ copies the platform files, the installed model, the downloads and your feedback 
 code(f'''
 #@title 1. Settings
 DRIVE_FOLDER_ID = "{FOLDER_ID}"     # Google Drive folder ooa-nanochat (shared as "anyone with the link")
-MODE = "auto"              # "auto": "full" with an NVIDIA GPU, "topup" without; or "full", "topup", "install", "rl"
+MODE = "auto"              # "auto": GPU + a trained model (Drive / this PC) -> "refine"; GPU, no trained model -> "full";
+                           # no GPU -> "topup". Or set "refine", "full", "topup", "install", "rl" yourself
+REFINE_STEPS = 1500        # MODE "refine" (GPU): steps on top of the Colab model (T4-class GPU: about 40-65 min)
+REFINE_CHUNKS = 6          # saved every REFINE_STEPS / REFINE_CHUNKS steps (250): after a stop it continues
+REFINE_THEN_RL = False     # True: after a refine, cell 6 also runs RL on the newest installed model and tests it
 RL_STEPS = 200             # MODE "rl" (GPU): RL steps of 8 requests x 8 answers (about 3 h per 100; saved every 25)
 TOPUP_STEPS = 300          # top-up length in steps of 32,768 tokens (4 CPU cores: about 5.5-9 h)
 TOPUP_HOURS = 0            # > 0: measure this PC's speed first (about 5 min) and size the top-up to this many hours
@@ -232,12 +249,21 @@ if _rc != 0:
     raise SystemExit("PyTorch does not load:\\n" + err)
 print("PyTorch", _out.strip())
 CUDA = GPU and _out.strip().endswith("True")
-MODE_NOW = MODE if MODE in ("full", "topup", "install", "rl") else ("full" if CUDA else "topup")
+if MODE in ("long", "curriculum", "big"):
+    raise SystemExit(f'MODE "{MODE}" was removed: it trained the old plain-prompt format and would undo the v4 model. '
+                     'Use "refine" (GPU), "topup" (CPU) or "full" (GPU).')
+if MODE not in ("auto", "refine", "full", "topup", "install", "rl"):
+    raise SystemExit(f'MODE "{MODE}" is not known: use "auto", "refine", "full", "topup", "install" or "rl"')
+MODE_NOW = MODE if MODE != "auto" or not CUDA else "auto"      # auto with a GPU: cell 3 looks on Drive, then decides
+if MODE_NOW == "auto":
+    print('MODE "auto" with an NVIDIA GPU: cell 3 picks "refine" when Drive (or this PC) has a trained model, else "full"')
+elif MODE == "auto":
+    MODE_NOW = "topup"
+    print('MODE "auto" -> "topup": no NVIDIA GPU (a CPU top-up of the newest trained model)')
 if MODE_NOW == "rl" and not CUDA:
     raise SystemExit('MODE "rl" needs an NVIDIA GPU (each step writes 64 answers: about an hour per step on a CPU).')
-if MODE in ("long", "refine", "curriculum", "big"):
-    raise SystemExit(f'MODE "{MODE}" was removed: it trained the old plain-prompt format and would undo the v4 model. '
-                     'Use "topup" (CPU) or "full" (GPU).')
+if MODE_NOW == "refine" and not CUDA:
+    raise SystemExit('MODE "refine" is sized for an NVIDIA GPU (1500 steps: about a day on a CPU). Use MODE = "topup".')
 if MODE_NOW == "full" and not CUDA:
     raise SystemExit('MODE "full" needs an NVIDIA GPU (12000 steps; weeks on a CPU). Use MODE = "topup" on this PC.')
 try:
@@ -273,6 +299,9 @@ importlib.reload(data_pc)
 assert DRIVE_FOLDER_ID, "set DRIVE_FOLDER_ID in cell 1"
 DRIVE = data_pc.GdownDrive(DRIVE_FOLDER_ID)
 print(len(DRIVE.files), "files on Drive")
+if MODE_NOW == "auto":
+    MODE_NOW, _why = data_pc.choose_mode("auto", CUDA, DRIVE.files, ROOT)
+    print(f'MODE "auto" -> "{MODE_NOW}": {_why}')
 GOT = data_pc.sync(DRIVE, ROOT, "install" if MODE_NOW == "rl" else MODE_NOW, refresh=REFRESH_DATA, seq=SEQ)  # rl: Drive's model + data
 DATA = Path(GOT["data"])
 # the assistant needs a tokenizer even before the first install
@@ -291,6 +320,8 @@ if MODE_NOW == "rl":           # RL (training/local/rl_pc.py, the Colab cell 9 r
              "--steps", str(RL_STEPS)]
 elif MODE_NOW == "full":
     TRAIN += ["--steps", str(FULL_STEPS), "--chunks", str(FULL_CHUNKS)]
+elif MODE_NOW == "refine":     # continue the finished Colab model (train_pc.py --mode refine, state local_run/refine)
+    TRAIN += ["--steps", str(REFINE_STEPS), "--chunks", str(REFINE_CHUNKS)]
 elif MODE_NOW == "topup":
     steps = TOPUP_STEPS
     _st = ROOT / "local_run" / "topup" / "state.json"           # a round in progress keeps its own length
@@ -349,9 +380,22 @@ else:
     assert _res, "no finished training run: run cell 5 first"
     EVAL = [sys.executable, "-u", str(LOCAL / "eval_pc.py"), "--rpa", str(ROOT), "--new", _res, "--data", str(DATA),
             "--run-state", str(_st)]
-EVAL += ["--per-set", str(0 if CUDA else EVAL_PER_SET), "--minutes", str(EVAL_MINUTES), "--install"]
-rc = stream(EVAL)
+_EV_OPTS = ["--per-set", str(0 if CUDA else EVAL_PER_SET), "--minutes", str(EVAL_MINUTES), "--install"]
+rc = stream(EVAL + _EV_OPTS)
 print("\\nexit code", rc, "| history:", ROOT / "nanochat_base" / "topup_history.jsonl")
+if MODE_NOW == "refine" and rc == 0 and REFINE_THEN_RL:
+    # RL starts from the newest installed model (the refined one when it was installed above, else the Colab model)
+    print("\\nREFINE_THEN_RL: reinforcement learning on the newest model (about 3 h per 100 steps) ...")
+    _rl_rc = stream([sys.executable, "-u", str(LOCAL / "rl_pc.py"), "--rpa", str(ROOT), "--data", str(DATA),
+                     "--steps", str(RL_STEPS)] + (["--restart"] if RESTART_TRAINING else []))
+    if _rl_rc == 0:
+        rc = stream([sys.executable, "-u", str(LOCAL / "eval_pc.py"), "--rpa", str(ROOT), "--data", str(DATA),
+                     "--run-state", str(ROOT / "local_run" / "rl" / "state.json")] + _EV_OPTS)
+    else:
+        print("RL stopped: run this cell again to continue it (saved every 25 steps)")
+elif MODE_NOW == "refine" and rc == 0:
+    print('\\nNext (optional): MODE = "rl" in cell 1, then run cells 1-6 again: RL continues the newest installed '
+          "model. Then cell 7 starts the assistant.")
 ''')
 
 code('''

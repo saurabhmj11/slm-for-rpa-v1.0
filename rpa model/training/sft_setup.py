@@ -242,6 +242,16 @@ TOPUP_SHARES = {"beginner_train.jsonl": 0.35, "long_train.jsonl": 0.20, "busines
                 "clarify_train.jsonl": 0.06, "targeted_train.jsonl": 0.04, "fix_train.jsonl": 0.03,
                 "feedback_train.jsonl": 0.02}
 TOPUP_REPLAY = 0.10
+# A refine (notebook MODE "refine", NVIDIA GPU) continues the finished Colab model (v5: 12000 steps) for REFINE_STEPS
+# (train_pc.py: 1500, about 1/8 of the Colab budget). Its tokens go first to what is newest and was seen least: the v5
+# hand-written rows and the session rows (made after the v5 run, so the v5 model never saw them), then the weak areas
+# (beginner wording, the long business processes, clarify / targeted / fix, the user's own feedback). REFINE_REPLAY of
+# the tokens replay every other file in the full mix's proportions so nothing learned is forgotten (the shares of
+# missing files go to the others in proportion, so with no feedback the replay is about 18.6%).
+REFINE_SHARES = {"v5_train.jsonl": 0.14, "session_train.jsonl": 0.08, "beginner_train.jsonl": 0.20,
+                 "long_train.jsonl": 0.13, "business2_train.jsonl": 0.08, "clarify_train.jsonl": 0.05,
+                 "targeted_train.jsonl": 0.06, "fix_train.jsonl": 0.05, "feedback_train.jsonl": 0.03}
+REFINE_REPLAY = 0.18
 
 
 def plan_topup(stats, budget_tokens, shares=None, replay=TOPUP_REPLAY):
@@ -268,14 +278,18 @@ def plan_topup(stats, budget_tokens, shares=None, replay=TOPUP_REPLAY):
 
 def plan_for_local(sft_dir, mode, steps, tokens_per_step, smoltalk_rows=0, smoltalk_tokens=500):
     """(views, stats, budget, table lines) for the local notebook: "full" plans exactly like Colab cell 7
-    (plan_for_notebook); "topup" plans a top-up round (plan_topup)."""
+    (plan_for_notebook); "topup" plans a top-up round (plan_topup with TOPUP_SHARES); "refine" a GPU refine of the
+    finished Colab model (plan_topup with REFINE_SHARES and REFINE_REPLAY)."""
     if mode == "full":
         return plan_for_notebook(sft_dir, steps, tokens_per_step, smoltalk_rows, smoltalk_tokens)
     stats = file_stats(sft_dir)
     b = budget(steps, tokens_per_step)
     if smoltalk_rows:
         b -= int(smoltalk_rows * smoltalk_tokens)
-    views = plan_topup(stats, b)
+    if mode == "refine":
+        views = plan_topup(stats, b, REFINE_SHARES, REFINE_REPLAY)
+    else:
+        views = plan_topup(stats, b)
     return views, stats, b, mixture_table(stats, views, b)
 
 

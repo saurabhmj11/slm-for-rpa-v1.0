@@ -3,7 +3,7 @@
     python rl_pc.py --rpa DIR --data DIR [--steps 300] [--check] [--restart]
 
 Continues the newest trained model (train_pc.topup_start: Drive's newest, or this PC's own when it already grew from
-it) with reinforcement learning: nanochat's scripts/chat_rl.py from the pinned commit, patched by
+it, e.g. a refine of Drive's v5 that cell 6 installed) with reinforcement learning: nanochat's scripts/chat_rl.py from the pinned commit, patched by
 rl_setup.patch_chat_rl (written as scripts/chat_rl_ooa.py; the original stays untouched), on fresh requests built by
 rl_setup.prepare (never in the training data, never close to a test prompt; prompts made by the server's Router.prompt
 with --data's catalog and example index). The reward is the platform checker on the expanded flow (rl_setup.REWARD_DOC).
@@ -27,7 +27,7 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 import rl_setup as RL                                          # noqa: E402  (one source of truth with Colab cell 9)
 from train_pc import (NANOCHAT_COMMIT, newest, topup_start, device_info, drive_id, data_sig,  # noqa: E402
-                      windows_kill_with_parent)
+                      windows_kill_with_parent, local_origin, start_label)
 
 STEPS = 200                      # Colab cell 1 RL_STEPS
 PROMPTS = 2400                   # Colab RL_PROMPTS
@@ -116,8 +116,13 @@ def main(argv=None):
     state = json.loads(state_f.read_text(encoding="utf-8")) if state_f.exists() else {}
     if state.get("finished"):                 # tested by cell 6 already: the next run starts fresh
         state = {}
-    src_root = Path(a.start) if a.start else (Path(state["start"]) if state.get("start") else topup_start(rpa))
+    # always the newest model now (never the start of an older RL run in progress: after a refine was installed that
+    # would be Drive's v5); the same start model and data continue the run in progress, a new one starts a new run
+    src_root = Path(a.start).resolve() if a.start else topup_start(rpa)
     src_step = newest(src_root / "chatsft_checkpoints" / "d8")
+    if state.get("start") and (state.get("start"), state.get("start_step")) != (str(src_root), src_step):
+        print(f"note: a newer model than the RL run in progress started from ({state['start']} step "
+              f"{state.get('start_step')}): a new RL run starts from it; the earlier result is kept")
     tok = next((p for p in (src_root / "tokenizer", rpa / "nanochat_base" / "tokenizer")
                 if (p / "tokenizer.pkl").exists() and (p / "token_bytes.pt").exists()), None)
     dev, name, mem, cap = device_info()
@@ -137,6 +142,7 @@ def main(argv=None):
     if not gpu and not a.allow_cpu:
         problems.append("RL needs an NVIDIA GPU (each step writes 64 answers; on a CPU about an hour per step)")
     print(f"RL on {name}{f' ({mem:.0f} GB)' if gpu else ''} | start model {src_root} step {src_step} | data {data}")
+    print("  start model:", start_label(rpa, src_root))
     print(f"  {a.steps} steps x {a.examples_per_step} requests x {a.samples} answers, at most {a.max_new} new tokens, "
           f"saved every {a.every} steps")
     for p in problems:
@@ -153,8 +159,10 @@ def main(argv=None):
             shutil.move(str(base), str(run_dir / ("base_before_" + time.strftime("%Y%m%d_%H%M%S"))))
         shutil.rmtree(base, ignore_errors=True)
         shutil.rmtree(run_dir / "pool", ignore_errors=True)
+        # the Drive model it grew from: an RL result installed later must keep it, or the next top-up / refine / RL
+        # would start from Drive's model again instead of from it (train_pc.topup_start)
         state = dict(key, mode="rl", steps=a.steps, created=time.strftime("%Y-%m-%d %H:%M:%S"),
-                     drive_origin=drive_id(src_root))
+                     drive_origin=drive_id(src_root) or (local_origin(rpa) if src_root == rpa / "nanochat_base" else None))
     d8 = base / "chatsft_checkpoints" / "d8"
     if newest(d8) != src_step:
         d8.mkdir(parents=True, exist_ok=True)

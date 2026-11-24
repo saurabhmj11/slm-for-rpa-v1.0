@@ -606,3 +606,259 @@ def test_windows_copy_is_direct_and_resumes(tmp_path):
     assert (new / "platform" / "docs" / "a.md").exists()
     assert not (new / "platform" / setup_pc.COPYING_MARK).exists()
     assert setup_pc.adopt_old(new, log=lambda *a: None, olds=[old]) == [] or "platform" not in setup_pc.adopt_old(new, log=lambda *a: None, olds=[old])
+
+
+# ---------------------------------------------------------------------------------------- refine (GPU, after Colab)
+def test_auto_mode_choice():
+    with tempfile.TemporaryDirectory() as t:
+        rpa = Path(t)
+        drive = {"nanochat_base/chatsft_checkpoints/d8/model_012000.pt": ["a"],
+                 "nanochat_base/chatsft_checkpoints/d8/meta_012000.json": ["b"]}
+        assert D.choose_mode("auto", False, drive, rpa)[0] == "topup"                 # no GPU: a CPU top-up
+        mode, why = D.choose_mode("auto", True, drive, rpa)
+        assert mode == "refine" and "12000" in why and "full" in why                 # GPU + Colab model: refine it
+        kept = {k.replace("chatsft_checkpoints/", "chatsft_checkpoints_before_20261120_010203/"): v
+                for k, v in drive.items()}
+        assert D.choose_mode("auto", True, kept, rpa)[0] == "refine"                  # a kept one counts too
+        no_meta = {"nanochat_base/chatsft_checkpoints/d8/model_012000.pt": ["a"]}      # an upload in progress
+        assert D.choose_mode("auto", True, no_meta, rpa)[0] == "full"
+        assert D.choose_mode("auto", True, {}, rpa)[0] == "full"                      # nothing trained anywhere
+        here = rpa / "nanochat_base/chatsft_checkpoints/d8"                           # ... but this PC has one
+        here.mkdir(parents=True)
+        (here / "model_008300.pt").write_bytes(b"x")
+        (here / "meta_008300.json").write_text("{}", encoding="utf-8")
+        assert D.choose_mode("auto", True, {}, rpa)[0] == "refine"
+        for m in ("full", "topup", "refine", "install", "rl"):                        # an explicit MODE is kept
+            assert D.choose_mode(m, True, drive, rpa)[0] == m
+
+
+REFINE_STATS = dict(STATS, **{"v5_train.jsonl": (1555, 1450), "session_train.jsonl": (733, 1500),
+                              "synth_train.jsonl": (28380, 1290), "natural_train.jsonl": (5484, 1050)})
+
+
+def test_refine_plan_shares():
+    assert abs(sum(T.REFINE_SHARES.values()) + T.REFINE_REPLAY - 1.0) < 1e-9
+    assert 0.15 <= T.REFINE_REPLAY <= 0.20
+    for n in ("v5_train.jsonl", "session_train.jsonl", "beginner_train.jsonl", "long_train.jsonl",
+              "business2_train.jsonl", "clarify_train.jsonl", "targeted_train.jsonl", "fix_train.jsonl",
+              "feedback_train.jsonl"):
+        assert n in T.REFINE_SHARES, n
+    b = T.budget(P.REFINE_STEPS, P.TOKENS_PER_STEP)
+    v = T.plan_topup(REFINE_STATS, b, T.REFINE_SHARES, T.REFINE_REPLAY)
+    tok = {n: v[n] * REFINE_STATS[n][0] * REFINE_STATS[n][1] for n in v}
+    total = sum(tok.values())
+    assert abs(total - b) / b < 0.02, (total, b)
+    replay = sum(t_ for n, t_ in tok.items() if n not in T.REFINE_SHARES) / total
+    assert 0.15 <= replay <= 0.21, replay                                  # ~18.6% (no feedback file here)
+    assert all(v[n] > 0 for n in v)                                        # every file stays in the mix
+    assert v["v5_train.jsonl"] >= 2 and v["session_train.jsonl"] >= 2     # the newest rows are seen several times
+    assert tok["v5_train.jsonl"] / total > 0.12 and tok["session_train.jsonl"] / total > 0.06
+    full = T.plan_mixture(REFINE_STATS, b)
+    assert v["synth_train.jsonl"] < full["synth_pattern.jsonl"] + full["synth_train.jsonl"]
+    with tempfile.TemporaryDirectory() as d:                               # plan_for_local takes the refine table
+        for n in ("v5_train.jsonl", "session_train.jsonl", "synth_train.jsonl", "beginner_train.jsonl"):
+            Path(d, n).write_text((json.dumps({"messages": [{"role": "user", "content": "x" * 900}]}) + "\n") * 400,
+                                  encoding="utf-8")
+        Path(d, "val.jsonl").write_text("{}\n", encoding="utf-8")
+        vr, _, _, _ = T.plan_for_local(d, "refine", 10, P.TOKENS_PER_STEP)
+        vt, _, _, _ = T.plan_for_local(d, "topup", 10, P.TOKENS_PER_STEP)
+        assert vr["session_train.jsonl"] > vt["session_train.jsonl"] and vr != vt
+
+
+def fake_train_setup(rpa):
+    """The files train_pc.py --check looks for (a tiny rendered data folder, nanochat, a Drive model + tokenizer)."""
+    rpa = Path(rpa)
+    data = rpa / "train_data/sft_render"
+    data.mkdir(parents=True)
+    for n in ("val.jsonl", "catalog.jsonl", "examples.jsonl", "v5_train.jsonl", "session_train.jsonl",
+              "synth_train.jsonl"):
+        (data / n).write_text(json.dumps({"messages": [{"role": "user", "content": "x" * 900}]}) + "\n",
+                              encoding="utf-8")
+    (data / "render_report.json").write_text(json.dumps({"settings": V4}), encoding="utf-8")
+    for f in ("scripts/chat_sft.py", "nanochat/gpt.py"):
+        (rpa / "nanochat" / f).parent.mkdir(parents=True, exist_ok=True)
+        (rpa / "nanochat" / f).write_text("#\n", encoding="utf-8")
+    dm = rpa / "train_data/drive_model"
+    (dm / "chatsft_checkpoints/d8").mkdir(parents=True)
+    (dm / "chatsft_checkpoints/d8/model_012000.pt").write_bytes(b"m")
+    (dm / "chatsft_checkpoints/d8/meta_012000.json").write_text("{}", encoding="utf-8")
+    (dm / "tokenizer").mkdir()
+    for f in ("tokenizer.pkl", "token_bytes.pt"):
+        (dm / "tokenizer" / f).write_bytes(b"t")
+    (dm / ".drive_id").write_text("nanochat_base/chatsft_checkpoints/d8/model_012000.pt:V5ID", encoding="utf-8")
+    return data
+
+
+def test_refine_check_and_state_dir_separation(monkeypatch, capsys):
+    with tempfile.TemporaryDirectory() as t:
+        rpa = Path(t)
+        data = fake_train_setup(rpa)
+        # a CPU top-up round in progress must not be taken for the refine run (and the other way round)
+        top = rpa / "local_run/topup"
+        top.mkdir(parents=True)
+        (top / "state.json").write_text(json.dumps({"mode": "topup", "steps": 300, "chunks": 6, "seq": 4096, "done": 3,
+                                                    "start": str(rpa / "nanochat_base"), "start_step": 8300, "lr": 0.3,
+                                                    "device_batch": 1}), encoding="utf-8")
+        monkeypatch.setattr(P, "device_info", lambda: ("cuda", "Fake T4", 15.0, (7, 5)))
+        assert P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data), "--check"]) == 0
+        out = capsys.readouterr().out
+        assert "mode             : refine" in out and "drive_model" in out and "step 12000" in out
+        assert "Drive's newest trained model" in out
+        assert f"{P.REFINE_STEPS} steps" in out and f"in {P.REFINE_STEPS // P.REFINE_CHUNK} chunk(s)" in out
+        assert "0 done" in out and f"lr {P.REFINE_LR}" in out and "continuing the run in progress" not in out
+        assert "session_train.jsonl" in out and "SmolTalk rows 0" in out
+        assert json.loads((top / "state.json").read_text(encoding="utf-8"))["done"] == 3       # untouched
+        assert not (rpa / "local_run/refine").exists()                                          # --check writes nothing
+        # without a GPU refine is refused (it is sized for one); --allow-cpu is for tests only
+        monkeypatch.setattr(P, "device_info", lambda: ("cpu", "4 CPU threads", 0.0, None))
+        try:
+            P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data), "--check"])
+            raise AssertionError("refine on a CPU must be refused")
+        except SystemExit:
+            pass
+        assert "use --mode topup" in capsys.readouterr().out
+        assert P.main(["--rpa", str(rpa), "--mode", "refine", "--data", str(data), "--check", "--allow-cpu"]) == 0
+    assert P.lr_for_chunk(0, 6, P.REFINE_LR)[0] == P.REFINE_LR and 0.3 <= P.REFINE_LR <= 0.4
+
+
+def session_rows(n):
+    rows = (RPA / "data/extra_sft/session_train.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 733
+    return "\n".join(rows[:n]) + "\n"
+
+
+def test_data_pc_renders_a_missing_extra_file():
+    """Drive's Colab render lacks session_train.jsonl (made after the run): refine renders only that file here, from
+    the repo (data/extra_sft) when Drive sft/ does not have it, with the Colab render's catalog and settings; the full
+    run does not take it."""
+    with tempfile.TemporaryDirectory() as t:
+        drive, rpa = make_drive(Path(t) / "drive"), Path(t) / "rpa"
+        shutil.copyfile(RPA / "data/catalog/catalog.jsonl", drive / "sft_render/catalog.jsonl")
+        (drive / "sft_render/examples.jsonl").write_text(json.dumps(
+            {"request": "copy a file to a folder", "outline": "1. copy", "actions": ["ooa.file/copy"], "sig": "s"})
+            + "\n", encoding="utf-8")
+        (drive / "sft_render/session_train.jsonl").unlink()
+        (rpa / "data/extra_sft").mkdir(parents=True)
+        (rpa / "data/extra_sft/session_train.jsonl").write_text(session_rows(12), encoding="utf-8")
+        logs = []
+        log = lambda *x: logs.append(" ".join(str(y) for y in x))
+        out = D.sync(D.FolderDrive(drive), rpa, "refine", log=log)
+        data = Path(out["data"])
+        assert out["render"] == "downloaded" and out["rendered_here"] == ["session_train.jsonl"], (out, logs)
+        rows = [json.loads(l) for l in (data / "session_train.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert len(rows) >= 10 and all(r["messages"][-1]["role"] == "assistant" for r in rows)
+        assert any("Plan:" in r["messages"][-1]["content"] for r in rows)          # the plan-first format
+        rep = json.loads((data / "render_report.json").read_text(encoding="utf-8"))
+        assert rep["files"]["session_train.jsonl"]["rendered_here"] and rep["local_extra"]
+        assert rep["settings"] == V4                                               # Colab's settings stay the record
+        ex = (data / "examples.jsonl").read_text(encoding="utf-8").splitlines()
+        assert json.loads(ex[0])["request"] == "copy a file to a folder" and len(ex) > 1   # Colab's first, then new
+        assert (data / "catalog.jsonl").read_bytes() == (drive / "sft_render/catalog.jsonl").read_bytes()
+        assert any("from the repo" in l for l in logs), logs
+        assert T.file_stats(str(data)).get("session_train.jsonl")                  # in the training mixture
+        # again: nothing to do; a changed source file: rendered again from Colab's example index
+        out2 = D.sync(D.FolderDrive(drive), rpa, "refine", log=log)
+        assert out2["render"] == "up to date" and any("rendered here earlier" in l for l in logs)
+        (rpa / "data/extra_sft/session_train.jsonl").write_text(session_rows(5), encoding="utf-8")
+        D.sync(D.FolderDrive(drive), rpa, "refine", log=log)
+        ex2 = (data / "examples.jsonl").read_text(encoding="utf-8").splitlines()
+        assert len(ex2) < len(ex) and json.loads(ex2[0])["request"] == "copy a file to a folder"
+        # Drive sft/ has it (uploaded): Drive's copy is used
+        (drive / "sft").mkdir()
+        (drive / "sft/session_train.jsonl").write_text(session_rows(8), encoding="utf-8")
+        logs.clear()
+        D.sync(D.FolderDrive(drive), rpa, "refine", log=log)
+        assert any("from Drive sft/" in l for l in logs), logs
+        # full: exactly the Colab data, so Drive's incomplete render is not used and nothing is added from the repo
+        assert D.Sync(D.FolderDrive(drive), rpa, log).render_from_drive(seq=4096) is None
+        assert D.extra_sources(rpa, repo_extra=False) == {"session_train.jsonl": rpa / "train_data/sft/session_train.jsonl"}
+        (rpa / "train_data/sft/session_train.jsonl").unlink()
+        assert D.extra_sources(rpa, repo_extra=False) == {}
+        assert list(D.extra_sources(rpa, repo_extra=True)) == ["session_train.jsonl"]
+
+
+def test_eval_compares_with_the_start_model_not_an_older_installed_one():
+    with tempfile.TemporaryDirectory() as t:
+        rpa = Path(t)
+        data = fake_train_setup(rpa)
+        tok = rpa / "train_data/drive_model/tokenizer"
+        st = {"mode": "refine", "start": str(rpa / "train_data/drive_model"), "start_step": 12000}
+        sp = E.start_pack(rpa, st, data, tok)
+        assert sp is not None and sp[4] == 12000 and sp[3] == "context" and sp[1] == data / "catalog.jsonl"
+        # a run that started from the installed model: the installed one is the reference
+        assert E.start_pack(rpa, dict(st, start=str(rpa / "nanochat_base")), data, tok) is None
+        assert E.start_pack(rpa, dict(st, mode="full"), data, tok) is None
+        assert E.start_pack(rpa, {}, data, tok) is None
+
+
+def test_rl_starts_from_the_newest_model():
+    src = (HERE / "rl_pc.py").read_text(encoding="utf-8")
+    assert 'src_root = Path(a.start).resolve() if a.start else topup_start(rpa)' in src   # never an old run's start
+    assert "local_origin(rpa) if src_root == rpa / \"nanochat_base\"" in src                # keeps the Drive origin
+
+
+def test_notebook_refine_mode():
+    cells = notebook_cells()
+    text = "\n".join(s for s, _ in cells)
+    code = [s for s, k in cells if k == "code"]
+    assert 'REFINE_STEPS = 1500' in code[0] and "REFINE_THEN_RL = False" in code[0] and 'MODE = "auto"' in code[0]
+    assert 'data_pc.choose_mode("auto", CUDA, DRIVE.files, ROOT)' in code[2]
+    assert '"--steps", str(REFINE_STEPS), "--chunks", str(REFINE_CHUNKS)' in code[3]
+    assert '"rl_pc.py"' in code[5] and "REFINE_THEN_RL" in code[5]
+    assert "After a Colab run" in text and '`"refine"`' in text
+
+
+def test_eval_gate_after_a_refine(monkeypatch, capsys):
+    """Refine of Drive's v5 while the PC still has an older model: installed only if it beats v5 (and the old one);
+    when it does not, v5 itself is installed if it beats the old one."""
+    def setup(t):
+        rpa = Path(t)
+        data = fake_train_setup(rpa)
+        (rpa / "eval").mkdir()
+        (rpa / "eval/plain_requests.jsonl").write_text("".join(json.dumps({"prompt": f"p{i}", "must": []}) + "\n"
+                                                               for i in range(4)), encoding="utf-8")
+        old = rpa / "nanochat_base/chatsft_checkpoints/d8"                       # the PC's older model (v4)
+        old.mkdir(parents=True)
+        (old / "model_008300.pt").write_bytes(b"v4")
+        (old / "meta_008300.json").write_text("{}", encoding="utf-8")
+        new = rpa / "local_run/refine/chunks/chunk_005"
+        new.mkdir(parents=True)
+        (new / "model_001500.pt").write_bytes(b"refined")
+        (new / "meta_001500.json").write_text("{}", encoding="utf-8")
+        st = rpa / "local_run/refine/state.json"
+        st.write_text(json.dumps({"mode": "refine", "start": str(rpa / "train_data/drive_model"), "start_step": 12000,
+                                  "steps": 1500, "install_step": 13500, "result": str(new), "data": str(data),
+                                  "tokenizer": str(rpa / "train_data/drive_model/tokenizer"),
+                                  "drive_origin": "nanochat_base/chatsft_checkpoints/d8/model_012000.pt:V5ID"}),
+                      encoding="utf-8")
+        return rpa, st
+
+    def fake_scores(right):
+        def run(rpa, name, *args, **kw):
+            n = right[name]
+            return {f"set 1:{i}": {"set": "set 1", "right": i < n, "verified": i < n} for i in range(4)}
+        return run
+    for scores, want in (({"installed model": 1, "start model": 2, "new model": 3}, "new"),
+                         ({"installed model": 1, "start model": 3, "new model": 2}, "v5"),
+                         ({"installed model": 3, "start model": 2, "new model": 2}, None)):
+        with tempfile.TemporaryDirectory() as t:
+            rpa, st = setup(t)
+            monkeypatch.setattr(E, "run_scoring", fake_scores(scores))
+            E.main(["--rpa", str(rpa), "--run-state", str(st), "--install", "--per-set", "0"])
+            out = capsys.readouterr().out
+            assert "compared with: the start model" in out, out
+            d8 = rpa / "nanochat_base/chatsft_checkpoints/d8"
+            got = sorted(p.name for p in d8.iterdir())
+            if want == "new":
+                assert got == ["meta_013500.json", "model_013500.pt"], got
+                assert (d8 / "model_013500.pt").read_bytes() == b"refined"
+                meta = json.loads((d8 / "meta_013500.json").read_text(encoding="utf-8"))
+                assert meta["ooa_local"]["drive_origin"].endswith(":V5ID")       # the next refine / RL starts here
+                assert P.topup_start(rpa) == rpa / "nanochat_base"
+            elif want == "v5":
+                assert got == ["meta_012000.json", "model_012000.pt"], got
+                assert "installing it instead" in out
+                assert P.topup_start(rpa) == rpa / "nanochat_base"
+            else:
+                assert got == ["meta_008300.json", "model_008300.pt"], got
+            assert json.loads(st.read_text(encoding="utf-8"))["finished"]
