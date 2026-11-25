@@ -340,6 +340,7 @@ RPA = HERE.parent.parent
 # the code the PC notebook runs (cells 1-9 and everything they start)
 PC_FILES = ["training/local/data_pc.py", "training/local/train_pc.py", "training/local/eval_pc.py",
             "training/local/setup_pc.py", "training/make_local_notebook.py", "training/sft_setup.py",
+            "training/sft_chunks.py",
             "training/render_dataset.py", "training/data_filter.py", "training/ooa_format.py",
             "training/ingest_feedback.py", "training/ooa_task.py", "training/ooa_reward.py", "training/repair.py",
             "training/retrieval.py", "training/safety.py", "assistant/model_backend.py", "assistant/app.py",
@@ -1229,8 +1230,9 @@ def test_notebooks_check_weights():
     assert 'TRAIN += ["--start-from", REFINE_FROM]' in code[3] and '"--start-from", REFINE_FROM]' in code[3]
     c7 = COLAB[COLAB.index("#@title 7."):COLAB.index("#@title 8.")]
     assert "_T.check_model_dir(" in c7 and "THE TRAINED MODEL IS BROKEN" in c7 and "_broken_" in c7
-    assert c7.index("!python -m scripts.chat_sft") < c7.index("_T.check_model_dir(")
-    assert '"loss line": _T.LOSS_LOG_ANCHOR' in c7
+    assert c7.index("_SC.colab_sft(") < c7.index("_T.check_model_dir(")      # trained in saved chunks, then checked
+    import sft_chunks as SC
+    assert P.write_script.__module__ == "train_pc" and P.run_chunk is SC.run_chunk and P.follow is SC.follow
     c8 = COLAB[COLAB.index("#@title 8."):]
     assert c8.index("check_model_dir(") < c8.index("_load_model(EVAL_SOURCE")
     # the Drive model a broken Colab run leaves aside is never taken for the newest model on the PC

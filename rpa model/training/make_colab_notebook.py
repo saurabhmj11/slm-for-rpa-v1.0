@@ -34,6 +34,7 @@ files = {
     "ooa_format.py": (H / "ooa_format.py").read_text(encoding="utf-8"),
     "render_dataset.py": (H / "render_dataset.py").read_text(encoding="utf-8"),
     "sft_setup.py": (H / "sft_setup.py").read_text(encoding="utf-8"),
+    "sft_chunks.py": (H / "sft_chunks.py").read_text(encoding="utf-8"),
     "safety.py": (H / "safety.py").read_text(encoding="utf-8"),
     "model_backend.py": (H.parent / "assistant/model_backend.py").read_text(encoding="utf-8"),
     "constrained.py": (H.parent / "assistant/constrained.py").read_text(encoding="utf-8"),
@@ -63,6 +64,11 @@ md("""
 Runs on a free Colab GPU (T4). Order: **Cell 1 config -> Cell 2 setup -> Cells 3-5 pretrain -> Cells 6-8 OOA training and test**.
 Everything is saved to your Google Drive, so if Colab disconnects, reconnect and **run all cells again**: finished steps are
 skipped and pretraining resumes from the last checkpoint.
+
+**Every new session during the OOA training (cell 7): run 1 -> 2 -> 6 -> 6d -> 7. It continues.** A free session ends
+after 2-5 hours, and the OOA training takes about 4-5 hours on a T4, so it is trained in pieces (`SFT_CHUNKS`, cell 1:
+12 pieces of about 20 minutes), each saved to Drive. Cells 6 and 6d see that Drive already has the data and only write
+the code files (a few seconds); cell 7 continues with the next piece. A disconnect loses at most the piece in progress.
 
 Set Runtime -> Change runtime type -> GPU first. Start with `PROFILE = "smoke"` (about 15 minutes) to check the whole pipeline,
 then switch to `"t4"` for the real run.
@@ -136,6 +142,16 @@ SI_SAMPLES = 8
 EVAL_SOURCE = "sft"        # which model the test cell loads: "sft" or "rl"
 SFT_ITERS = 400 if PROFILE == "smoke" else 48000           # counted in MICRO-batches (4 per optimizer step): 48000 = 12000 steps, about 3.5-4.5 h on a T4 (v4: 8000 steps in about 2.5-3 h)
 SFT_STEPS = SFT_ITERS // 4                                   # optimizer steps (--total-batch-size = 4 micro-batches)
+SFT_CHUNKS = 2 if PROFILE == "smoke" else 12   # cell 7 trains in this many pieces, each saved to Drive (model + optimizer state,
+                           # about 1 GB; the last two are kept): 12000 steps / 12 = 1000 steps per piece, about 20 min on a T4
+                           # (+1-2 min loading each). A session that ends loses at most the piece in progress; in a new session
+                           # run 1 -> 2 -> 6 -> 6d -> 7 and cell 7 continues with the next piece, same settings, same schedule.
+                           # Fewer pieces = less loading; more = less lost per disconnect. Fixed for a run once it started
+RESTART_SFT = False        # True: cell 7 throws the SFT run in progress away and starts a new one (needed when settings or the
+                           # data changed in the middle of a run; cell 7 says so). Used once: a run it started is never
+                           # restarted by it again, so leaving it on cannot throw away the next session's progress
+FORCE_DATA = False         # cells 6 / 6d skip their work when Drive already has the data for the same inputs (and while an
+                           # SFT run is in progress on it). True: build and render it again (from the newest platform)
 ANSWER_FORMAT = "compact"  # cell 6d: answers carry only what the model decides (no variables list, step ids or descriptions);
                            # the server and cell 8 rebuild the full flow (ooa_format.expand_flow). "full" = the old answers
 GOLD_DROPOUT = 0.5         # cell 6d: share of flow rows whose context misses 20-45% of the needed actions (retrieval misses
@@ -331,6 +347,11 @@ _bd = "/content/v6base" if BASE_NOW == "v6" else os.environ["NANOCHAT_BASE_DIR"]
 md("""
 ## Training on our use case (OOA flows)
 
+**New session (after a disconnect or the session limit): run 1 -> 2 -> 6 -> 6d -> 7. Cell 7 continues where it
+stopped.** Cells 6 and 6d skip their work when Drive already has the data for the same inputs (`FORCE_DATA = True`
+makes it again); cell 7 reads `sft_run/state.json` on Drive and trains the next piece with the run's own settings. If
+the settings or the data changed in the middle of a run it stops and says what changed (`RESTART_SFT = True` starts over).
+
 Builds training data from the platform repo with no LLM: requests to Flow JSON from the gold flows (3 wordings each),
 plus catalog questions ("which action does X", "what inputs does Y take"). Some workflow families are **held out** and
 never trained on; they are used in the final test. This seed set is small (about 60 flow examples): replace
@@ -338,74 +359,105 @@ never trained on; they are used in the final test. This seed set is small (about
 """)
 
 code('''
-#@title 6. Build OOA training data
-import json, os
+#@title 6. Build OOA training data (skipped when Drive already has it for the same inputs)
+import json, os, sys, subprocess, importlib
 os.makedirs("/content/ooa", exist_ok=True)
 FILES = %s
-for name, text in FILES.items():
+for name, text in FILES.items():          # the code files: written every session (cells 6d-13 need them)
     os.makedirs(os.path.dirname(f"/content/ooa/{name}"), exist_ok=True)
     open(f"/content/ooa/{name}", "w", encoding="utf-8").write(text)
-if not os.path.exists("/content/platform"):
+sys.path.insert(0, "/content/ooa")
+import sft_chunks as _SC
+importlib.reload(_SC)
+FORCE_DATA = globals().get("FORCE_DATA", False)
+# the inputs the data is made from; when Drive's sft/ was made from the same ones (or an SFT run is in progress on it),
+# the build is skipped and the platform is checked out at the commit the data was made from (cell 8 checks against it)
+_want6 = {"code": _SC.code_sig("/content/ooa", _SC.CELL6_CODE), "max_flow_chars": MAX_FLOW_CHARS,
+          "synth_train": SYNTH_TRAIN, "synth_eval": SYNTH_EVAL, "synth_pattern": SYNTH_PATTERN, "rebuild": REBUILD_DATA,
+          "clean": CLEAN_DATA, "row_chars": ROW_CHARS, "filter_cap": 60}
+_out6 = list(_SC.CELL6_OUT) + (["sft_clean/filter_report.json"] if CLEAN_DATA else [])
+SKIP6, _why6 = _SC.data_skip(DRIVE_DIR, _SC.STAMP6, _want6, _out6, FORCE_DATA, os.environ["NANOCHAT_BASE_DIR"])
+_pin = _SC.read_state(f"{DRIVE_DIR}/{_SC.STAMP6}").get("platform") if SKIP6 else None
+if not os.path.exists("/content/platform/.git"):
     !git clone -q --depth 1 {PLATFORM_REPO} /content/platform
-!python /content/ooa/build_sft_data.py /content/platform {DRIVE_DIR}/sft {MAX_FLOW_CHARS}
-def _have(name, rows):        # reuse a generated file from an earlier run unless REBUILD_DATA
-    f = f"{DRIVE_DIR}/sft/{name}"
-    ok = (not REBUILD_DATA) and os.path.exists(f) and sum(1 for _ in open(f)) >= rows * 0.9
-    print(("reusing " if ok else "generating ") + name)
-    return ok
-if not _have("synth_train.jsonl", SYNTH_TRAIN):
-    !python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform {DRIVE_DIR}/sft/synth_train.jsonl {SYNTH_TRAIN} 1
-!python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform /content/synth_eval_raw.jsonl 400 2
-train_set = {json.loads(l)["messages"][1]["content"] for l in open(f"{DRIVE_DIR}/sft/synth_train.jsonl")}
-def _all_actions(nodes):   # every step, including those inside if / try / loop (the test compares all of them)
-    out = []
-    for n in nodes or []:
-        out.append(n.get("action"))
-        for k in ("children", "else", "finally"):
-            if isinstance(n.get(k), list): out += _all_actions(n[k])
-        for ei in n.get("elseIf") or []: out += _all_actions(ei.get("children"))
-        for c in n.get("catch") or []: out += _all_actions(c.get("children"))
-    return out
-ev = []
-for l in open("/content/synth_eval_raw.jsonl"):
-    m = json.loads(l)["messages"]
-    if m[1]["content"] not in train_set and len(ev) < SYNTH_EVAL:
-        ev.append({"prompt": m[0]["content"], "gold_actions": _all_actions(json.loads(m[1]["content"])["steps"])})
-open(f"{DRIVE_DIR}/sft/eval_synth.jsonl", "w").write("\\n".join(json.dumps(x) for x in ev))
-# validation set the model never trains on (the old one overlapped training, so its loss looked great for nothing)
-val_rows = [json.loads(l) for l in open(f"{DRIVE_DIR}/sft/val.jsonl")]
-val_rows = [r for r in val_rows if r["messages"][1]["content"].startswith("Use ") or r["messages"][1]["content"].startswith("`")]
-raw = [json.loads(l) for l in open("/content/synth_eval_raw.jsonl")]
-extra = [r for r in raw[SYNTH_EVAL:] if r["messages"][1]["content"] not in train_set][:150]
-with open(f"{DRIVE_DIR}/sft/val.jsonl", "w") as f:
-    for r in val_rows + extra:
-        f.write(json.dumps(r) + "\\n")
-print("validation rows (unseen):", len(val_rows) + len(extra))
-print("synthetic eval prompts (not in train):", len(ev))
-if not _have("synth_pattern.jsonl", SYNTH_PATTERN):
-    !python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform {DRIVE_DIR}/sft/synth_pattern.jsonl {SYNTH_PATTERN} 1 patterns
-!python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform /content/pattern_eval_raw.jsonl 200 2 patterns
-_ptrain = {json.loads(l)["messages"][1]["content"] for l in open(f"{DRIVE_DIR}/sft/synth_pattern.jsonl")}
-_pev = []
-for l in open("/content/pattern_eval_raw.jsonl"):
-    m = json.loads(l)["messages"]
-    if m[1]["content"] not in _ptrain and len(_pev) < SYNTH_EVAL:
-        _f = json.loads(m[1]["content"])
-        _pev.append({"prompt": m[0]["content"], "gold_flow": m[1]["content"]})
-open(f"{DRIVE_DIR}/sft/eval_pattern.jsonl", "w").write("\\n".join(json.dumps(x) for x in _pev))
-print("real-pattern eval prompts (not in train):", len(_pev))
+if _pin:
+    !cd /content/platform && (git cat-file -e {_pin} 2>/dev/null || git fetch -q --depth 1 origin {_pin}) && git checkout -q {_pin}
+_want6["platform"] = subprocess.run(["git", "-C", "/content/platform", "rev-parse", "HEAD"], capture_output=True,
+                                    text=True).stdout.strip()
+if _pin and _want6["platform"] != _pin:
+    print("note: could not check out the platform commit the data was made from:", _pin, "(using", _want6["platform"], ")")
 !cp /content/ooa/ooa_task.py /content/nanochat/tasks/ooa.py
-# the catalog was just rebuilt from the platform downloaded in cell 2, so data and checks match the current platform
-print("actions in the catalog:", sum(1 for _ in open(f"{DRIVE_DIR}/sft/catalog.jsonl")))
-if CLEAN_DATA:
-    # strict filter: structure, length, leaked variable names, repeated clauses, platform rules (after adding missing
-    # open/save steps), stale actions, wrong app, closeness to a test request, duplicates, conflicts, over-represented
-    # action sequences. Report: sft_clean/filter_report.json
-    !python /content/ooa/data_filter.py {DRIVE_DIR}/sft {DRIVE_DIR}/sft_clean /content/platform /content/ooa --cap 60 --max-chars {ROW_CHARS}
+if SKIP6:
+    print("cell 6: data build SKIPPED:", _why6)
+    print("   using Drive's", ", ".join(_out6[:3]), "... | platform", _want6["platform"][:12], "| FORCE_DATA = True builds it again")
+else:
+    print("cell 6: building the data:", _why6)
+    _SC.clear_stamp(DRIVE_DIR, _SC.STAMP6)
+    !python /content/ooa/build_sft_data.py /content/platform {DRIVE_DIR}/sft {MAX_FLOW_CHARS}
+    def _have(name, rows):        # reuse a generated file from an earlier run unless REBUILD_DATA
+        f = f"{DRIVE_DIR}/sft/{name}"
+        ok = (not REBUILD_DATA) and os.path.exists(f) and sum(1 for _ in open(f)) >= rows * 0.9
+        print(("reusing " if ok else "generating ") + name)
+        return ok
+    if not _have("synth_train.jsonl", SYNTH_TRAIN):
+        !python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform {DRIVE_DIR}/sft/synth_train.jsonl {SYNTH_TRAIN} 1
+    !python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform /content/synth_eval_raw.jsonl 400 2
+    train_set = {json.loads(l)["messages"][1]["content"] for l in open(f"{DRIVE_DIR}/sft/synth_train.jsonl")}
+    def _all_actions(nodes):   # every step, including those inside if / try / loop (the test compares all of them)
+        out = []
+        for n in nodes or []:
+            out.append(n.get("action"))
+            for k in ("children", "else", "finally"):
+                if isinstance(n.get(k), list): out += _all_actions(n[k])
+            for ei in n.get("elseIf") or []: out += _all_actions(ei.get("children"))
+            for c in n.get("catch") or []: out += _all_actions(c.get("children"))
+        return out
+    ev = []
+    for l in open("/content/synth_eval_raw.jsonl"):
+        m = json.loads(l)["messages"]
+        if m[1]["content"] not in train_set and len(ev) < SYNTH_EVAL:
+            ev.append({"prompt": m[0]["content"], "gold_actions": _all_actions(json.loads(m[1]["content"])["steps"])})
+    open(f"{DRIVE_DIR}/sft/eval_synth.jsonl", "w").write("\\n".join(json.dumps(x) for x in ev))
+    # validation set the model never trains on (the old one overlapped training, so its loss looked great for nothing)
+    val_rows = [json.loads(l) for l in open(f"{DRIVE_DIR}/sft/val.jsonl")]
+    val_rows = [r for r in val_rows if r["messages"][1]["content"].startswith("Use ") or r["messages"][1]["content"].startswith("`")]
+    raw = [json.loads(l) for l in open("/content/synth_eval_raw.jsonl")]
+    extra = [r for r in raw[SYNTH_EVAL:] if r["messages"][1]["content"] not in train_set][:150]
+    with open(f"{DRIVE_DIR}/sft/val.jsonl", "w") as f:
+        for r in val_rows + extra:
+            f.write(json.dumps(r) + "\\n")
+    print("validation rows (unseen):", len(val_rows) + len(extra))
+    print("synthetic eval prompts (not in train):", len(ev))
+    if not _have("synth_pattern.jsonl", SYNTH_PATTERN):
+        !python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform {DRIVE_DIR}/sft/synth_pattern.jsonl {SYNTH_PATTERN} 1 patterns
+    !python /content/ooa/gen_flows.py {DRIVE_DIR}/sft/catalog.jsonl /content/platform /content/pattern_eval_raw.jsonl 200 2 patterns
+    _ptrain = {json.loads(l)["messages"][1]["content"] for l in open(f"{DRIVE_DIR}/sft/synth_pattern.jsonl")}
+    _pev = []
+    for l in open("/content/pattern_eval_raw.jsonl"):
+        m = json.loads(l)["messages"]
+        if m[1]["content"] not in _ptrain and len(_pev) < SYNTH_EVAL:
+            _f = json.loads(m[1]["content"])
+            _pev.append({"prompt": m[0]["content"], "gold_flow": m[1]["content"]})
+    open(f"{DRIVE_DIR}/sft/eval_pattern.jsonl", "w").write("\\n".join(json.dumps(x) for x in _pev))
+    print("real-pattern eval prompts (not in train):", len(_pev))
+    # the catalog was just rebuilt from the platform downloaded in cell 2, so data and checks match the current platform
+    print("actions in the catalog:", sum(1 for _ in open(f"{DRIVE_DIR}/sft/catalog.jsonl")))
+    if CLEAN_DATA:
+        # strict filter: structure, length, leaked variable names, repeated clauses, platform rules (after adding missing
+        # open/save steps), stale actions, wrong app, closeness to a test request, duplicates, conflicts, over-represented
+        # action sequences. Report: sft_clean/filter_report.json
+        if os.path.exists(f"{DRIVE_DIR}/sft_clean/filter_report.json"):
+            os.remove(f"{DRIVE_DIR}/sft_clean/filter_report.json")      # never taken for this run's if the filter fails
+        !python /content/ooa/data_filter.py {DRIVE_DIR}/sft {DRIVE_DIR}/sft_clean /content/platform /content/ooa --cap 60 --max-chars {ROW_CHARS}
+    _miss6 = _SC.missing_outputs(DRIVE_DIR, _out6)
+    if _miss6:
+        raise SystemExit("cell 6 did not finish (missing on Drive: " + ", ".join(_miss6) + "): see the errors above")
+    _SC.write_stamp(DRIVE_DIR, _SC.STAMP6, _want6)
+    print("cell 6: done; its inputs are recorded in", f"{DRIVE_DIR}/{_SC.STAMP6}", "(the next session skips this work)")
 ''' % json.dumps(files))
 
 code('''
-#@title 6d. Write the data in the plan-first format (new): sft_clean + the new files -> sft_render
+#@title 6d. Write the data in the plan-first format: sft_clean + the new files -> sft_render (skipped when Drive has it)
 import os, json
 # Every request gets a "### Context" block (the likely actions, 0-2 similar examples, sometimes the agent's variables)
 # and every answer becomes "Plan: 1. ... 2. ..." then "Flow: {...}". Flows too long for the window are written as their
@@ -422,97 +474,93 @@ for f in NEW_FILES:
         print("MISSING in Drive sft/ (upload it):", f)
 for f in glob.glob(f"{DRIVE_DIR}/sft/* (*).jsonl"):
     print("WARNING: Drive copy with (n) in the name, delete it and keep one file:", f)
+import sys, hashlib, importlib
+sys.path.insert(0, "/content/ooa")
+import sft_chunks as _SC
+importlib.reload(_SC)
 if RENDER:
-    if os.path.exists(f"{DRIVE_DIR}/sft_render"):
-        shutil.rmtree(f"{DRIVE_DIR}/sft_render")
-    _x = " ".join(_extra)
-    !cd /content/ooa && python render_dataset.py {_src} {DRIVE_DIR}/sft_render --catalog {DRIVE_DIR}/sft/catalog.jsonl --max-chars {ROW_CHARS} --max-tokens {ROW_TOKENS} --answer-format {ANSWER_FORMAT} --gold-dropout {GOLD_DROPOUT} --extra {_x}
-    # catalog question rows stay as they are
-    shutil.copy(f"{_src}/train_catalog.jsonl", f"{DRIVE_DIR}/sft_render/train_catalog.jsonl")
-    _r = json.load(open(f"{DRIVE_DIR}/sft_render/render_report.json"))
-    print("rendered from", _src, "+", len(_extra), "new files ->", f"{DRIVE_DIR}/sft_render")
-    print(json.dumps({k: v for k, v in _r.items() if not isinstance(v, (dict, list))}, indent=1))
+    _st6 = f"{DRIVE_DIR}/{_SC.STAMP6}"
+    _want6d = {"cell6": hashlib.sha1(open(_st6, "rb").read()).hexdigest()[:12] if os.path.exists(_st6) else None,
+               "src": _src, "extra": sorted([os.path.basename(f), os.path.getsize(f)] for f in _extra),
+               "code": _SC.code_sig("/content/ooa", _SC.CELL6D_CODE), "max_chars": ROW_CHARS, "max_tokens": ROW_TOKENS,
+               "answer_format": ANSWER_FORMAT, "gold_dropout": GOLD_DROPOUT}
+    SKIP6D, _why6d = _SC.data_skip(DRIVE_DIR, _SC.STAMP6D, _want6d, _SC.CELL6D_OUT, globals().get("FORCE_DATA", False),
+                                   os.environ["NANOCHAT_BASE_DIR"])
+    if SKIP6D:
+        _r = json.load(open(f"{DRIVE_DIR}/sft_render/render_report.json"))
+        print("cell 6d: rendering SKIPPED:", _why6d)
+        print("   using", f"{DRIVE_DIR}/sft_render", "| rows written:", _r.get("totals", {}).get("written"),
+              "| FORCE_DATA = True renders it again")
+    else:
+        print("cell 6d: rendering:", _why6d)
+        if os.path.exists(f"{DRIVE_DIR}/sft_render"):
+            shutil.rmtree(f"{DRIVE_DIR}/sft_render")
+        _x = " ".join(_extra)
+        !cd /content/ooa && python render_dataset.py {_src} {DRIVE_DIR}/sft_render --catalog {DRIVE_DIR}/sft/catalog.jsonl --max-chars {ROW_CHARS} --max-tokens {ROW_TOKENS} --answer-format {ANSWER_FORMAT} --gold-dropout {GOLD_DROPOUT} --extra {_x}
+        # catalog question rows stay as they are
+        shutil.copy(f"{_src}/train_catalog.jsonl", f"{DRIVE_DIR}/sft_render/train_catalog.jsonl")
+        _r = json.load(open(f"{DRIVE_DIR}/sft_render/render_report.json"))
+        print("rendered from", _src, "+", len(_extra), "new files ->", f"{DRIVE_DIR}/sft_render")
+        print(json.dumps({k: v for k, v in _r.items() if not isinstance(v, (dict, list))}, indent=1))
+        _miss6d = _SC.missing_outputs(DRIVE_DIR, _SC.CELL6D_OUT)
+        if _miss6d:
+            raise SystemExit("cell 6d did not finish (missing on Drive: " + ", ".join(_miss6d) + "): see the errors above")
+        _SC.write_stamp(DRIVE_DIR, _SC.STAMP6D, _want6d)
+        print("cell 6d: done; its inputs are recorded (the next session skips this work)")
 ''')
 
+
 code('''
-#@title 7. Patch nanochat SFT (data mix by step budget, train with the 4096 window), then train
+#@title 7. Train on our use case in saved pieces (a new session continues where the last one stopped)
 import os, sys, shutil, time, importlib
+if not os.path.exists("/content/ooa/sft_chunks.py"):
+    raise SystemExit("run cells 6 and 6d first in this session: they write the code files cell 7 needs (and skip the "
+                     "data work when Drive already has the data)")
 sys.path.insert(0, "/content/ooa")
-import sft_setup as _T
-importlib.reload(_T)
+import sft_setup as _T, sft_chunks as _SC, base_setup as _B7
+for _m in (_T, _SC, _B7):
+    importlib.reload(_m)
 SFT_DIR = f"{DRIVE_DIR}/sft_clean" if CLEAN_DATA and os.path.exists(f"{DRIVE_DIR}/sft_clean/filter_report.json") else f"{DRIVE_DIR}/sft"
 if RENDER and os.path.exists(f"{DRIVE_DIR}/sft_render/render_report.json"):
     SFT_DIR = f"{DRIVE_DIR}/sft_render"
 print("training data:", SFT_DIR)
-# always start from the pinned nanochat scripts, so an earlier patch can never hide the current data mix: write them
-# straight from the pinned commit (independent of the working tree, the index or an earlier edit of this cell)
+# the pinned nanochat scripts, straight from the commit (an earlier patch can never hide the current setup); the pieces
+# run a patched copy (scripts/chat_sft_ooa.py) written fresh for every piece; chat_cli.py is for cell 8
 !cd /content/nanochat && git fetch -q origin 2>/dev/null; git cat-file -e {NANOCHAT_COMMIT} && git show {NANOCHAT_COMMIT}:scripts/chat_sft.py > scripts/chat_sft.py && git show {NANOCHAT_COMMIT}:scripts/chat_cli.py > scripts/chat_cli.py && echo "chat_sft.py and chat_cli.py written from the pinned nanochat {NANOCHAT_COMMIT}"
-!cp /content/ooa/ooa_task.py /content/nanochat/tasks/ooa.py
-# The data mix is planned for the real budget (SFT_STEPS optimizer steps x tokens per step), not "epochs x repeats":
-# every file gets a number of views per row; long / business rows at most 3, catalog questions at least 3.
+# The data mix is planned for the real budget of the WHOLE run (SFT_STEPS optimizer steps x tokens per step), not
+# "epochs x repeats": every file gets a number of views per row; long / business rows at most 3, catalog questions at
+# least 3. The base model's own tokenizer sizes it (characters per token; v6 has its own tokenizer).
 _tps = SFT_SEQ * SFT_DEVICE_BATCH * 4
-import base_setup as _B7          # the base model's own tokenizer: its characters per token size the mixture (v6)
 _cpt = _B7.plan_chars_per_token(os.path.join(os.environ["NANOCHAT_BASE_DIR"], "tokenizer"))
 print("base model:", os.environ["NANOCHAT_BASE_DIR"], "| characters per token:", _cpt or _T.CHARS_PER_TOKEN)
-VIEWS, _stats, _budget, _lines = _T.plan_for_notebook(SFT_DIR, SFT_STEPS, _tps, smoltalk_rows=SMOLTALK_ROWS,
-                                                      chars_per_token=_cpt)
-print(f"SFT budget: {SFT_STEPS} steps x {_tps:,} tokens per step -> about {_budget/1e6:.0f}M tokens of conversations"
-      f" (+ {SMOLTALK_ROWS} SmolTalk rows). Planned views per row:")
-print("\\n".join(_lines))
-# The patch (sft_setup.patch_chat_sft; it stops if nanochat changed upstream):
-#  - the attention window: nanochat builds the SFT model from the BASE config (sequence 1024 on the t4 profile), so SFT
-#    used to train with a 1024 window while the checkpoint said 4096. Now the window is --max-seq-len (printed at the
-#    start as "SFT attention window: ...") and the checkpoint saves "trained_window" for the serving check.
-#  - the mix above; conversations longer than the window are skipped, never cut; at the end it prints how many rows
-#    of each file were actually read ("Training data actually read").
-p = "/content/nanochat/scripts/chat_sft.py"
-_s = open(p).read().replace("\\r\\n", "\\n")
-_need = {"window": _T.WINDOW_ANCHOR, "meta": _T.META_ANCHOR, "tasks start": _T.TASKS_START, "tasks end": _T.TASKS_END,
-         "import": _T.IMPORT_ANCHOR, "loader": _T.LOADER_OLD, "step": _T.STEP_ANCHOR, "end": _T.END_ANCHOR,
-         "loss line": _T.LOSS_LOG_ANCHOR, "validation line": _T.VAL_ANCHOR}
-_miss = [k for k, a in _need.items() if a not in _s]
-if _miss:      # say exactly what differs, so it can be fixed from this output
-    print("chat_sft.py does not match the pinned nanochat; missing:", _miss, "| sha1 of the file:",
-          __import__("hashlib").sha1(_s.encode()).hexdigest()[:12])
-    for _i, _l in enumerate(_s.splitlines()):
-        if any(w in _l for w in ("torch.compile", "orig_model =", "user_config\\": ", "train_tasks =", "render_conversation(")):
-            print(f"  line {_i + 1}: {_l!r}")
-    !cd /content/nanochat && git log -1 --oneline && git status --short | head
-    raise SystemExit("cell 7 stopped before training: send the lines above")
-open(p, "w").write(_T.patch_chat_sft(_s, SFT_DIR, VIEWS, smoltalk_rows=SMOLTALK_ROWS))
-print("patched chat_sft.py")
-# keep the previous model: nanochat loads the highest step in chatsft_checkpoints, so move it aside (never deleted)
+# Every piece runs nanochat's chat_sft patched by sft_setup.patch_chat_sft (it stops if nanochat changed upstream):
+#  - the attention window: SFT trains with --max-seq-len (printed as "SFT attention window: ..."; the base config says
+#    1024 on the t4 profile) and the checkpoint saves "trained_window" and the tokenizer's sha1;
+#  - the mix above, each piece reading its share with its own shuffle; conversations longer than the window are skipped,
+#    never cut ("Training data actually read" at the end of each piece);
+#  - NaN guard: a loss that is not a number for 5 steps, or a validation that is not a number, stops the piece before
+#    it saves anything ("OOA NAN STOP"); it is tried once more with a fresh optimizer state, and never saved.
+# Piece k starts from the model + optimizer state piece k-1 saved on Drive (sft_run/chunks), with the learning rate of
+# its part of ONE run's schedule (constant, then down to 0 over the second half) and the base model's learning rates.
+# A new run moves the previous trained model aside (chatsft_checkpoints_before_<date>, never deleted); the new model
+# is written to chatsft_checkpoints only when every piece is done and its weights are checked finite.
+_r7 = _SC.colab_sft(os.environ["NANOCHAT_BASE_DIR"], SFT_DIR, SFT_STEPS, SFT_CHUNKS, SFT_SEQ, SFT_DEVICE_BATCH, _tps,
+                    smoltalk=SMOLTALK_ROWS, chars_per_token=_cpt, restart=RESTART_SFT, nano="/content/nanochat",
+                    training_dir="/content/ooa", work="/content/sft_work")
+# Is the trained model usable? (checked again here, the way cell 8 and the PC notebook check it)
 _ck = os.path.join(os.environ["NANOCHAT_BASE_DIR"], "chatsft_checkpoints")
-_keep = None
-if os.path.exists(_ck):
-    _keep = _ck + "_before_" + time.strftime("%Y%m%d_%H%M%S")
-    shutil.move(_ck, _keep)
-    print("previous model kept in", _keep)
-!python -m scripts.chat_sft --max-seq-len={SFT_SEQ} --device-batch-size={SFT_DEVICE_BATCH} \\
-    --total-batch-size={SFT_SEQ*SFT_DEVICE_BATCH*4} --num-iterations={SFT_ITERS} \\
-    --eval-every=100 --eval-tokens={SFT_SEQ*SFT_DEVICE_BATCH*8} --chatcore-every=-1 --run=dummy
-# Is the trained model usable? The patch stops a run whose loss stays nan (5 steps) or whose validation is nan before
-# it saves anything ("OOA NAN STOP" above). A saved model with nan / inf weights is moved aside, so neither cell 8 nor
-# the PC notebook takes it for the newest model.
-_step, _bad = _T.check_model_dir(os.path.join(_ck, "d8"))
+_step, _bad = _T.check_model_dir(os.path.join(_ck, _r7["state"]["base"]["tag"]))
 if _step is None:
-    print("!" * 110)
-    print("NO MODEL WAS SAVED: the run stopped before its end. An 'OOA NAN STOP' line above means the loss became nan:")
-    print("the training went unstable. Send the first 'step ... | loss' lines and the 'Validation bpb' lines of this cell.")
-    print("The previous model is kept in", _keep or "(there was none)")
-    print("!" * 110)
-    raise SystemExit("cell 7: no trained model was saved (see the lines above)")
+    raise SystemExit("cell 7: no trained model in " + _ck + " (see the lines above)")
 if _bad:
     _broken = _ck + "_broken_" + time.strftime("%Y%m%d_%H%M%S")
     shutil.move(_ck, _broken)
     print("!" * 110)
     print(f"THE TRAINED MODEL IS BROKEN: step {_step} has nan/inf weights in {_T.short_list(_bad)}.")
-    print("The training went unstable. It was moved to", _broken, "so nothing uses it; the previous model is kept in",
-          _keep or "(there was none)")
-    print("Send the first 'step ... | loss' lines and the 'Validation bpb' lines of this cell.")
+    print("It was moved to", _broken, "so nothing uses it. Send the 'step ... | loss' and 'Validation bpb' lines of this cell.")
     print("!" * 110)
     raise SystemExit("cell 7: the trained model has broken weights (see the lines above)")
-print(f"trained model step {_step}: all weights are finite (checked)")
+print(f"trained model step {_step}: all weights are finite (checked) | next: cell 8 tests it")
 ''')
 
 code('''
@@ -792,7 +840,8 @@ colab_ar_cells.build(md, gated, FROZEN_BLOB)
 
 md("""
 ## After this run
-- Checkpoints: `DRIVE_DIR/nanochat_base/base_checkpoints` (pretrained) and `chatsft_checkpoints` (OOA-trained);
+- Checkpoints: `DRIVE_DIR/nanochat_base/base_checkpoints` (pretrained) and `chatsft_checkpoints` (OOA-trained; the
+  pieces of the run in progress and its `state.json` are in `sft_run`, the last two pieces kept);
   with `BASE` "v6" all of it is in `DRIVE_DIR/nanochat_base_v6` (with its own tokenizer).
 - Weak results on the held-out test are expected with the seed data. The next lever is more and better dialogues
   (edits, error fixing, missing-input questions), validated with the scorer in `eval/flow_check.py`.
