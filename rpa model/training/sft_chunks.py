@@ -8,8 +8,11 @@ Shared by the PC (training/local/train_pc.py) and Colab cell 7 (colab_sft below)
   - the Muon momentum ramp counts the run's steps (OOA_STEP_OFFSET, MOMENTUM_NEW);
   - the base learning rates are passed explicitly (a saved SFT checkpoint stores them as None, and chat_sft would fall
     back to its own defaults, which halve the output layer's rate);
-  - every chunk plans the same data mixture for the WHOLE run and reads its share of it with its own shuffle
-    (seed + k), so over the run every file is seen the planned number of times on average;
+  - every chunk plans the same data mixture for the WHOLE run with the run's one seed and reads the next part of that
+    one list: chunk k starts reading where chunk k-1 stopped (OOA_DATA_START, the cursor chunk k-1 wrote to
+    OOA_DATA_OUT; chunk_data / data_after_chunk), so the chunks read the stream one run reads (up to the ~100
+    conversations in the packing buffer at each boundary) and every file, SmolTalk too, is seen as planned. (A run
+    started before this kept seed + k per chunk with each chunk reading from the start: continued that way.)
   - a chunk whose loss / validation goes nan is never saved (chat_sft's guard, sft_setup; the watchdog in follow);
     the next try starts with a fresh optimizer state when the loaded one may be the cause (optimizer_choice).
 
@@ -219,6 +222,46 @@ MOMENTUM_NEW = ("    muon_momentum = get_muon_momentum(step + int(os.environ.get
                 "  # the run's step, not the chunk's\n")
 
 
+# chunk k continues the run's data stream: the train loader starts at OOA_DATA_START (mod the list's length) and the
+# script writes {"start", "fetched", "size"} to OOA_DATA_OUT at the end (rows fetched into the packing buffer)
+DATA_ORDER = "one_stream"
+CURSOR_OLD = "    cursor = ddp_rank  # Each rank processes different conversations (for fetching)\n"
+CURSOR_NEW = (CURSOR_OLD + "    if split == \"train\":  # OOA: continue the run's data stream where the last chunk stopped\n"
+              "        cursor = (cursor + int(os.environ.get(\"OOA_DATA_START\", \"0\"))) % dataset_size\n")
+FETCH_OLD = "            cursor += ddp_world_size\n"
+FETCH_NEW = FETCH_OLD + "            if split == \"train\":\n                _ooa_fetched[0] += ddp_world_size\n"
+LOADER_DEF = 'train_loader = sft_data_generator_bos_bestfit("train")\n'
+DATA_END = '''if master_process and os.environ.get("OOA_DATA_OUT"):   # OOA: where the next chunk continues reading
+    import json as _ooa_json
+    with open(os.environ["OOA_DATA_OUT"], "w", encoding="utf-8") as _f:
+        _ooa_json.dump({"start": int(os.environ.get("OOA_DATA_START", "0")), "fetched": _ooa_fetched[0],
+                        "size": len(train_dataset)}, _f)
+'''
+
+
+def chunk_data(state, k):
+    """(seed, data start) of chunk k: the run's one seed and the cursor the chunk before stopped at; a run started
+    before the one-stream order: seed + k, each chunk from the start."""
+    if state.get("data_order") == DATA_ORDER:
+        return int(state.get("seed", 1)), int(state.get("data_cursor", 0) or 0)
+    return int(state.get("seed", 1)) + k, 0
+
+
+def data_after_chunk(state, out_file, start):
+    """After a chunk that is saved: state["data_cursor"] = where the next chunk starts reading. -> the record
+    {"start", "fetched", "size"} (None, with a warning, when the script wrote none)."""
+    try:
+        rec = json.loads(Path(out_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        if state.get("data_order") == DATA_ORDER:
+            print(f"   warning: the chunk wrote no data cursor ({out_file}); the next chunk starts where this one did")
+        return None
+    if state.get("data_order") == DATA_ORDER:
+        state["data_cursor"] = int(start) + int(rec.get("fetched", 0))
+        state["data_size"] = rec.get("size")
+    return rec
+
+
 def write_script(nano, data, views, smoltalk, seed, compile_ok, training_dir):
     """nanochat/scripts/chat_sft_ooa.py: the pinned chat_sft.py patched by sft_setup.patch_chat_sft (window fix, the
     mixture, NaN guard) + the run-wide Muon momentum ramp; tasks/ooa.py from training_dir (the original chat_sft.py
@@ -234,6 +277,11 @@ def write_script(nano, data, views, smoltalk, seed, compile_ok, training_dir):
     if s.count(MOMENTUM_OLD) != 1:
         raise SystemExit("chat_sft.py is not the expected version (Muon momentum line)")
     s = s.replace(MOMENTUM_OLD, MOMENTUM_NEW, 1)                # chunk k continues the momentum ramp of chunk k-1
+    for a, b in ((CURSOR_OLD, CURSOR_NEW), (FETCH_OLD, FETCH_NEW), (LOADER_DEF, "_ooa_fetched = [0]\n" + LOADER_DEF),
+                 (T.END_ANCHOR, DATA_END + T.END_ANCHOR)):
+        if s.count(a) != 1:
+            raise SystemExit("chat_sft.py is not the expected version (data loader: " + a.strip()[:50] + ")")
+        s = s.replace(a, b, 1)                                  # chunk k continues the data stream of chunk k-1
     if not compile_ok:
         s = no_compile(s)
     out = Path(nano) / "scripts" / "chat_sft_ooa.py"
@@ -477,7 +525,17 @@ def refuse_message(diff, state):
             .format(state.get("done", 0), state.get("chunks")) + "\n  ".join(diff) +
             "\nContinuing would mix two different runs. Either put the settings back as they were (cell 1; for the data:"
             " FORCE_DATA = False so cells 6 / 6d keep the data the run started on) and run cell 7 again, or set "
-            "RESTART_SFT = True in cell 1 to throw the run in progress away and start a new one with these settings.")
+            "RESTART_SFT = True in cell 1 to throw the run in progress away and start a new one with these settings: "
+            "then run cells 1 -> 6 -> 6d -> 7 (with RESTART_SFT on, cells 6 / 6d make the data again when its inputs "
+            "changed, e.g. SFT_SEQ, so the new run never trains on data made for the old settings).")
+
+
+def drive_full_message(what, ex, chunk):
+    return (f"cell 7 stopped: {what} failed ({type(ex).__name__}: {ex}). Most likely Google Drive is full. Deleted "
+            "files (older chunks, old runs) stay in Drive's TRASH and still count against the space: empty the trash "
+            "(drive.google.com -> Trash -> Empty trash), check there is about 4 GB free, then run cell 7 again"
+            + (f"; chunk {chunk} is trained again (the chunks before it are kept)." if chunk else
+               "; every chunk is done, so it only installs the model."))
 
 
 def run_in_progress(base_dir):
@@ -573,7 +631,7 @@ def colab_sft(base_dir, data, steps, chunks, seq, device_batch, tokens_per_step,
             shutil.move(str(ck), str(kept))
             print("previous model kept in", kept)
         state = dict(settings, views=views, base_lrs=base_lrs_of(base_d8), done=0, finished=False,
-                     started_by_restart=bool(restart),
+                     started_by_restart=bool(restart), data_order=DATA_ORDER, data_cursor=0,
                      started=time.strftime("%Y-%m-%d %H:%M"), previous_kept=str(kept) if kept else None,
                      chunk_log=[], nan_stops=[], seconds_per_step=[])
         write_state(state_f, state)
@@ -610,9 +668,13 @@ def colab_sft(base_dir, data, steps, chunks, seq, device_batch, tokens_per_step,
         load_opt, why_opt = optimizer_choice(from_dir, from_step, "auto", nan_before)
         print("   optimizer:", why_opt, flush=True)
         prepare_work(wb, from_dir, from_step, tok, tag)
-        write_script(nano, data, state["views"], settings["smoltalk"], settings["seed"] + k, compile_ok, training_dir)
+        seed_k, data_start = chunk_data(state, k)
+        write_script(nano, data, state["views"], settings["smoltalk"], seed_k, compile_ok, training_dir)
+        data_out = work / "data_cursor.json"
+        data_out.unlink(missing_ok=True)
         env = dict(os.environ, NANOCHAT_BASE_DIR=str(wb), OOA_TRAINING_DIR=str(training_dir), PYTHONUTF8="1",
-                   PYTHONIOENCODING="utf-8", OOA_STEP_OFFSET=str(bounds[k]))
+                   PYTHONIOENCODING="utf-8", OOA_STEP_OFFSET=str(bounds[k]), OOA_DATA_START=str(data_start),
+                   OOA_DATA_OUT=str(data_out))
         cmd = chunk_command(python, seq, device_batch, tokens_per_step, steps_k, span, from_step, load_opt,
                             state["base_lrs"], eval_every, device_type, tag)
         t0 = time.time()
@@ -646,13 +708,20 @@ def colab_sft(base_dir, data, steps, chunks, seq, device_batch, tokens_per_step,
         dst = run_dir / "chunks" / f"chunk_{k:03d}"
         part = dst.with_name(dst.name + ".part")
         shutil.rmtree(part, ignore_errors=True)
-        copy_model(out_d8, cstep, part)
-        shutil.rmtree(dst, ignore_errors=True)
-        os.replace(part, dst)
+        try:
+            copy_model(out_d8, cstep, part)
+            shutil.rmtree(dst, ignore_errors=True)
+            os.replace(part, dst)
+        except OSError as ex:                       # Drive full (or gone): a clear stop instead of a traceback
+            shutil.rmtree(part, ignore_errors=True)
+            raise SystemExit(drive_full_message(f"saving chunk {k + 1} to Drive", ex, k + 1))
+        rec = data_after_chunk(state, data_out, data_start)
         state["done"] = k + 1
         state.setdefault("chunk_log", []).append({"chunk": k, "steps": [bounds[k], bounds[k + 1]],
                                                   "lr": [round(x, 6) for x in span], "optimizer": "loaded" if load_opt
-                                                  else "fresh", "seed": settings["seed"] + k,
+                                                  else "fresh", "seed": seed_k,
+                                                  "data": [data_start, data_start + rec["fetched"], rec["size"]]
+                                                  if rec else None,
                                                   "minutes": round((time.time() - t0) / 60, 1)})
         if sps:
             state.setdefault("seconds_per_step", []).append(round(sps, 2))
@@ -687,7 +756,11 @@ def colab_sft(base_dir, data, steps, chunks, seq, device_batch, tokens_per_step,
         print("a model that appeared in chatsft_checkpoints during the run is kept in", kept)
     part = base_dir / "chatsft_checkpoints.part"
     shutil.rmtree(part, ignore_errors=True)
-    copy_model(last, fstep, part / tag, new_step=settings["steps"])
+    try:
+        copy_model(last, fstep, part / tag, new_step=settings["steps"])
+    except OSError as ex:
+        shutil.rmtree(part, ignore_errors=True)
+        raise SystemExit(drive_full_message("installing the finished model on Drive", ex, None))
     meta_f = part / tag / f"meta_{settings['steps']:06d}.json"
     m = json.loads(meta_f.read_text(encoding="utf-8"))
     m["step"] = settings["steps"]
@@ -731,11 +804,13 @@ def missing_outputs(drive_dir, outputs):
     return [o for o in outputs if not (Path(drive_dir) / o).exists() or (Path(drive_dir) / o).stat().st_size == 0]
 
 
-def data_skip(drive_dir, stamp, want, outputs, force=False, base_dir=None):
+def data_skip(drive_dir, stamp, want, outputs, force=False, base_dir=None, restart=False):
     """May cell 6 / 6d skip its heavy work? -> (skip, why). Skipped when its outputs are on Drive and either were made
     from these inputs (the stamp it wrote last time equals want, compared without the platform commit, which is
     pinned to the stamp's) or an SFT run is in progress on them (base_dir/sft_run: rebuilding would change the data
-    under it). FORCE_DATA (force) always rebuilds."""
+    under it). FORCE_DATA (force) always rebuilds. RESTART_SFT (restart): cell 7 starts a new run (or, left on, its
+    plan follows the settings), so the run in progress does not keep the data: data whose inputs changed is made
+    again for the new run."""
     if force:
         return False, "FORCE_DATA = True: made again"
     miss = missing_outputs(drive_dir, outputs)
@@ -745,14 +820,15 @@ def data_skip(drive_dir, stamp, want, outputs, force=False, base_dir=None):
     if old and {k: v for k, v in old.items() if k not in ("platform", "time")} == \
             {k: v for k, v in want.items() if k not in ("platform", "time")}:
         return True, f"Drive already has it for the same inputs (made {old.get('time', '?')})"
-    run = run_in_progress(base_dir) if base_dir else None
+    run = run_in_progress(base_dir) if base_dir and not restart else None
     if run:
         what = [k for k in sorted(set(old) | set(want)) if k not in ("platform", "time") and old.get(k) != want.get(k)]
         return True, (f"an SFT run is in progress on this data ({run.get('done', 0)} of {run.get('chunks')} chunks "
                       f"done), so it is kept for cell 7 to continue" + (f" (differs now in: {', '.join(what)})" if
                                                                         old and what else "") +
                       "; FORCE_DATA = True makes it again (cell 7 then needs RESTART_SFT = True)")
-    return False, ("its inputs changed: " + ", ".join(k for k in sorted(set(old) | set(want))
+    return False, (("RESTART_SFT = True: the new run gets data made for these settings; " if restart and old else "")
+                   + "its inputs changed: " + ", ".join(k for k in sorted(set(old) | set(want))
                                                      if k not in ("platform", "time") and old.get(k) != want.get(k))
                    if old else "no record of the inputs it was made from (made by an older notebook)")
 

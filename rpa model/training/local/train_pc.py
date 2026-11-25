@@ -21,9 +21,10 @@ Chunks: nanochat saves only at the end of a run, so the run is split into --chun
 model and optimizer chunk k-1 saved and covers the part [k/K, (k+1)/K] of the run's learning-rate schedule (constant,
 then the linear warmdown over the second half, exactly the shape of one long run); the Muon momentum ramp (0.85 to
 0.95 over the first 300 steps) also counts the run's steps, not the chunk's (OOA_STEP_OFFSET). Every chunk plans the same data
-mixture for the whole run and reads its own share of it with a different shuffle (seed + k; a full run starts at seed
-1 like Colab, every top-up round at a new seed), so over the run every file is seen the planned number of times on
-average. With --chunks 1 (default on a GPU) the run is Colab cell 7.
+mixture for the whole run with the run's one seed (a full run seed 1 like Colab, every top-up round a new seed) and
+continues reading that list where the chunk before stopped (OOA_DATA_START), so the chunks read what one run reads and
+every file is seen the planned number of times. (A run started before this continues as it began: seed + k per chunk.)
+With --chunks 1 (default on a GPU) the run is Colab cell 7.
 The chunk logic is training/sft_chunks.py, shared with Colab cell 7 (which runs the full mode in SFT_CHUNKS pieces
 saved to Drive, so a Colab session that ends loses at most one piece).
 The state is kept in RPA/local_run/<mode>/ (state.json, the last two chunks, train.log): full, topup and refine runs
@@ -56,7 +57,8 @@ import sft_chunks as SC                                        # noqa: E402  (th
 from sft_chunks import (NANOCHAT_COMMIT, NAN_STEPS, BASE_LRS, MOMENTUM_OLD, MOMENTUM_NEW, STEP_RE, VAL_RE,  # noqa: E402,F401
                         newest, copy_model, lr_for_chunk, lr_for_span, base_lrs_of, lr_flags, model_health,
                         optimizer_choice, nan_value, pinned_chat_sft, no_compile, data_sig, windows_kill_with_parent,
-                        run_chunk, follow, chunk_bounds, chunk_command, prepare_work)
+                        run_chunk, follow, chunk_bounds, chunk_command, prepare_work, chunk_data, data_after_chunk,
+                        DATA_ORDER)
 
 TOKENS_PER_STEP = 32768          # Colab: SFT_SEQ 4096 x device batch 2 x 4 micro-batches; every mode keeps it
 FULL_STEPS = 12000               # Colab SFT_ITERS 48000 micro-batches = 12000 optimizer steps
@@ -494,6 +496,7 @@ def main(argv=None):
                  "start": str(src_root), "start_step": src_step, "lr": a.lr, "smoltalk": a.smoltalk, "data": str(data),
                  "data_sig": data_sig(data), "views": views, "done": 0, "started": time.strftime("%Y-%m-%d %H:%M"),
                  "tokenizer": str(tok), "seed": 1 if full else int(time.time()) % 100000 * 100 + 1,
+                 "data_order": DATA_ORDER, "data_cursor": 0,
                  "install_step": a.steps if full else src_step + a.steps,
                  "drive_origin": drive_id(src_root) or (local_origin(rpa) if src_root == rpa / "nanochat_base" else None)}
     else:
@@ -530,10 +533,12 @@ def main(argv=None):
         nan_before = any(e["chunk"] == k and e["optimizer"] == "loaded" for e in state.get("nan_stops", []))
         load_opt, why_opt = optimizer_choice(from_dir, from_step, a.optimizer, nan_before)
         print("   optimizer:", why_opt, flush=True)
-        write_script(nano, data, views, a.smoltalk, state.get("seed", 1) + k, compile_ok=not a.no_compile)
+        seed_k, data_start = chunk_data(state, k)
+        write_script(nano, data, views, a.smoltalk, seed_k, compile_ok=not a.no_compile)
+        data_out = work / "data_cursor.json"
         env = dict(os.environ, NANOCHAT_BASE_DIR=str(wb), OOA_TRAINING_DIR=str(HERE.parent), PYTHONUTF8="1",
                    PYTHONIOENCODING="utf-8", NANOCHAT_DTYPE=dtype, OMP_NUM_THREADS=str(1 if gpu else threads),
-                   OOA_STEP_OFFSET=str(bounds[k]))
+                   OOA_STEP_OFFSET=str(bounds[k]), OOA_DATA_START=str(data_start), OOA_DATA_OUT=str(data_out))
         cmd = chunk_command(sys.executable, a.seq, dbs, TOKENS_PER_STEP, steps_k, (lr0, wd, final), from_step,
                             load_opt, state["base_lrs"], 100 if gpu else -1, None if gpu else "cpu")
         t0 = time.time()
@@ -567,6 +572,7 @@ def main(argv=None):
         old = run_dir / "chunks" / f"chunk_{k - 2:03d}"           # keep the last two chunks (disk space)
         if old.exists():
             shutil.rmtree(old, ignore_errors=True)
+        data_after_chunk(state, data_out, data_start)
         state["done"] = k + 1
         state.setdefault("seconds_per_step", [])
         if sps:

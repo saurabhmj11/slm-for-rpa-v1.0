@@ -76,7 +76,8 @@ class FakeSFT:
 
     def __call__(self, cmd, cwd, env, log, total, offset, prio, watch=None, every=10):
         flags = dict(re.match(r"--([\w-]+)=(.*)", c).groups() for c in cmd if c.startswith("--"))
-        call = {"flags": flags, "offset": int(env["OOA_STEP_OFFSET"]), "base_dir": env["NANOCHAT_BASE_DIR"]}
+        call = {"flags": flags, "offset": int(env["OOA_STEP_OFFSET"]), "base_dir": env["NANOCHAT_BASE_DIR"],
+                "data_start": int(env["OOA_DATA_START"])}
         self.calls.append(call)
         Path(log).parent.mkdir(parents=True, exist_ok=True)
         Path(log).write_text("log\n", encoding="utf-8")
@@ -86,6 +87,8 @@ class FakeSFT:
         tag = flags["model-tag"]
         steps = int(flags["num-iterations"]) * int(flags["max-seq-len"]) * int(flags["device-batch-size"]) \
             // int(flags["total-batch-size"])
+        Path(env["OOA_DATA_OUT"]).write_text(json.dumps({"start": call["data_start"], "fetched": 10 * steps,
+                                                         "size": 1000}), encoding="utf-8")
         put_model(Path(env["NANOCHAT_BASE_DIR"]) / "chatsft_checkpoints" / tag, steps,
                   data=b"nan" if self.broken_out else f"model after {offset_plus(call, steps)}".encode(),
                   meta={"step": steps, "user_config": {"init_lr_frac": float(flags["init-lr-frac"])},
@@ -198,9 +201,12 @@ def test_resume_across_sessions_with_a_fake_chat_sft(monkeypatch=None):
                 assert c["offset"] == 4 * k and f["num-iterations"] == str(4 * 4)  # 4 steps x 4 micro-batches
                 assert f["unembedding-lr"] == "0.008" and f["embedding-lr"] == "0.3" and f["matrix-lr"] == "0.02"
                 assert f["load-optimizer"] == "1" and f["model-tag"] == "d8"
+                assert c["data_start"] == 40 * k                                    # continues the data stream
             assert sft.calls[0]["flags"]["model-step"] == "5000" and sft.calls[1]["flags"]["model-step"] == "4"
             st = json.loads((base / "sft_run/state.json").read_text(encoding="utf-8"))
-            assert st["finished"] and st["done"] == 3 and [c["seed"] for c in st["chunk_log"]] == [1, 2, 3]
+            assert st["finished"] and st["done"] == 3 and [c["seed"] for c in st["chunk_log"]] == [1, 1, 1]
+            assert [c["data"] for c in st["chunk_log"]] == [[0, 40, 1000], [40, 80, 1000], [80, 120, 1000]]
+            assert st["data_order"] == SC.DATA_ORDER and st["data_cursor"] == 120
             assert sorted(p.name for p in (base / "sft_run/chunks").iterdir()) == ["chunk_001", "chunk_002"]
             d8 = base / "chatsft_checkpoints/d8"
             assert SC.newest(d8) == 12 and (d8 / "optim_000012_rank0.pt").exists()     # renamed to the run's step
@@ -322,6 +328,10 @@ def test_data_skip():
         skip, why = SC.data_skip(t, SC.STAMP6, dict(want, synth_train=1500), out, base_dir=base)
         assert skip and "3 of 12 chunks" in why and "synth_train" in why and "FORCE_DATA = True" in why
         assert not SC.data_skip(t, SC.STAMP6, dict(want, synth_train=1500), out, force=True, base_dir=base)[0]
+        # RESTART_SFT: the new run must not train on data made for the old settings: made again when inputs changed
+        skip, why = SC.data_skip(t, SC.STAMP6, dict(want, synth_train=1500), out, base_dir=base, restart=True)
+        assert not skip and "RESTART_SFT" in why and "synth_train" in why
+        assert SC.data_skip(t, SC.STAMP6, want, out, base_dir=base, restart=True)[0]   # same inputs: kept
         SC.write_state(base / "sft_run/state.json", {"done": 12, "chunks": 12, "finished": True})
         assert not SC.data_skip(t, SC.STAMP6, dict(want, synth_train=1500), out, base_dir=base)[0]
         (t / "sft/a.jsonl").write_text("", encoding="utf-8")                  # an empty output is not finished
@@ -329,6 +339,62 @@ def test_data_skip():
         SC.clear_stamp(t, SC.STAMP6)
         assert not (t / SC.STAMP6).exists()
         assert SC.code_sig(HERE, ("sft_chunks.py",)) != SC.code_sig(HERE, ("sft_setup.py",))
+
+
+def test_drive_full_is_a_clear_stop(monkeypatch=None):
+    """Drive full while a chunk is saved: no traceback, the .part folder removed, the state unchanged, the message
+    says to empty the trash; the next try retrains only that chunk."""
+    mp = monkeypatch or MP()
+    try:
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            base, data = fake_drive(t)
+            sft = FakeSFT()
+            setup_fakes(mp, sft)
+            real = SC.copy_model
+
+            def full(src, step, dst, *a, **k):
+                if Path(dst).name == "chunk_001.part":
+                    Path(dst).mkdir(parents=True, exist_ok=True)
+                    (Path(dst) / "model_000008.pt").write_bytes(b"half")
+                    raise OSError(28, "No space left on device")
+                return real(src, step, dst, *a, **k)
+            mp.setattr(SC, "copy_model", full)
+            try:
+                run(base, data, t)
+                raise AssertionError("a full Drive must stop the cell")
+            except SystemExit as ex:
+                assert "TRASH" in str(ex) and "chunk 2 is trained again" in str(ex), str(ex)
+            assert not (base / "sft_run/chunks/chunk_001.part").exists()
+            st = json.loads((base / "sft_run/state.json").read_text(encoding="utf-8"))
+            assert st["done"] == 1 and st["data_cursor"] == 40
+            mp.setattr(SC, "copy_model", real)
+            r = run(base, data, t)
+            assert r["status"] == "finished" and r["trained_now"] == 2
+            assert [c["data_start"] for c in sft.calls] == [0, 40, 40, 80]   # the retried chunk re-reads its part
+    finally:
+        if not monkeypatch:
+            mp.restore()
+
+
+def test_patched_script_continues_the_data_stream():
+    """The chunk script starts its train cursor at OOA_DATA_START and writes where it stopped (pinned nanochat)."""
+    if not NANO or not Path(NANO, "scripts/chat_sft.py").exists():
+        print("  (skipped: set NANOCHAT_DIR to the pinned nanochat)")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        nano = Path(t) / "nano"
+        shutil.copytree(Path(NANO) / "scripts", nano / "scripts")
+        (nano / "tasks").mkdir()
+        out = SC.write_script(nano, "/x/sft_render", {"a_train.jsonl": 1.0}, 3000, 7, True, HERE)
+        s = out.read_text(encoding="utf-8")
+        compile(s, "chat_sft_ooa.py", "exec")
+        assert 'os.environ.get("OOA_DATA_START", "0"))) % dataset_size' in s and "_ooa_fetched[0] +=" in s
+        assert s.index("_ooa_fetched = [0]") < s.index('train_loader = sft_data_generator_bos_bestfit("train")')
+        assert s.index('os.environ["OOA_DATA_OUT"]') < s.index('print0(f"Total training time:')
+        assert "seed=7" in s and 'SmolTalk(split="train", stop=3000)' in s
+    assert SC.chunk_data({"data_order": SC.DATA_ORDER, "seed": 5, "data_cursor": 900}, 3) == (5, 900)
+    assert SC.chunk_data({"seed": 5}, 3) == (8, 0)                     # a run started before: as it began
 
 
 def nb_code():
@@ -363,7 +429,10 @@ def test_notebook_cells():
     assert '"sft_chunks.py"' in c6 and "_SC.data_skip(" in c6 and "_SC.write_stamp(" in c6
     assert c6.index("FILES.items()") < c6.index("if SKIP6:")                 # code files written even when skipped
     assert c6.index("cp /content/ooa/ooa_task.py") < c6.index("if SKIP6:")
+    assert c6.count("restart=globals().get(\"RESTART_SFT\", False)") == 1
+    assert "trash" in c1.lower()
     c6d = next(c for c in code if c.startswith("#@title 6d."))
+    assert "restart=globals().get(\"RESTART_SFT\", False)" in c6d
     assert "SKIP6D" in c6d and c6d.index("_SC.data_skip(") < c6d.index("render_dataset.py")
     c7 = next(c for c in code if c.startswith("#@title 7."))
     assert "_SC.colab_sft(" in c7 and "restart=RESTART_SFT" in c7 and "SFT_CHUNKS" in c7
@@ -463,6 +532,9 @@ def test_tiny_cpu_run_with_a_session_break():
         assert "CONTINUING the SFT run" in out and "Next: chunk 2" in out and "SFT FINISHED" in out
         st = json.loads((base / "sft_run/state.json").read_text(encoding="utf-8"))
         assert st["finished"] and [c["steps"] for c in st["chunk_log"]] == [[0, 2], [2, 4], [4, 6]]
+        dl = [c["data"] for c in st["chunk_log"]]                         # one data stream across the chunks
+        assert dl[0][0] == 0 and all(dl[i][1] == dl[i + 1][0] for i in range(2)) and all(d[1] > d[0] for d in dl), dl
+        assert len({d[2] for d in dl}) == 1 and [c["seed"] for c in st["chunk_log"]] == [1, 1, 1]
         for k, c in enumerate(st["chunk_log"]):
             assert c["lr"] == [round(x, 6) for x in SC.lr_for_span(k / 3, (k + 1) / 3, 0.8)]
             assert c["optimizer"] == ("loaded" if k else c["optimizer"])     # chunks 2-3 carry the optimizer state

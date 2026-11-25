@@ -146,10 +146,13 @@ SFT_CHUNKS = 2 if PROFILE == "smoke" else 12   # cell 7 trains in this many piec
                            # about 1 GB; the last two are kept): 12000 steps / 12 = 1000 steps per piece, about 20 min on a T4
                            # (+1-2 min loading each). A session that ends loses at most the piece in progress; in a new session
                            # run 1 -> 2 -> 6 -> 6d -> 7 and cell 7 continues with the next piece, same settings, same schedule.
-                           # Fewer pieces = less loading; more = less lost per disconnect. Fixed for a run once it started
+                           # Fewer pieces = less loading; more = less lost per disconnect. Fixed for a run once it started.
+                           # Drive space: about 3 GB free while a piece is saved. Deleted pieces go to Drive's TRASH and
+                           # still count (about 10 GB over a run): empty the trash if Drive gets full (cell 7 says so)
 RESTART_SFT = False        # True: cell 7 throws the SFT run in progress away and starts a new one (needed when settings or the
                            # data changed in the middle of a run; cell 7 says so). Used once: a run it started is never
-                           # restarted by it again, so leaving it on cannot throw away the next session's progress
+                           # restarted by it again, so leaving it on cannot throw away the next session's progress.
+                           # With it on, cells 6 / 6d make the data again when its inputs changed (run 1 -> 2 -> 6 -> 6d -> 7)
 FORCE_DATA = False         # cells 6 / 6d skip their work when Drive already has the data for the same inputs (and while an
                            # SFT run is in progress on it). True: build and render it again (from the newest platform)
 ANSWER_FORMAT = "compact"  # cell 6d: answers carry only what the model decides (no variables list, step ids or descriptions);
@@ -350,7 +353,12 @@ md("""
 **New session (after a disconnect or the session limit): run 1 -> 2 -> 6 -> 6d -> 7. Cell 7 continues where it
 stopped.** Cells 6 and 6d skip their work when Drive already has the data for the same inputs (`FORCE_DATA = True`
 makes it again); cell 7 reads `sft_run/state.json` on Drive and trains the next piece with the run's own settings. If
-the settings or the data changed in the middle of a run it stops and says what changed (`RESTART_SFT = True` starts over).
+the settings or the data changed in the middle of a run it stops and says what changed (`RESTART_SFT = True` starts over;
+then run 6 -> 6d -> 7 so the data is made for the new settings).
+
+**Drive space:** a piece is about 1 GB (model + optimizer state); the last two are kept, so keep about 3-4 GB free.
+Deleted pieces go to Drive's **trash** and still count against your space (about 10 GB over one run): if Drive gets
+full, empty the trash and run cell 7 again (it says so and retrains only the piece in progress).
 
 Builds training data from the platform repo with no LLM: requests to Flow JSON from the gold flows (3 wordings each),
 plus catalog questions ("which action does X", "what inputs does Y take"). Some workflow families are **held out** and
@@ -376,7 +384,8 @@ _want6 = {"code": _SC.code_sig("/content/ooa", _SC.CELL6_CODE), "max_flow_chars"
           "synth_train": SYNTH_TRAIN, "synth_eval": SYNTH_EVAL, "synth_pattern": SYNTH_PATTERN, "rebuild": REBUILD_DATA,
           "clean": CLEAN_DATA, "row_chars": ROW_CHARS, "filter_cap": 60}
 _out6 = list(_SC.CELL6_OUT) + (["sft_clean/filter_report.json"] if CLEAN_DATA else [])
-SKIP6, _why6 = _SC.data_skip(DRIVE_DIR, _SC.STAMP6, _want6, _out6, FORCE_DATA, os.environ["NANOCHAT_BASE_DIR"])
+SKIP6, _why6 = _SC.data_skip(DRIVE_DIR, _SC.STAMP6, _want6, _out6, FORCE_DATA, os.environ["NANOCHAT_BASE_DIR"],
+                             restart=globals().get("RESTART_SFT", False))
 _pin = _SC.read_state(f"{DRIVE_DIR}/{_SC.STAMP6}").get("platform") if SKIP6 else None
 if not os.path.exists("/content/platform/.git"):
     !git clone -q --depth 1 {PLATFORM_REPO} /content/platform
@@ -485,7 +494,7 @@ if RENDER:
                "code": _SC.code_sig("/content/ooa", _SC.CELL6D_CODE), "max_chars": ROW_CHARS, "max_tokens": ROW_TOKENS,
                "answer_format": ANSWER_FORMAT, "gold_dropout": GOLD_DROPOUT}
     SKIP6D, _why6d = _SC.data_skip(DRIVE_DIR, _SC.STAMP6D, _want6d, _SC.CELL6D_OUT, globals().get("FORCE_DATA", False),
-                                   os.environ["NANOCHAT_BASE_DIR"])
+                                   os.environ["NANOCHAT_BASE_DIR"], restart=globals().get("RESTART_SFT", False))
     if SKIP6D:
         _r = json.load(open(f"{DRIVE_DIR}/sft_render/render_report.json"))
         print("cell 6d: rendering SKIPPED:", _why6d)
