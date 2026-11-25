@@ -129,7 +129,8 @@ def test_build_in_a_mode():
     assert call("POST", "/api/build", {"request": GOOD, "mode": "turbo"})[0] == 400
     st, r = call("GET", "/v1/models")
     assert [d["id"] for d in r["data"]] == ["ooa-assistant", "ooa-flow-assistant", "ooa-flow-assistant-fast",
-                                            "ooa-flow-assistant-smart", "ooa-flow-assistant-ultra"]
+                                            "ooa-flow-assistant-smart", "ooa-flow-assistant-ultra",
+                                            "ooa-flow-1"]   # the stable id for platform connections, last
     assert A.parse_args(["--platform", "p"]).mode == "auto" and A.parse_args(["--platform", "p", "--mode", "ultra"]).mode == "ultra"
 
 
