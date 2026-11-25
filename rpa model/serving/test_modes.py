@@ -95,7 +95,7 @@ def test_request_mode_and_model_names():
     assert m is None and "fast" in err
     names = [d["id"] for d in S.models_list()["data"]]
     assert names == ["ooa-assistant", "ooa-flow-assistant", "ooa-flow-assistant-fast", "ooa-flow-assistant-smart",
-                     "ooa-flow-assistant-ultra"]
+                     "ooa-flow-assistant-ultra", "ooa-flow-1"]
 
 
 # ------------------------------------------------------------------------------------------- one test per role

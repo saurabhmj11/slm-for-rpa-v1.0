@@ -123,6 +123,25 @@ The team is one model playing roles with different prompts (`Router._team`):
 | parts_first, long_clauses, long_plan_lines, part_lines | parts at once for long plans (true, 5, 4, 5) |
 | max_tokens, part_max_tokens | answer budget for a whole flow / one part (2500, 1500; the backend keeps it inside its window) |
 
+## Platform contract (model connection "OneOffice in-house model")
+
+The platform registers this server as an `openai_compatible` model connection with base URL
+`http://127.0.0.1:<port>/v1` and model **`ooa-flow-1`** (the stable id: it runs the server's default mode and is
+echoed back; the model version is in `ooa.version`). `ooa-assistant` and the `ooa-flow-assistant[-fast|-smart|-ultra]`
+names keep working.
+
+- `POST /v1/chat/completions`: the normal OpenAI reply (the flow, question or error as text in
+  `choices[0].message.content`) plus, next to it, `ooa.result` (contract `ooa-flow-result/1`):
+  `{status: "flow"|"question"|"no_flow", flow: <JSON object or null>, plan: [...], question, verdict: {verified,
+  problems, repairs, attempts, warnings, reason}, mode, report, seconds}`. Probes ("Answer with the single word OK")
+  have no `result`.
+- Optional bearer token: set `OOA_API_KEY` (assistant/app.py also reads `OOA_ASSISTANT_TOKEN` and `--token` first);
+  `/v1/*` then needs `Authorization: Bearer <key>`; `/health` (and app.py's `/ready`) stay open.
+- Limits: request body 4 MB (413), one generation at a time with a bounded queue (429 + Retry-After), a time budget
+  per request (app.py `--time-budget`, default 120 s). No streaming; no CORS (callers are servers, not browsers).
+- Use assistant/app.py as the endpoint (queue, readiness, version route); this bare server has the token and body
+  limit but no queue.
+
 ## Not done yet
 Browser export of the model; per-client adapter training; true constrained decoding (nanochat's generator has no logits
 hook, so near-miss names are repaired afterwards instead); request-complexity scoring is a simple clause count; the local

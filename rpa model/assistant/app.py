@@ -1,7 +1,7 @@
 """OOA Assistant: a local web app that runs OUR flow-writing model on this PC (CPU is enough).
 
     python app.py --model-dir DIR --nanochat DIR --platform DIR [--catalog FILE] [--port 8765] [--data-dir DIR] [--fake-model]
-                  [--host 127.0.0.1] [--allowed-hosts NAME ...] [--token TOKEN | env OOA_ASSISTANT_TOKEN]
+                  [--host 127.0.0.1] [--allowed-hosts NAME ...] [--token TOKEN | env OOA_ASSISTANT_TOKEN | env OOA_API_KEY]
 
 Binds 127.0.0.1 by default (nothing is reachable from other machines). Another --host (a server, a container) needs a
 bearer token: the model routes (/v1/*, /api/assistant/v1/*) then require "Authorization: Bearer <token>", and the
@@ -49,6 +49,7 @@ CSRF_HEADER = "X-OOA-Assistant"   # every POST must carry it: a web page on anot
                                   # CORS preflight, which this server never approves
 VERDICTS = ("accept", "edit", "reject")
 TOKEN_ENV = "OOA_ASSISTANT_TOKEN"
+API_KEY_ENV = "OOA_API_KEY"        # the same token under the name platforms use (serving/ooa_server.API_KEY_ENV)
 MIN_TOKEN = 16
 CONTRACT = "studio-assistant/v1"
 MAX_WAITING = 4            # requests that may wait for the model while one runs; more get 429
@@ -684,7 +685,7 @@ def parse_args(argv=None):
     ap.add_argument("--allowed-hosts", nargs="*", default=[], metavar="HOST",
                     help="extra Host header values accepted (name or name:port), e.g. the server's DNS name")
     ap.add_argument("--token", default=None,
-                    help=f"bearer token the model routes require (default: environment variable {TOKEN_ENV}); the browser "
+                    help=f"bearer token the model routes require (default: environment variable {TOKEN_ENV}, else {API_KEY_ENV}); the browser "
                          "page is then off; "
                          "prefer the environment variable, a command line is visible to other users")
     ap.add_argument("--max-waiting", type=int, default=MAX_WAITING,
@@ -725,9 +726,15 @@ def policy_from_args(args) -> Policy:
                   escalate_plan_lines=args.escalate_plan_lines, prompt_format=args.prompt_format)
 
 
+def resolve_token(args, env=None):
+    """--token, else OOA_ASSISTANT_TOKEN, else OOA_API_KEY (the name a platform's model connection uses), else None."""
+    env = os.environ if env is None else env
+    return args.token or env.get(TOKEN_ENV) or env.get(API_KEY_ENV) or None
+
+
 def main(argv=None):
     args = parse_args(argv)
-    token = args.token or os.environ.get(TOKEN_ENV) or None
+    token = resolve_token(args)
     if args.max_waiting < 0 or args.time_budget <= 0:
         raise SystemExit("--max-waiting must be 0 or more and --time-budget more than 0")
     if not args.fake_model and (not args.model_dir or not args.nanochat):

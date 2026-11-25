@@ -1190,17 +1190,24 @@ def make_cloud(policy):
 
 
 MODEL_ID = "ooa-assistant"
+# The stable id platforms register as their model connection's model ("OneOffice in-house model"): it runs the
+# server's default mode like MODEL_ID, is echoed back in the reply, and stays the same across model versions (the
+# version is in the reply's "ooa.version"). The mode names below still pick a mode.
+STABLE_MODEL_ID = "ooa-flow-1"
 # OpenAI-style model names (GET /v1/models): the name picks the mode. MODEL_ID runs the server's default mode.
 MODEL_BASE = "ooa-flow-assistant"
 MODEL_NAMES = {MODEL_BASE: "auto", MODEL_BASE + "-fast": "fast", MODEL_BASE + "-smart": "smart",
                MODEL_BASE + "-ultra": "ultra"}
+ECHOED_NAMES = {STABLE_MODEL_ID} | set(MODEL_NAMES)     # reply "model" is the name asked for; others get MODEL_ID
 MODE_HEADER = "X-OOA-Mode"
+RESULT_CONTRACT = "ooa-flow-result/1"   # the "ooa.result" object below
 
 
 def models_list():
-    """GET /v1/models: MODEL_ID (the server's default mode) and one name per mode."""
+    """GET /v1/models: MODEL_ID (the server's default mode), one name per mode, then the stable id (last, so clients
+    that take the first entry keep getting MODEL_ID)."""
     return {"object": "list", "data": [{"id": n, "object": "model", "owned_by": "local"}
-                                       for n in [MODEL_ID] + list(MODEL_NAMES)]}
+                                       for n in [MODEL_ID] + list(MODEL_NAMES) + [STABLE_MODEL_ID]]}
 
 
 def request_mode(body, header=None):
@@ -1277,8 +1284,43 @@ def chat_completion(router, body, count_tokens=None, version=None, deadline=None
         content = json.dumps({"variables": [], "steps": [], "notes": "No flow was returned: " + res["reason"] + ". " + " ".join(res.get("problems", [])[:2]) + tail})
     else:
         content = json.dumps({"error": res["reason"], "problems": res.get("problems", [])})
-    name = body.get("model") if isinstance(body.get("model"), str) and body.get("model") in MODEL_NAMES else MODEL_ID
-    return 200, _completion(msgs, content, {k: v for k, v in res.items() if k != "flow"}, count_tokens, version, name)
+    name = body.get("model") if isinstance(body.get("model"), str) and body.get("model") in ECHOED_NAMES else MODEL_ID
+    ooa = {k: v for k, v in res.items() if k != "flow"}
+    ooa["result"] = structured_result(res)
+    return 200, _completion(msgs, content, ooa, count_tokens, version, name)
+
+
+def _json_object(text):
+    """The JSON object in a reply text (first '{' to last '}', as Studio reads it), or None."""
+    if not isinstance(text, str) or "{" not in text:
+        return None
+    try:
+        obj = json.loads(text[text.index("{"):text.rindex("}") + 1])
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def structured_result(res):
+    """The machine-readable answer next to the message content ("ooa.result", contract RESULT_CONTRACT), so a program
+    (the platform's flow-assistant endpoint) does not have to guess from the text:
+      status    "flow" (a verified flow), "question" (the model asks first) or "no_flow" (nothing passed the checker)
+      flow      the flow as a JSON object (flow.v1, or Studio's {variables, steps, notes} when Studio's message shape was
+                sent), None unless status is "flow"
+      plan      the plan lines the planner wrote; question: the question text or None
+      verdict   the checker's verdict: verified, problems / repairs, attempts, warnings, reason
+    """
+    verified = bool(res.get("verified"))
+    status = "flow" if verified else ("question" if res.get("question") else "no_flow")
+    attempts = res.get("attempts")
+    return {"contract": RESULT_CONTRACT, "status": status,
+            "flow": _json_object(res.get("flow")) if verified else None,
+            "plan": list(res.get("plan") or []), "question": res.get("question") or None,
+            "verdict": {"verified": verified, "problems": list(res.get("problems") or []),
+                        "repairs": list(res.get("repairs") or []),
+                        "attempts": len(attempts) if isinstance(attempts, list) else (attempts or 0),
+                        "warnings": list(res.get("warnings") or []), "reason": res.get("reason")},
+            "mode": res.get("mode"), "report": res.get("report"), "seconds": res.get("seconds")}
 
 
 def _completion(msgs, content, ooa, count_tokens, version, model=MODEL_ID):
@@ -1300,28 +1342,67 @@ def _completion(msgs, content, ooa, count_tokens, version, model=MODEL_ID):
             "ooa": ooa}
 
 
-def make_handler(router):
+API_KEY_ENV = "OOA_API_KEY"         # optional bearer token for /v1/* (this server and assistant/app.py)
+MAX_BODY = 4 * 1024 * 1024          # bytes: a larger request body gets 413
+
+
+def bearer_ok(header, token):
+    """True when no token is set, or the Authorization header carries it (constant-time compare)."""
+    if not token:
+        return True
+    import hmac
+    h = header or ""
+    given = h[7:].strip() if h[:7].lower() == "bearer " else ""
+    return bool(given) and hmac.compare_digest(given.encode("utf-8"), token.encode("utf-8"))
+
+
+def make_handler(router, token=None):
+    """token: bearer token /v1/* needs (default: the OOA_API_KEY environment variable; None or empty: no token)."""
+    token = token if token is not None else (os.environ.get(API_KEY_ENV) or None)
+
     class H(BaseHTTPRequestHandler):
-        def _send(self, code, obj):
+        def _send(self, code, obj, headers=None):
             b = json.dumps(obj).encode()
             self.send_response(code); self.send_header("content-type", "application/json")
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.send_header("content-length", str(len(b))); self.end_headers(); self.wfile.write(b)
 
         def log_message(self, *a):
             pass
 
+        def _authorized(self):
+            if self.path.startswith("/v1/") and not bearer_ok(self.headers.get("Authorization"), token):
+                self._send(401, openai_error("missing or wrong API key: send Authorization: Bearer <key>",
+                                             "authentication_error"), {"WWW-Authenticate": "Bearer"})
+                return False
+            return True
+
         def do_GET(self):
             if self.path == "/health":
                 return self._send(200, {"ok": True, "policy": asdict(router.policy), "mode": router.default_mode})
+            if not self._authorized():
+                return
             if self.path == "/v1/models":
                 return self._send(200, models_list())
             self._send(404, {"error": "not found"})
 
         def do_POST(self):
+            if not self._authorized():
+                return
             try:
-                body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
+                n = int(self.headers.get("content-length", 0))
+            except ValueError:
+                return self._send(400, openai_error("bad Content-Length"))
+            if n < 0 or n > MAX_BODY:
+                return self._send(413 if n > 0 else 400, openai_error("request body too large" if n > 0
+                                                                       else "bad Content-Length"))
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
             except Exception:
                 return self._send(400, {"error": "invalid JSON body"})
+            if not isinstance(body, dict):
+                return self._send(400, openai_error("the body must be a JSON object"))
             if self.path == "/v1/chat/completions":
                 return self._send(*chat_completion(router, body, mode_header=self.headers.get(MODE_HEADER)))
             if self.path == "/v1/feedback":
@@ -1331,8 +1412,8 @@ def make_handler(router):
     return H
 
 
-def serve(router, port=8080, host="127.0.0.1"):
-    srv = ThreadingHTTPServer((host, port), make_handler(router))
+def serve(router, port=8080, host="127.0.0.1", token=None):
+    srv = ThreadingHTTPServer((host, port), make_handler(router, token))
     return srv
 
 
