@@ -59,6 +59,10 @@ The files come from the training run's output (the `ooa-nanochat` Drive folder: 
 `nanochat_base/chatsft_checkpoints/...` and `sft/catalog.jsonl`). Without `sft/catalog.jsonl` the catalog built into
 the image (`data/catalog/catalog.jsonl`) is used.
 
+A model and its tokenizer belong together: always copy both from the same training run. Models trained on the clean
+base (v6) have their own tokenizer (same size, other tokens) and record its sha1 in their meta; the server refuses to
+start with a tokenizer the model was not trained with instead of answering nonsense.
+
 ## 3. Run it
 
 Make a long random token (at least 16 characters) and keep it in your secret store:

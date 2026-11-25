@@ -7,6 +7,8 @@ exactly as Colab cells 6 / 6d do. Used by ooa_local_pc.ipynb (cells 3-4); everyt
     train_data/drive_model/  the newest trained model on Drive (chatsft_checkpoints/d8, else the newest kept
                              chatsft_checkpoints_before_*) + its tokenizer: where a top-up starts
     train_data/base/         the pretrained base model (base_checkpoints/d8 + optimizer) for the full training
+    train_data/base_v6/      the clean base model (BASE "v6"): this PC's own (MODE "pretrain") or Drive nanochat_base_v6
+    train_data/v6_tokenizer/ MODE "pretrain": Drive's v6 tokenizer when Colab made one (the PC then uses the same one)
 
 Files Drive shows as "name (1).jsonl" are copies made by a second upload: they are reported and never used.
 A refine / top-up also trains on the new files of RENDER_EXTRA that Colab's render does not have yet (e.g.
@@ -14,7 +16,8 @@ session_train.jsonl, made after the v5 run): taken from Drive sft/ when uploaded
 (data/extra_sft/), and rendered here alone with the settings and catalog of Colab's render (render_extras); the full
 run stays exactly the Colab data.
 
-    python data_pc.py --rpa DIR --drive-id ID [--mode topup|refine|full|install] [--refresh] [--seq 4096]
+    python data_pc.py --rpa DIR --drive-id ID [--mode topup|refine|full|install|pretrain] [--refresh] [--seq 4096]
+                      [--base current|v6]            full: the Colab base (nanochat_base) or the clean base (v6)
     python data_pc.py --rpa DIR --fake-drive FOLDER ...     a local folder laid out like the Drive folder (tests)
 """
 import argparse
@@ -214,10 +217,13 @@ class Sync:
         return max(steps, key=int) if steps else None
 
     # -- models ------------------------------------------------------------------------------------------
-    def tokenizer(self, root):
+    def tokenizer(self, root, folder="nanochat_base"):
         for name in ("tokenizer.pkl", "token_bytes.pt"):
-            if not self.fetch(f"nanochat_base/tokenizer/{name}", Path(root) / "tokenizer" / name):
-                raise SystemExit(f"{name} not found on Drive (nanochat_base/tokenizer)")
+            if not self.fetch(f"{folder}/tokenizer/{name}", Path(root) / "tokenizer" / name):
+                raise SystemExit(f"{name} not found on Drive ({folder}/tokenizer)")
+        card = Path(root) / "tokenizer" / "tokenizer_card.json"       # a v6 tokenizer says what it is
+        if not self.fetch(f"{folder}/tokenizer/tokenizer_card.json", card):
+            card.unlink(missing_ok=True)
 
     def sft_model(self, optimizer=True):
         """The newest trained model on Drive -> train_data/drive_model (re-downloaded only when Drive's changed),
@@ -259,20 +265,60 @@ class Sync:
                      f"using the newest kept one, {folder}")
         return folder, int(s)
 
-    def base_model(self):
-        s = self.newest_pair("nanochat_base/base_checkpoints/d8")
+    def base_model(self, base="current"):
+        """The pretrained base model -> train_data/base ("current": Drive nanochat_base) or train_data/base_v6 ("v6":
+        the clean base, Drive nanochat_base_v6 from Colab PROFILE "v6"). A v6 pack pretrained on this PC
+        (pretrain_pc.py; it has no .drive_id) is used as it is and never replaced by a download."""
+        folder = "nanochat_base_v6" if base == "v6" else "nanochat_base"
+        root = self.td / ("base_v6" if base == "v6" else "base")
+        if base == "v6" and sft_newest(root / "base_checkpoints" / "d8") is not None and \
+                not (root / ".drive_id").exists():
+            self.log(f"clean base model (v6): this PC's own pretrained pack {root} (step "
+                     f"{sft_newest(root / 'base_checkpoints' / 'd8')})")
+            return sft_newest(root / "base_checkpoints" / "d8")
+        s = self.newest_pair(f"{folder}/base_checkpoints/d8")
         if not s:
-            raise SystemExit("no pretrained base model on Drive (nanochat_base/base_checkpoints/d8)")
-        root = self.td / "base"
+            raise SystemExit(f"no pretrained base model on Drive ({folder}/base_checkpoints/d8)" + (
+                " and none on this PC (train_data/base_v6): run MODE \"pretrain\" here first, or Colab PROFILE "
+                "\"v6\" (cells 3-4)" if base == "v6" else ""))
         d8 = root / "base_checkpoints" / "d8"
         for f in d8.glob("*") if d8.exists() else []:
             if not f.name.endswith((f"_{s}.pt", f"_{s}.json", f"_{s}_rank0.pt")):
                 f.unlink()
         for name in (f"model_{s}.pt", f"meta_{s}.json", f"optim_{s}_rank0.pt"):
-            self.fetch(f"nanochat_base/base_checkpoints/d8/{name}", d8 / name)
-        self.tokenizer(root)
-        self.log(f"pretrained base model: step {int(s)}")
+            self.fetch(f"{folder}/base_checkpoints/d8/{name}", d8 / name)
+        self.tokenizer(root, folder)
+        if base == "v6":
+            (root / ".drive_id").write_text(f"{folder}/base_checkpoints/d8/model_{s}.pt:"
+                                            + self.drive.files[f"{folder}/base_checkpoints/d8/model_{s}.pt"][0],
+                                            encoding="utf-8")
+        self.log(f"pretrained base model ({base}): step {int(s)}")
         return int(s)
+
+    def pretrain_inputs(self, shards=False):
+        """MODE "pretrain": Drive's v6 tokenizer when Colab made one (nanochat_base_v6/tokenizer -> train_data/
+        v6_tokenizer, so the PC and Colab share it; else pretrain_pc.py trains its own) and, with shards, the
+        prepared shards (nanochat_base_v6/base_data_climbmix -> local_run/pretrain/base/base_data_climbmix).
+        -> {"tokenizer": folder or None, "shards": count}."""
+        out = {"tokenizer": None, "shards": 0}
+        if "nanochat_base_v6/tokenizer/tokenizer.pkl" in self.drive.files:
+            dst = self.td / "v6_tokenizer"
+            self.tokenizer(dst, "nanochat_base_v6")
+            out["tokenizer"] = str(dst / "tokenizer")
+            self.log(f"the v6 tokenizer from Drive: {dst / 'tokenizer'} (the PC pretrains with the same one)")
+        if shards:
+            pre = "nanochat_base_v6/base_data_climbmix/"
+            names = self.listed(pre)
+            man = pre + "manifest.json"
+            if man not in self.drive.files:
+                raise SystemExit("PRETRAIN_DATA = \"drive\" but Drive has no nanochat_base_v6/base_data_climbmix/"
+                                 "manifest.json: set PRETRAIN_DATA = \"build\" (builds them here)")
+            dst = self.rpa / "local_run" / "pretrain" / "base" / "base_data_climbmix"
+            for p in names:
+                self.fetch(p, dst / p.rsplit("/", 1)[-1])
+            out["shards"] = len([p for p in names if p.endswith(".parquet")])
+            self.log(f"{out['shards']} shards from Drive -> {dst}")
+        return out
 
     # -- data -----------------------------------------------------------------------------------------------
     def render_from_drive(self, refresh=False, seq=4096, fillable=()):
@@ -495,7 +541,8 @@ def local_render_extras(mark):
         return None
 
 
-def sync(drive, rpa, mode="topup", refresh=False, seq=4096, log=print, platform=None):
+def sync(drive, rpa, mode="topup", refresh=False, seq=4096, log=print, platform=None, base="current",
+         pretrain_data="build"):
     """Everything a mode needs. -> {"data": sft_render folder, "render": how it got here, "drive_model": ..., ...}
     Every mode but full also gets the new RENDER_EXTRA files Colab's render lacks (render_extras; from Drive sft/ when
     uploaded, else the repo's data/extra_sft) instead of rendering everything here; full stays exactly the Colab data.
@@ -507,7 +554,10 @@ def sync(drive, rpa, mode="topup", refresh=False, seq=4096, log=print, platform=
     if mode in ("topup", "refine", "install"):
         out["drive_model"] = s.sft_model(optimizer=grow)
     if mode == "full":
-        out["base_step"] = s.base_model()
+        out["base_step"] = s.base_model(base)
+    if mode == "pretrain":                                    # the clean base: its domain text is the rendered data
+        out["pretrain"] = s.pretrain_inputs(shards=pretrain_data == "drive")
+        mode = "full"                                         # the data exactly as Colab's (nothing added)
     fill = mode != "full"                                     # full: exactly the Colab data, nothing added
     fillable = set()
     if fill:
@@ -553,7 +603,9 @@ def main(argv=None):
     ap.add_argument("--rpa", required=True)
     ap.add_argument("--drive-id", default="")
     ap.add_argument("--fake-drive", default="", help="a local folder laid out like the Drive folder")
-    ap.add_argument("--mode", default="topup", choices=["topup", "refine", "full", "install"])
+    ap.add_argument("--mode", default="topup", choices=["topup", "refine", "full", "install", "pretrain"])
+    ap.add_argument("--base", default="current", choices=["current", "v6"], help="full: the base model to download")
+    ap.add_argument("--pretrain-data", default="build", choices=["build", "drive"])
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--seq", type=int, default=4096)
     ap.add_argument("--platform", default=None)
@@ -564,7 +616,8 @@ def main(argv=None):
         add_feedback(a.rpa, Path(a.rpa) / "train_data" / "sft_render")
         return
     drive = FolderDrive(a.fake_drive) if a.fake_drive else GdownDrive(a.drive_id)
-    print(json.dumps(sync(drive, a.rpa, a.mode, a.refresh, a.seq, platform=a.platform), indent=1, default=str))
+    print(json.dumps(sync(drive, a.rpa, a.mode, a.refresh, a.seq, platform=a.platform, base=a.base,
+                          pretrain_data=a.pretrain_data), indent=1, default=str))
 
 
 if __name__ == "__main__":

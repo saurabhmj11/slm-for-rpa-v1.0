@@ -42,6 +42,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
+sys.path.append(str(HERE.parent.parent / "assistant"))
+from model_backend import tokenizer_problem                    # noqa: E402  (a model and the tokenizer it needs)
 SETS = [("plain_requests.jsonl", "set 1"), ("plain_requests_2.jsonl", "set 2"),
         ("plain_requests_3.jsonl", "set 3"), ("beginner_requests.jsonl", "beginner")]
 
@@ -203,12 +205,18 @@ def install(rpa, new_dir, new_step, data, info, stamp, log=print):
     for f in ("catalog.jsonl", "examples.jsonl"):           # the model pack: the context the model was trained with
         shutil.copy2(data / f, rpa / "sft" / f)
     tok = info.get("tokenizer")
-    if tok and Path(tok).exists():
-        for f in ("tokenizer.pkl", "token_bytes.pt"):
+    if tok and Path(tok).exists():                 # the model's own tokenizer (v6: another one than the old model's)
+        for f in ("tokenizer.pkl", "token_bytes.pt", "tokenizer_card.json"):
             dst = base / "tokenizer" / f
+            if not (Path(tok) / f).exists():
+                if dst.exists():                   # a card of the tokenizer being replaced
+                    keep.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(dst), keep / f)
+                continue
             if not dst.exists() or dst.read_bytes() != (Path(tok) / f).read_bytes():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 if dst.exists():
+                    keep.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(dst, keep / f)
                 shutil.copy2(Path(tok) / f, dst)
     log(f"  INSTALLED model_{final_step:06d}.pt + {rpa / 'sft'}/catalog.jsonl, examples.jsonl. Restart the assistant "
@@ -290,11 +298,15 @@ def compare_main(a):
         shutil.copy2(new_dir / f, work / "new" / "chatsft_checkpoints" / "d8" / f)
     if st.get("tokenizer") and not a.tokenizer:
         a.tokenizer = st["tokenizer"]
+    nmeta = json.loads((new_dir / f"meta_{nstep:06d}.json").read_text(encoding="utf-8"))
     tok = Path(a.tokenizer) if a.tokenizer else next(
         (p for p in (new_dir.parent.parent / "tokenizer", rpa / "train_data" / "drive_model" / "tokenizer",
-                     rpa / "nanochat_base" / "tokenizer") if (p / "tokenizer.pkl").exists()), None)
+                     rpa / "nanochat_base" / "tokenizer")
+         if (p / "tokenizer.pkl").exists() and tokenizer_problem(nmeta, p) is None), None)
     if tok is None:
-        raise SystemExit("no tokenizer found for the new model")
+        raise SystemExit("no tokenizer found for the new model (its pack must carry the tokenizer it was trained with)")
+    if tokenizer_problem(nmeta, tok):
+        raise SystemExit("NOT TESTED, NOT INSTALLED: " + tokenizer_problem(nmeta, tok))
     shutil.copytree(tok, work / "new" / "tokenizer")
     rows = sample_rows(rpa / "eval", a.per_set)
     ids = [r[0] for r in rows]

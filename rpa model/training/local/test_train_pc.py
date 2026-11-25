@@ -344,7 +344,8 @@ PC_FILES = ["training/local/data_pc.py", "training/local/train_pc.py", "training
             "training/ingest_feedback.py", "training/ooa_task.py", "training/ooa_reward.py", "training/repair.py",
             "training/retrieval.py", "training/safety.py", "assistant/model_backend.py", "assistant/app.py",
             "assistant/constrained.py", "assistant/knowledge.py", "assistant/runner_bridge.py",
-            "serving/ooa_server.py", "serving/backends.py", "eval/beginner_score.py", "eval/flow_check.py"]
+            "serving/ooa_server.py", "serving/backends.py", "eval/beginner_score.py", "eval/flow_check.py",
+            "training/local/pretrain_pc.py", "training/pretrain/base_setup.py", "training/pretrain/pretrain_data.py"]
 KNOWN = {("serving/ooa_server.py", "Policy.load")}     # fixed in its own change (that file is being edited elsewhere)
 
 

@@ -117,4 +117,6 @@ per 100M characters here, plus about 90 s to prepare the domain sources.
 
 The domain stream holds about 503M characters (each source at its maximum passes: render 3, code 4, docs 4, catalog
 6), enough for a 15% share up to about 3.3B training characters (about 0.8B tokens). Beyond that the share falls
-(the builder warns); raise `MAX_REPEAT` or add domain data for longer runs.
+(the builder warns). `--repeat-scale 2` doubles every source's passes (render 6, code 8, docs 8, catalog 12: about 1B
+characters, a 15% share up to about 6.7B characters); the v6 profiles (`base_setup.py`, 1.51B tokens, about 6.8B
+characters) use it. It is a build setting: shards built with another value are refused, older manifests count as 1.

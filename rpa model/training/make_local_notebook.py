@@ -32,10 +32,27 @@ same data (`sft_render`: plan-first answers, compact flows, gold dropout, beginn
 |---|---|---|
 | `"auto"` (default) | picks for you and says why in cell 3: NVIDIA GPU + a finished trained model on Drive or this PC -> `"refine"`; NVIDIA GPU and no trained model anywhere -> `"full"`; no GPU -> `"topup"` | |
 | `"refine"` (NVIDIA GPU) | **continues the finished Colab model** (v5; or this PC's model when it already grew from it) for `REFINE_STEPS` (1500) steps, saved every 250 steps: about 80% of the training goes to the newest rows (v5, session: sign in once and reuse it) and the weak areas (beginner wording, long business processes, clarify, targeted, fix, your feedback), about 18% replays everything else so nothing is forgotten. Learning rate 0.35 (a gentle continue, not a restart) | estimated 40-65 min on a T4-class GPU (RTX 3060/4060; the Colab T4 with torch.compile about 30-35 min), plus 1-2 min of loading per chunk |
-| `"full"` (NVIDIA GPU) | **the Colab run again**: 12000 steps at the 4096 window from the pretrained **base** model. It does NOT use the Colab model: only for a fresh start | estimated 3-4.5 h on an RTX 3060/4060 (the Colab T4 takes about 3.5-4.5 h); a CPU would need weeks, so it is not offered there |
+| `"full"` (NVIDIA GPU) | **the Colab run again**: 12000 steps at the 4096 window from the pretrained **base** model (`BASE = "current"`: the Colab base; `"v6"`: the clean base from `"pretrain"`, with its own tokenizer and its own run state `local_run/full_v6`). It does NOT use the Colab model: only for a fresh start | estimated 3-4.5 h on an RTX 3060/4060 (the Colab T4 takes about 3.5-4.5 h); a CPU would need weeks, so it is not offered there |
 | `"topup"` (no GPU) | **continues the newest trained model** (Drive's, or this PC's own when it already grew from it) for `TOPUP_STEPS` steps on the same data, mostly the beginner and long business-process rows | 300 steps: about 5.5-9 h on 4 CPU cores (measured on a 4-core test machine at the 4096 window: 67 s per step at low priority, 55 s with all cores; slower PCs up to about 100 s) |
 | `"install"` | no training: tests Drive's newest model against this PC's and installs it if it is better | the test only (cell 6) |
+| `"pretrain"` (NVIDIA GPU) | **the clean base model (v6)**, pretrained here from zero on commercially usable text only: FineWeb-Edu (ODC-By 1.0) + 15% of the platform's own docs, code, catalog and the rendered training rows; no ClimbMix (non-commercial). Builds the data (streamed from Hugging Face, about 3 GB), trains its own tokenizer (16,384 tokens; flow JSON takes about half the tokens of the old one), pretrains d8 at a 2048 window on 1.5B tokens, saved every 200 steps (about 22 min) and resumed after any stop; NaN guard. The result is a separate pack, `train_data/base_v6`: the current base and the installed model are not touched. Then `MODE = "full"` with `BASE = "v6"` trains the OOA model on it (cell 6 installs it only if it beats the installed one) | estimated 11-14 h on an RTX 4060 Laptop (8 GB), plus about 10 min for the data; `PRETRAIN_MEASURE = 30` measures this PC's real speed first (2 min) |
 | `"rl"` (NVIDIA GPU only) | **reinforcement learning** on the newest trained model (after a refine: the refined model once cell 6 installed it), as Colab cell 9: the model writes 8 answers per fresh request, the platform checker scores them (`training/rl_setup.py`), better answers are reinforced; then cell 6 tests it and installs it only if it is better. Use it after a refine (or on Drive's v5) | `RL_STEPS` 200: estimated about 6 h on an RTX 3060/4060 class GPU (about a T4; range 4-13 h); saved every 25 steps, resumable |
+
+### The clean base model (v6): pretrain it here, then train the OOA model on it
+
+The current base model was pretrained on ClimbMix, which is licensed for non-commercial use only. The v6 base uses
+only FineWeb-Edu (ODC-By 1.0: commercial use allowed with attribution) and the platform's own text
+(`training/pretrain/DATA_CARD.md`). It is a separate model with its own tokenizer; nothing of the current one changes.
+
+1. Cell 1: `MODE = "pretrain"` (optionally `PRETRAIN_MEASURE = 30` first: cell 5 then only measures the real speed
+   and prints the hours; set it back to 0 after). Run cells 1-5. Cell 3 downloads the rendered data (the domain text);
+   cell 5 builds the data (about 10 min, about 3 GB), trains the tokenizer (a few minutes) and pretrains (about
+   11-14 h on an RTX 4060 Laptop). Keep the laptop plugged in. After any stop run cells 1-5 again: it resumes from the
+   newest checkpoint (every 200 steps, about 22 min). It ends with `PRETRAINED: ...train_data/base_v6`.
+2. Cell 1: `MODE = "full"`, `BASE = "v6"`. Run cells 1-6: the OOA training on the new base (about 3.5-4.5 h), then
+   cell 6 tests it and installs it only if it beats the installed model (with its own tokenizer; the old model and
+   tokenizer are kept in `nanochat_base/old_model_<date>`).
+3. Optional: `MODE = "refine"` / `"rl"` continue whichever model is installed, as before.
 
 ### After a Colab run (the Colab model is trained: refine it here)
 
@@ -78,7 +95,13 @@ code(f'''
 #@title 1. Settings
 DRIVE_FOLDER_ID = "{FOLDER_ID}"     # Google Drive folder ooa-nanochat (shared as "anyone with the link")
 MODE = "auto"              # "auto": GPU + a trained model (Drive / this PC) -> "refine"; GPU, no trained model -> "full";
-                           # no GPU -> "topup". Or set "refine", "full", "topup", "install", "rl" yourself
+                           # no GPU -> "topup". Or set "refine", "full", "topup", "install", "rl", "pretrain" yourself
+BASE = "current"           # MODE "full": the base model the OOA training starts from: "current" (the Colab base) or
+                           # "v6" (the clean base: MODE "pretrain" on this PC, or Colab PROFILE "v6"; its own tokenizer)
+PRETRAIN_PROFILE = "pc"    # MODE "pretrain" (GPU): d8, window 2048, 1.5B tokens (RTX 4060 8 GB: about 11-14 h)
+PRETRAIN_DATA = "build"    # "build": stream FineWeb-Edu and build the shards here (about 10 min, 3 GB); "drive": the
+                           # shards on Drive (nanochat_base_v6/base_data_climbmix), when someone uploaded them
+PRETRAIN_MEASURE = 0       # > 0: cell 5 only measures this many pretraining steps (tokens/s, memory, real hours)
 REFINE_STEPS = 1500        # MODE "refine" (GPU): steps on top of the Colab model (T4-class GPU: about 40-65 min)
 REFINE_CHUNKS = 6          # saved every REFINE_STEPS / REFINE_CHUNKS steps (250): after a stop it continues
 REFINE_THEN_RL = False     # True: after a refine, cell 6 also runs RL on the newest installed model and tests it
@@ -245,7 +268,8 @@ if _rc != 0 or (GPU and "True" not in _out):
     run([sys.executable, "-m", "pip", "install", "--upgrade", "torch", "--index-url", idx]
         + (["--force-reinstall", "--no-deps"] if GPU and "+cpu" in _out else []))
 run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--progress-bar", "off",
-     "rustbpe", "tiktoken", "filelock", "jsonschema", "wandb", "psutil", "pyarrow", "numpy", "requests", "gdown>=6"])
+     "rustbpe", "tiktoken", "filelock", "jsonschema", "wandb", "psutil", "pyarrow", "numpy", "requests", "gdown>=6",
+     "pyyaml"])
 importlib.invalidate_caches()
 _rc, _out, _err = capture([sys.executable, "-c", probe])
 if _rc != 0:
@@ -263,8 +287,10 @@ CUDA = GPU and _out.strip().endswith("True")
 if MODE in ("long", "curriculum", "big"):
     raise SystemExit(f'MODE "{MODE}" was removed: it trained the old plain-prompt format and would undo the v4 model. '
                      'Use "refine" (GPU), "topup" (CPU) or "full" (GPU).')
-if MODE not in ("auto", "refine", "full", "topup", "install", "rl"):
-    raise SystemExit(f'MODE "{MODE}" is not known: use "auto", "refine", "full", "topup", "install" or "rl"')
+if MODE not in ("auto", "refine", "full", "topup", "install", "rl", "pretrain"):
+    raise SystemExit(f'MODE "{MODE}" is not known: use "auto", "refine", "full", "topup", "install", "rl" or "pretrain"')
+if BASE not in ("current", "v6"):
+    raise SystemExit(f'BASE "{BASE}" is not known: use "current" or "v6"')
 MODE_NOW = MODE if MODE != "auto" or not CUDA else "auto"      # auto with a GPU: cell 3 looks on Drive, then decides
 if MODE_NOW == "auto":
     print('MODE "auto" with an NVIDIA GPU: cell 3 picks "refine" when Drive (or this PC) has a trained model, else "full"')
@@ -277,6 +303,8 @@ if MODE_NOW == "rl" and not CUDA:
     raise SystemExit('MODE "rl" needs an NVIDIA GPU (each step writes 64 answers: about an hour per step on a CPU).')
 if MODE_NOW == "refine" and not CUDA:
     raise SystemExit('MODE "refine" is sized for an NVIDIA GPU (1500 steps: about a day on a CPU). Use MODE = "topup".')
+if MODE_NOW == "pretrain" and not CUDA:
+    raise SystemExit('MODE "pretrain" needs an NVIDIA GPU (about 11-14 h on an RTX 4060; months on a CPU).')
 if MODE_NOW == "full" and not CUDA:
     raise SystemExit('MODE "full" needs an NVIDIA GPU (12000 steps; weeks on a CPU). Use MODE = "topup" on this PC.')
 try:
@@ -315,11 +343,12 @@ print(len(DRIVE.files), "files on Drive")
 if MODE_NOW == "auto":
     MODE_NOW, _why = data_pc.choose_mode("auto", CUDA, DRIVE.files, ROOT)
     print(f'MODE "auto" -> "{MODE_NOW}": {_why}')
-GOT = data_pc.sync(DRIVE, ROOT, "install" if MODE_NOW == "rl" else MODE_NOW, refresh=REFRESH_DATA, seq=SEQ)  # rl: Drive's model + data
+GOT = data_pc.sync(DRIVE, ROOT, "install" if MODE_NOW == "rl" else MODE_NOW, refresh=REFRESH_DATA, seq=SEQ,  # rl: Drive's model + data
+                   base=BASE, pretrain_data=PRETRAIN_DATA)
 DATA = Path(GOT["data"])
-# the assistant needs a tokenizer even before the first install
-if not (ROOT / "nanochat_base" / "tokenizer" / "tokenizer.pkl").exists():
-    src = ROOT / "train_data" / ("base" if MODE_NOW == "full" else "drive_model") / "tokenizer"
+# the assistant needs a tokenizer even before the first install (the one of the model it will get)
+if not (ROOT / "nanochat_base" / "tokenizer" / "tokenizer.pkl").exists() and MODE_NOW != "pretrain":
+    src = ROOT / "train_data" / (("base_v6" if BASE == "v6" else "base") if MODE_NOW == "full" else "drive_model") / "tokenizer"
     shutil.copytree(src, ROOT / "nanochat_base" / "tokenizer", dirs_exist_ok=True)
 print("downloads done")
 ''')
@@ -328,6 +357,7 @@ code('''
 #@title 4. Check everything is in place (and size the top-up)
 TRAIN = [sys.executable, "-u", str(LOCAL / "train_pc.py"), "--rpa", str(ROOT), "--mode", MODE_NOW, "--data", str(DATA),
          "--seq", str(SEQ)]
+RUN = "full_v6" if MODE_NOW == "full" and BASE == "v6" else MODE_NOW      # train_pc.run_name: the run's state folder
 if MODE_NOW in ("refine", "topup"):
     TRAIN += ["--start-from", REFINE_FROM]   # its weights are checked first: a broken (nan) model is refused
 def _refine_states():
@@ -339,11 +369,18 @@ def _refine_states():
     if not _ls.exists() or _ls.stat().st_mtime < _rs.stat().st_mtime:      # an RL run from before this refine
         return True, None
     return True, "done" if json.loads(_ls.read_text(encoding="utf-8")).get("finished") else "going"
-if MODE_NOW == "rl":           # RL (training/local/rl_pc.py, the Colab cell 9 recipe) on the newest trained model
+if MODE_NOW == "pretrain":     # the clean base model (training/local/pretrain_pc.py): data, tokenizer, pretrain, pack
+    TRAIN = [sys.executable, "-u", str(LOCAL / "pretrain_pc.py"), "--rpa", str(ROOT), "--profile", PRETRAIN_PROFILE,
+             "--data-from", PRETRAIN_DATA, "--render", str(DATA)]
+    if (GOT.get("pretrain") or {}).get("tokenizer"):
+        TRAIN += ["--tokenizer", GOT["pretrain"]["tokenizer"]]   # Drive's v6 tokenizer (Colab made it): the same one
+    if PRETRAIN_MEASURE > 0:
+        TRAIN += ["--measure", str(PRETRAIN_MEASURE)]
+elif MODE_NOW == "rl":         # RL (training/local/rl_pc.py, the Colab cell 9 recipe) on the newest trained model
     TRAIN = [sys.executable, "-u", str(LOCAL / "rl_pc.py"), "--rpa", str(ROOT), "--data", str(DATA),
              "--steps", str(RL_STEPS), "--start-from", REFINE_FROM]
 elif MODE_NOW == "full":
-    TRAIN += ["--steps", str(FULL_STEPS), "--chunks", str(FULL_CHUNKS)]
+    TRAIN += ["--steps", str(FULL_STEPS), "--chunks", str(FULL_CHUNKS), "--base", BASE]
 elif MODE_NOW == "refine":     # continue the finished Colab model (train_pc.py --mode refine, state local_run/refine)
     TRAIN += ["--steps", str(REFINE_STEPS), "--chunks", str(REFINE_CHUNKS)]
 elif MODE_NOW == "topup":
@@ -385,7 +422,7 @@ elif MODE_NOW == "refine" and REFINE_THEN_RL and not RESTART_TRAINING and _refin
     print("the refine is trained and tested; its RL run is in progress: run cell 6 to continue it (nothing to do here)")
 else:
     rc = stream(TRAIN)
-    print("\\nexit code", rc, "| log:", ROOT / "local_run" / MODE_NOW / "train.log")
+    print("\\nexit code", rc, "| log:", ROOT / "local_run" / RUN / ("pretrain.log" if MODE_NOW == "pretrain" else "train.log"))
     if rc != 0:
         raise SystemExit("training stopped (the lines above say why; a STOPPED line says what to do and send); run "
                          "this cell again to continue from the last saved chunk")
@@ -393,6 +430,10 @@ else:
 
 code('''
 #@title 6. Test (as Colab cell 8) and install the new model only if it is better
+if MODE_NOW == "pretrain":
+    raise SystemExit("MODE pretrain makes a base model (it continues text, it does not answer yet): nothing to test "
+                     "here. Next: cell 1 MODE = 'full' and BASE = 'v6', then cells 1-6 (the OOA training on it; cell 6 "
+                     "installs it only if it beats the installed model).")
 if not setup_pc.platform_ok(ROOT):
     raise SystemExit(setup_pc.PLATFORM_HELP.format(p=ROOT / "platform", rpa=ROOT) + ", then run this cell again")
 if MODE_NOW == "install":
@@ -402,7 +443,7 @@ if MODE_NOW == "install":
             "--info", json.dumps({"mode": "install",
                                  "drive_origin": _origin.read_text(encoding="utf-8").strip() if _origin.exists() else None})]
 else:
-    _st = ROOT / "local_run" / MODE_NOW / "state.json"
+    _st = ROOT / "local_run" / RUN / "state.json"
     _res = json.loads(_st.read_text(encoding="utf-8")).get("result") if _st.exists() else None
     assert _res, "no finished training run: run cell 5 first"
     EVAL = [sys.executable, "-u", str(LOCAL / "eval_pc.py"), "--rpa", str(ROOT), "--new", _res, "--data", str(DATA),

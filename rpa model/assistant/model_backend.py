@@ -190,6 +190,37 @@ class Guards:
         return False
 
 
+def tokenizer_sha1(tok_dir):
+    """sha1 of tok_dir/tokenizer.pkl (the tokenizer's identity), or None when there is none."""
+    import hashlib
+    f = Path(tok_dir) / "tokenizer.pkl"
+    return hashlib.sha1(f.read_bytes()).hexdigest() if f.is_file() else None
+
+
+def tokenizer_problem(meta, tok_dir):
+    """Why a checkpoint must not be used with the tokenizer in tok_dir, or None. Models trained since the clean base
+    (v6) record the sha1 of their tokenizer ("tokenizer_sha1" in the meta: base_setup / sft_setup); it must match.
+    Older models record none: they were all trained with the old web-only tokenizer, which has no
+    tokenizer_card.json, so a tokenizer whose card describes it (a v6 tokenizer) is refused for them. Two tokenizers
+    of the same vocabulary size would otherwise load without an error and the model would write nonsense."""
+    sha = tokenizer_sha1(tok_dir)
+    if sha is None:
+        return f"no tokenizer.pkl in {tok_dir}"
+    want = meta.get("tokenizer_sha1") if isinstance(meta, dict) else None
+    if want:
+        return None if want == sha else (f"the model was trained with tokenizer {want[:12]} but {tok_dir} holds "
+                                         f"{sha[:12]}: the model pack must carry the model's own tokenizer")
+    try:
+        card = json.loads((Path(tok_dir) / "tokenizer_card.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(card, dict) and card.get("sha1") == sha:
+        return (f"{tok_dir} holds a {card.get('name') or 'new'} tokenizer ({sha[:12]}) but the model was trained "
+                "before tokenizers were recorded (the old web-only tokenizer): the model pack must carry the model's "
+                "own tokenizer")
+    return None
+
+
 def pack_version(model_dir):
     """The model pack's version: the first line of VERSION in the model folder or the folder above it (the pack
     folder, see DEPLOY.md), else None."""
@@ -285,6 +316,9 @@ class NanochatLocal:
         torch.set_grad_enabled(False)
         self.device = torch.device(dev_type)
         self.model, self.tok, meta = load_model(source, self.device, phase="eval")
+        bad = tokenizer_problem(meta, Path(model_dir) / "tokenizer")
+        if bad:
+            raise RuntimeError("model pack " + str(model_dir) + ": " + bad)
         self.engine = Engine(self.model, self.tok)
         self.guard_enabled = guard
         enc = self.tok.encode_special

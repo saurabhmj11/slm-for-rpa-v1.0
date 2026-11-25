@@ -156,6 +156,25 @@ def test_other_settings_are_refused():
             raise AssertionError("changed domain sources were mixed into the same folder")
 
 
+def test_repeat_scale_is_a_setting_and_old_manifests_resume():
+    with Tmp() as t:
+        out = Path(t.d) / "out"
+        run(out, t.src)
+        man_f = out / "manifest.json"
+        man = json.loads(man_f.read_text())
+        assert man["settings"]["repeat_scale"] == 1
+        del man["settings"]["repeat_scale"]                    # a manifest written before the setting existed
+        man_f.write_text(json.dumps(man))
+        run(out, t.src, train_chars=80_000)                    # resumes (it used the default)
+        try:
+            run(out, t.src, train_chars=80_000, repeat_scale=2)
+            raise AssertionError("other passes over the domain text must be refused")
+        except SystemExit:
+            pass
+        src = {"render": {"docs": ["r" * 100] * 10}, "code": {"docs": ["c" * 100] * 4}}
+        assert len(P.domain_stream(src, 1, repeat_scale=2)) == 2 * len(P.domain_stream(src, 1))
+
+
 def test_val_split_is_held_out():
     with Tmp() as t:
         out = Path(t.d) / "out"

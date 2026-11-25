@@ -45,7 +45,13 @@ files = {
     "plain_requests_3.jsonl": (H.parent / "eval/plain_requests_3.jsonl").read_text(encoding="utf-8"),
     "beginner_requests.jsonl": (H.parent / "eval/beginner_requests.jsonl").read_text(encoding="utf-8"),
     "beginner_score.py": (H.parent / "eval/beginner_score.py").read_text(encoding="utf-8"),
+    "base_setup.py": (H / "pretrain/base_setup.py").read_text(encoding="utf-8"),
 }
+# cell 3 with PROFILE "v6" (the clean base model): the data builder, its helpers and the eval sets it keeps out
+files_v6 = {n: files[n] for n in ("ooa_format.py", "retrieval.py", "sft_setup.py", "base_setup.py")}
+files_v6["pretrain_data.py"] = (H / "pretrain/pretrain_data.py").read_text(encoding="utf-8")
+for _f in sorted((H.parent / "eval").glob("*.jsonl")) + [H.parent / "eval/beginner_score.py"]:
+    files_v6["eval/" + _f.name] = _f.read_text(encoding="utf-8")
 
 cells = []
 def md(t): cells.append({"cell_type": "markdown", "metadata": {}, "source": t.strip("\n").splitlines(True)})
@@ -61,6 +67,13 @@ skipped and pretraining resumes from the last checkpoint.
 Set Runtime -> Change runtime type -> GPU first. Start with `PROFILE = "smoke"` (about 15 minutes) to check the whole pipeline,
 then switch to `"t4"` for the real run.
 
+**Clean base model (v6)**: `PROFILE = "v6"` pretrains a new base on commercially usable text only (FineWeb-Edu,
+ODC-By 1.0, + the platform's own docs, code, catalog and rendered rows; no ClimbMix, which is non-commercial) with its
+own tokenizer, into a separate Drive folder `nanochat_base_v6` (the current `nanochat_base` is never touched). Same
+model and recipe as the PC notebook's MODE "pretrain" (`training/pretrain/base_setup.py`): d8, window 2048, 1.5B
+tokens, about 12-16 h on a T4 = several sessions (it resumes; saved every 100 steps, about 12 min). The PC (RTX 4060)
+is the better place for it. Cells 7-8 then train and test on it (`BASE`, cell 1).
+
 Honest expectations: a free T4 pretrains a small model (tens of millions of parameters, a few hundred million tokens).
 It will learn English structure and JSON well enough to be fine-tuned, but it is not a strong general model.
 This notebook was written without a GPU to test on, so if a cell errors, send me the error text.
@@ -68,7 +81,10 @@ This notebook was written without a GPU to test on, so if a cell errors, send me
 
 code('''
 #@title 1. Config
-PROFILE = "t4"             # "t4" = real free-Colab run, "smoke" = quick pipeline check (tiny model), "a100" = Colab Pro (A100/L4)
+PROFILE = "t4"             # "t4" = real free-Colab run, "smoke" = quick pipeline check (tiny model), "a100" = Colab Pro (A100/L4),
+                           # "v6" = the clean base model (cells 3-4: FineWeb-Edu + domain text, own tokenizer, Drive nanochat_base_v6)
+BASE = "auto"              # the base model cells 5-13 use: "current" (Drive nanochat_base) or "v6" (nanochat_base_v6);
+                           # "auto": "v6" when PROFILE is "v6", else "current"
 DRIVE_DIR = "/content/drive/MyDrive/ooa-nanochat"   # checkpoints, data and tokenizer live here
 SHARED_FOLDER_ID = ""      # optional: Drive ID of the ooa-nanochat folder shared from another Google account (from its link)
 NANOCHAT_COMMIT = "92d63d4e8bb4df75c3b71618f31ddde2378b2bcd"   # version this notebook was written against
@@ -80,6 +96,8 @@ PROFILES = {
   "smoke": dict(depth=4,  seq=512,  dbs=16, total_batch=16384,  tokens=5_000_000,    shards=2, tok_chars=100_000_000),
   "t4":    dict(depth=8,  seq=1024, dbs=8,  total_batch=65536,  tokens=300_000_000,  shards=8, tok_chars=500_000_000),
   "a100":  dict(depth=12, seq=2048, dbs=16, total_batch=262144, tokens=1_000_000_000,shards=16,tok_chars=1_000_000_000),
+  # the clean base: cells 3-4 take every setting from base_setup.PROFILES["t4"] (the same model as the PC's "pc")
+  "v6":    dict(depth=8,  seq=2048, dbs=4,  total_batch=262144, tokens=1_509_949_440,shards=0, tok_chars=2_000_000_000),
 }
 P = PROFILES[PROFILE]
 NUM_ITERS = P["tokens"] // P["total_batch"]
@@ -136,6 +154,10 @@ NEW_FILES = {"long_train.jsonl": 15, "business2_train.jsonl": 15, "targeted_trai
 ASSISTANT_EVAL = True      # cell 8 also scores the full assistant (real action names only, repair, loop guard), as users get it
 MODE_EVAL = True           # cell 8 also scores the assistant's modes (fast / smart / ultra / auto: serving/ooa_server.MODES)
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
+BASE_NOW = ("v6" if PROFILE == "v6" else "current") if BASE == "auto" else BASE
+if BASE_NOW == "v6":
+    SMOLTALK_ROWS = 0      # the clean base stays clean: SmolTalk is largely another model's output (that licence's naming and
+                           # notice terms), see training/pretrain/DATA_CARD.md; set a number here only after a review
 MAX_FLOW_CHARS = 9000 * SFT_SEQ // 2048   # skip training flows longer than this (about SFT_SEQ tokens)
 print(PROFILE, P, "iterations:", NUM_ITERS)
 print("SFT settings -> SYNTH_TRAIN:", SYNTH_TRAIN, "| SFT steps:", SFT_STEPS, f"({SFT_ITERS} micro-batches)", "| window:", SFT_SEQ,
@@ -157,7 +179,8 @@ if SHARED_FOLDER_ID:
         DRIVE_DIR = os.path.dirname(os.path.dirname(hits[0]))
     print("shared folder:", DRIVE_DIR if hits else "NOT FOUND, using " + DRIVE_DIR)
 os.makedirs(DRIVE_DIR, exist_ok=True)
-os.environ["NANOCHAT_BASE_DIR"] = DRIVE_DIR + "/nanochat_base"      # checkpoints, tokenizer, data, all persistent
+os.environ["NANOCHAT_BASE_DIR"] = DRIVE_DIR + ("/nanochat_base_v6" if BASE_NOW == "v6" else "/nanochat_base")  # checkpoints, tokenizer, data, all persistent
+print("base model folder:", os.environ["NANOCHAT_BASE_DIR"], f"(BASE {BASE_NOW})")
 # T4 has no bf16: use fp16 with loss scaling (supported by nanochat). If you see NaN losses, set "float32" (slower).
 os.environ["NANOCHAT_DTYPE"] = "bfloat16" if cap >= (8, 0) else "float16"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -183,13 +206,73 @@ md("## Pretraining (general language, on nanochat's web-text dataset)")
 code('''
 #@title 3. Download pretraining data and train the tokenizer (skipped if already done)
 tok_pkl = os.path.join(os.environ["NANOCHAT_BASE_DIR"], "tokenizer", "tokenizer.pkl")
-!python -m nanochat.dataset -n {P["shards"]}
-if not os.path.exists(tok_pkl):
-    !python -m scripts.tok_train --max-chars={P["tok_chars"]} --vocab-size={VOCAB_SIZE}
-    !python -m scripts.tok_eval
+if PROFILE != "v6":
+    !python -m nanochat.dataset -n {P["shards"]}
+    if not os.path.exists(tok_pkl):
+        !python -m scripts.tok_train --max-chars={P["tok_chars"]} --vocab-size={VOCAB_SIZE}
+        !python -m scripts.tok_eval
+    else:
+        print("tokenizer already trained:", tok_pkl)
 else:
-    print("tokenizer already trained:", tok_pkl)
-''')
+    # The clean base (v6). The shards live on this machine's disk (/content/v6base, about 3 GB), not on Drive: they are
+    # rebuilt in about 10-15 min each session, identical every time (pinned FineWeb-Edu revision, the platform commit
+    # and the rendered rows of the first session, kept on Drive), and checked against the first session's manifest so
+    # a resumed run reads exactly the data it started on. Tokenizer and checkpoints are on Drive (nanochat_base_v6).
+    import json, shutil, subprocess, sys
+    FILES_V6 = %s
+    for name, text in FILES_V6.items():
+        os.makedirs(os.path.dirname(f"/content/ooa/{name}"), exist_ok=True)
+        open(f"/content/ooa/{name}", "w", encoding="utf-8").write(text)
+    sys.path.insert(0, "/content/ooa")
+    import importlib, base_setup as B
+    importlib.reload(B)
+    V6 = os.environ["NANOCHAT_BASE_DIR"]
+    V6_LOCAL = "/content/v6base"
+    for d in ("tokenizer", "base_checkpoints"):
+        os.makedirs(f"{V6}/{d}", exist_ok=True)
+    os.makedirs(V6_LOCAL, exist_ok=True)
+    for d in ("tokenizer", "base_checkpoints"):          # nanochat reads one base folder: link Drive's parts into it
+        if not os.path.islink(f"{V6_LOCAL}/{d}"):
+            os.symlink(f"{V6}/{d}", f"{V6_LOCAL}/{d}")
+    # the platform at the commit of the first session (its docs and code are part of the data)
+    _pc_f = f"{V6}/platform_commit.txt"
+    if not os.path.exists("/content/platform_v6/.git"):
+        !git clone -q {PLATFORM_REPO} /content/platform_v6
+    if os.path.exists(_pc_f):
+        _pc = open(_pc_f).read().strip()
+        !cd /content/platform_v6 && git checkout -q {_pc}
+    else:
+        _pc = subprocess.run(["git", "-C", "/content/platform_v6", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        open(_pc_f, "w").write(_pc)
+    print("platform for the domain text:", _pc)
+    # the rendered rows of the first session (Drive sft_render may be rendered again later)
+    if not os.path.exists(f"{V6}/domain_render/val.jsonl"):
+        assert os.path.exists(f"{DRIVE_DIR}/sft_render/val.jsonl"), "no Drive sft_render: run cells 6 and 6d once first"
+        shutil.copytree(f"{DRIVE_DIR}/sft_render", f"{V6}/domain_render", dirs_exist_ok=True)
+    P6 = dict(B.PROFILES["t4"], dbs=B.device_batch(torch.cuda.get_device_properties(0).total_memory / 2**30, 2048))
+    _need = B.train_chars_for(P6)
+    _cat = f"{V6}/domain_render/catalog.jsonl"
+    print(f"building {_need / 1e9:.2f}B characters of shards in {V6_LOCAL}/base_data_climbmix ...")
+    !python /content/ooa/pretrain_data.py --out {V6_LOCAL}/base_data_climbmix --train-chars {_need} --platform /content/platform_v6 --render {V6}/domain_render --catalog {_cat} --eval-dir /content/ooa/eval --repeat-scale {P6["repeat_scale"]} --shard-chars {P6.get("shard_chars", 250000000)}
+    _man = json.load(open(f"{V6_LOCAL}/base_data_climbmix/manifest.json"))
+    _sig = [x["sha256"] for x in _man["shards"]] + [_man["val"]["sha256"]]
+    if os.path.exists(f"{V6}/data_manifest.json"):
+        _old = json.load(open(f"{V6}/data_manifest.json"))
+        _osig = [x["sha256"] for x in _old["shards"]] + [_old["val"]["sha256"]]
+        _n = min(len(_osig), len(_sig)) - 1                  # the train shards both have, and the val shard
+        if _osig[:_n] != _sig[:_n] or _osig[-1] != _sig[-1]:
+            raise SystemExit("the shards built now differ from the ones this pretraining started on (data_manifest.json "
+                             "on Drive): a resumed run would read other data. Send this output; to start the v6 "
+                             "pretraining over, delete Drive nanochat_base_v6.")
+    shutil.copy(f"{V6_LOCAL}/base_data_climbmix/manifest.json", f"{V6}/data_manifest.json")
+    for _f in ("DATA_CARD.md", "data_card.json"):
+        shutil.copy(f"{V6_LOCAL}/base_data_climbmix/{_f}", f"{V6}/{_f}")
+    if not os.path.exists(tok_pkl):
+        !cd /content/nanochat && NANOCHAT_BASE_DIR={V6_LOCAL} python -m scripts.tok_train --max-chars={B.TOK_MAX_CHARS} --vocab-size={B.VOCAB} 2>&1 | grep -v Progress
+        B.tokenizer_card(f"{V6}/tokenizer", [f"{V6}/domain_render"], name="v6", extra={"trained_chars": B.TOK_MAX_CHARS, "from": "colab"})
+    else:
+        print("tokenizer already trained:", tok_pkl, B.read_card(f"{V6}/tokenizer"))
+''' % json.dumps(files_v6))
 
 code('''
 #@title 4. Pretrain (resumes automatically after a disconnect)
@@ -197,7 +280,39 @@ import glob, re
 ckpt_dir = os.path.join(os.environ["NANOCHAT_BASE_DIR"], "base_checkpoints", f"d{P['depth']}")
 steps = sorted(int(re.search(r"model_(\\d+)\\.pt", f).group(1)) for f in glob.glob(ckpt_dir + "/model_*.pt"))
 resume = f"--resume-from-step={steps[-1]}" if steps else ""
-if steps and steps[-1] >= NUM_ITERS:
+if PROFILE == "v6":
+    # base_train from the pinned commit, patched by base_setup.py: NaN guard (a loss / validation that is not a number
+    # stops the run before anything broken is saved), the newest 2 checkpoints kept, the tokenizer's sha1 recorded
+    sys.path.insert(0, "/content/ooa")
+    import base_setup as B, sft_setup as _T4
+    !cd /content/nanochat && git show {NANOCHAT_COMMIT}:scripts/base_train.py > /tmp/base_train_pinned.py
+    open("/content/nanochat/scripts/base_train_ooa.py", "w").write(B.patch_base_train(open("/tmp/base_train_pinned.py").read()))
+    _it = B.horizon(P6)[1]
+    _good = None
+    for _s in reversed(B.checkpoint_steps(ckpt_dir)):     # the newest complete checkpoint with finite weights
+        if B.complete_checkpoint(ckpt_dir, _s) and not _T4.nonfinite_tensors(f"{ckpt_dir}/model_{_s:06d}.pt"):
+            _good = _s
+            break
+        print("removing checkpoint", _s, "(incomplete or nan)")
+        B.drop_checkpoint(ckpt_dir, _s)
+    if _good is not None and _good >= _it:
+        print("v6 pretraining already finished at step", _good)
+    else:
+        print(f"v6 pretraining: {_it} steps of {P6['total_batch']:,} tokens;", f"resuming from step {_good}" if _good else "from scratch")
+        _args = " ".join(B.base_train_args(P6, resume_step=_good))
+        !cd /content/nanochat && NANOCHAT_BASE_DIR={V6_LOCAL} OOA_KEEP_CHECKPOINTS=2 python -m scripts.base_train_ooa {_args}
+        _last = max(B.checkpoint_steps(ckpt_dir) or [0])
+        if _last < _it:
+            print("!" * 100)
+            print(f"stopped at checkpoint {_last} of {_it}. An 'OOA NAN STOP' line above means the training went "
+                  "unstable (nothing broken was saved): send the first 'step ... | loss' lines with nan. Otherwise "
+                  "(a disconnect or the session limit) run cells 1-4 again: it resumes.")
+            print("!" * 100)
+    if max(B.checkpoint_steps(ckpt_dir) or [0]) >= _it:
+        open(os.path.join(os.environ["NANOCHAT_BASE_DIR"], "VERSION"), "w").write(
+            f"{B.VERSION_PREFIX}-colab-step{_it}" + chr(10) + "clean base model: FineWeb-Edu (ODC-By 1.0) + the owner's domain text; see DATA_CARD.md" + chr(10))
+        print("the clean base model is in", os.environ["NANOCHAT_BASE_DIR"], "| next: cells 6-8 with BASE v6 (cell 1)")
+elif steps and steps[-1] >= NUM_ITERS:
     print("Pretraining already finished at step", steps[-1])
 else:
     print("resuming from", steps[-1] if steps else "scratch")
@@ -209,7 +324,8 @@ else:
 
 code('''
 #@title 5. Quick look at the pretrained model (it continues text; it does not follow instructions yet)
-!python -m scripts.base_eval --eval=bpb,sample --device-batch-size=1 --split-tokens=65536 2>&1 | tail -25
+_bd = "/content/v6base" if BASE_NOW == "v6" else os.environ["NANOCHAT_BASE_DIR"]   # v6: the shards are on this disk (cell 3)
+!NANOCHAT_BASE_DIR={_bd} python -m scripts.base_eval --eval=bpb,sample --device-batch-size=1 --split-tokens=65536 2>&1 | tail -25
 ''')
 
 md("""
@@ -335,7 +451,11 @@ print("training data:", SFT_DIR)
 # The data mix is planned for the real budget (SFT_STEPS optimizer steps x tokens per step), not "epochs x repeats":
 # every file gets a number of views per row; long / business rows at most 3, catalog questions at least 3.
 _tps = SFT_SEQ * SFT_DEVICE_BATCH * 4
-VIEWS, _stats, _budget, _lines = _T.plan_for_notebook(SFT_DIR, SFT_STEPS, _tps, smoltalk_rows=SMOLTALK_ROWS)
+import base_setup as _B7          # the base model's own tokenizer: its characters per token size the mixture (v6)
+_cpt = _B7.plan_chars_per_token(os.path.join(os.environ["NANOCHAT_BASE_DIR"], "tokenizer"))
+print("base model:", os.environ["NANOCHAT_BASE_DIR"], "| characters per token:", _cpt or _T.CHARS_PER_TOKEN)
+VIEWS, _stats, _budget, _lines = _T.plan_for_notebook(SFT_DIR, SFT_STEPS, _tps, smoltalk_rows=SMOLTALK_ROWS,
+                                                      chars_per_token=_cpt)
 print(f"SFT budget: {SFT_STEPS} steps x {_tps:,} tokens per step -> about {_budget/1e6:.0f}M tokens of conversations"
       f" (+ {SMOLTALK_ROWS} SmolTalk rows). Planned views per row:")
 print("\\n".join(_lines))
@@ -672,7 +792,8 @@ colab_ar_cells.build(md, gated, FROZEN_BLOB)
 
 md("""
 ## After this run
-- Checkpoints: `DRIVE_DIR/nanochat_base/base_checkpoints` (pretrained) and `chatsft_checkpoints` (OOA-trained).
+- Checkpoints: `DRIVE_DIR/nanochat_base/base_checkpoints` (pretrained) and `chatsft_checkpoints` (OOA-trained);
+  with `BASE` "v6" all of it is in `DRIVE_DIR/nanochat_base_v6` (with its own tokenizer).
 - Weak results on the held-out test are expected with the seed data. The next lever is more and better dialogues
   (edits, error fixing, missing-input questions), validated with the scorer in `eval/flow_check.py`.
 - Reinforcement layer: cell 9 (RL with the platform checker as the reward, in the current format; `RL_V5` in cell 1,

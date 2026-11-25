@@ -26,7 +26,7 @@ RPA_DEFAULT = HERE.parent.parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 import rl_setup as RL                                          # noqa: E402  (one source of truth with Colab cell 9)
-from train_pc import (NANOCHAT_COMMIT, newest, start_root, START_FROM, device_info, drive_id, data_sig,  # noqa: E402
+from train_pc import (pick_tokenizer, NANOCHAT_COMMIT, newest, start_root, START_FROM, device_info, drive_id, data_sig,  # noqa: E402
                       windows_kill_with_parent, local_origin, start_label, model_health, broken_message)
 
 STEPS = 200                      # Colab cell 1 RL_STEPS
@@ -127,8 +127,12 @@ def main(argv=None):
     if state.get("start") and (state.get("start"), state.get("start_step")) != (str(src_root), src_step):
         print(f"note: a newer model than the RL run in progress started from ({state['start']} step "
               f"{state.get('start_step')}): a new RL run starts from it; the earlier result is kept")
-    tok = next((p for p in (src_root / "tokenizer", rpa / "nanochat_base" / "tokenizer")
-                if (p / "tokenizer.pkl").exists() and (p / "token_bytes.pt").exists()), None)
+    try:
+        _meta = json.loads((src_root / "chatsft_checkpoints" / "d8" / f"meta_{src_step:06d}.json").read_text(
+            encoding="utf-8")) if src_step is not None else {}
+    except (OSError, ValueError):
+        _meta = {}
+    tok, tok_why = pick_tokenizer(rpa, src_root, _meta)       # never a tokenizer the model was not trained with
     dev, name, mem, cap = device_info()
     gpu = dev == "cuda"
     problems = []
@@ -139,7 +143,7 @@ def main(argv=None):
         if _st == "broken":
             problems.append(broken_message(rpa, src_root, src_step, _bad, "run RL on"))
     if tok is None:
-        problems.append(f"no tokenizer (tokenizer.pkl + token_bytes.pt) in {src_root / 'tokenizer'}")
+        problems.append(tok_why)
     for f in (data / "examples.jsonl", data / "catalog.jsonl", data / "render_report.json"):
         if not f.exists():
             problems.append(f"missing {f}: the rendered data the model trained on (notebook cell 3)")

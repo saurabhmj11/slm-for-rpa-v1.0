@@ -243,8 +243,11 @@ def eval_prompts(eval_dir=None):
     return out
 
 
-def _too_close():
-    sys.path.insert(0, str(REPO / "eval"))
+def _too_close(eval_dir=None):
+    """eval/beginner_score.py's too_close (the same check the SFT data uses): from eval_dir when it holds
+    beginner_score.py (Colab writes it there), else the repo's eval/."""
+    d = Path(eval_dir) if eval_dir and (Path(eval_dir) / "beginner_score.py").exists() else REPO / "eval"
+    sys.path.insert(0, str(d))
     try:
         from beginner_score import too_close, content_words
     finally:
@@ -256,9 +259,9 @@ class EvalGuard:
     """too_close(eval prompt, training request) for every eval prompt, with a content-word index so a request is
     only compared with the prompts it shares words with; quoted() finds an eval prompt copied into a document."""
 
-    def __init__(self, prompts):
+    def __init__(self, prompts, eval_dir=None):
         self.prompts = list(prompts)
-        self.too_close, self.cw = _too_close()
+        self.too_close, self.cw = _too_close(eval_dir)
         self.idx = {}
         for i, p in enumerate(self.prompts):
             for w in self.cw(p):
@@ -409,7 +412,7 @@ def domain_sources(platform=None, render_dirs=(), catalog=None, eval_dir=None, l
         docs = [d for d in (scrub(x, st) for x in docs) if d]
         src["catalog"] = {"docs": [p for d in docs for p in _pieces(d)], "files": [Path(catalog)], "info": st}
     # rendered conversations: held-out rows first (their requests are excluded from training)
-    guard = EvalGuard(eval_prompts(eval_dir))
+    guard = EvalGuard(eval_prompts(eval_dir), eval_dir)
     rfiles, held_files, held_req = [], [], set()
     for d in render_dirs or ():
         if Path(d).exists():
@@ -473,11 +476,12 @@ def domain_fingerprint(sources):
     return h.hexdigest()
 
 
-def domain_stream(sources, seed=1, weights=None, max_repeat=None):
+def domain_stream(sources, seed=1, weights=None, max_repeat=None, repeat_scale=1):
     """The whole domain stream as [(source, document)], independent of how much of it a build uses: each source is
     max_repeat[source] passes over its documents (each pass shuffled), and the sources are interleaved so every
     prefix holds them at their weights (the next document always comes from the source furthest below its share;
-    a source whose passes are used up drops out and the others fill in)."""
+    a source whose passes are used up drops out and the others fill in). repeat_scale multiplies every source's
+    passes (a long run that should keep the domain share: 2 doubles the stream to about 1B characters)."""
     weights = dict(DOMAIN_WEIGHTS, **(weights or {}))
     max_repeat = dict(MAX_REPEAT, **(max_repeat or {}))
     queues = {}
@@ -486,7 +490,7 @@ def domain_stream(sources, seed=1, weights=None, max_repeat=None):
         if not docs or weights.get(k, 0) <= 0:
             continue
         q = []
-        for p in range(max_repeat.get(k, 3)):
+        for p in range(max(1, round(max_repeat.get(k, 3) * repeat_scale))):
             order = docs[:]
             random.Random(f"{seed}:{k}:{p}").shuffle(order)
             q += order
@@ -536,26 +540,28 @@ def _sha(path):
     return h.hexdigest()
 
 
-SETTING_KEYS = ("shard_chars", "domain_share", "seed", "web", "val_groups", "domain")
+SETTING_KEYS = ("shard_chars", "domain_share", "seed", "web", "val_groups", "domain", "repeat_scale")
+SETTING_DEFAULTS = {"repeat_scale": 1}          # keys added later: an older manifest without them used the default
 
 
 def build(out, train_chars, shard_chars=250_000_000, domain_share=0.15, platform=None, render_dirs=(), catalog=None,
-          web_dir=None, web_files=None, val_groups=2, seed=1, eval_dir=None, log=print):
+          web_dir=None, web_files=None, val_groups=2, seed=1, eval_dir=None, log=print, repeat_scale=1):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     man_f = out / "manifest.json"
-    man = json.loads(man_f.read_text()) if man_f.exists() else {}
+    man = json.loads(man_f.read_text(encoding="utf-8")) if man_f.exists() else {}
     sources, val_docs = domain_sources(platform, render_dirs, catalog, eval_dir, log)
     settings = {"train_chars": int(train_chars), "shard_chars": int(shard_chars), "domain_share": domain_share,
                 "seed": seed, "web": "local:" + str(web_dir) if web_dir else FINEWEB["revision"],
-                "val_groups": val_groups, "domain": domain_fingerprint(sources)}
-    if man and {k: man["settings"].get(k) for k in SETTING_KEYS} != {k: settings[k] for k in SETTING_KEYS}:
-        raise SystemExit(f"{out} holds shards built with other settings or other domain sources "
-                         f"({ {k: man['settings'].get(k) for k in SETTING_KEYS} }); use another folder")
+                "val_groups": val_groups, "domain": domain_fingerprint(sources), "repeat_scale": repeat_scale}
+    old = {k: man["settings"].get(k, SETTING_DEFAULTS.get(k)) for k in SETTING_KEYS} if man else None
+    if man and old != {k: settings[k] for k in SETTING_KEYS}:
+        raise SystemExit(f"{out} holds shards built with other settings or other domain sources ({old}); use "
+                         "another folder")
     n_shards = max(1, -(-int(train_chars) // int(shard_chars)))
     log("domain sources: " + ", ".join(f"{k} {len(v['docs'])} docs / {sum(map(len, v['docs'])) / 1e6:.1f}M chars"
                                        for k, v in sorted(sources.items())) + f"; held-out val rows {len(val_docs)}")
-    dom = domain_stream(sources, seed)
+    dom = domain_stream(sources, seed, repeat_scale=repeat_scale)
     web = WebSource(web_dir, val_groups, web_files)
     # finished shards stay (checked by hash); the build continues after the last good one
     keep = []
@@ -597,7 +603,7 @@ def build(out, train_chars, shard_chars=250_000_000, domain_share=0.15, platform
         shards.append({"file": name, "sha256": sha, "docs": len(texts), "web_chars": wchars, "domain_chars": dchars,
                        "domain_docs": dpos - d0, "domain_end": dpos, "web_units": units})
         man = {"settings": settings, "shards": shards}
-        man_f.write_text(json.dumps(man, indent=1))
+        man_f.write_text(json.dumps(man, indent=1), encoding="utf-8")
         log(f"  {name}: {len(texts):,} docs, web {wchars / 1e6:.0f}M + domain {dchars / 1e6:.1f}M chars "
             f"({100 * dchars / max(1, wchars + dchars):.1f}%), {time.time() - t0:.0f} s")
     # validation shard: unseen FineWeb row groups + held-out rendered rows at the same share
@@ -618,11 +624,11 @@ def build(out, train_chars, shard_chars=250_000_000, domain_share=0.15, platform
     man = {"settings": settings, "shards": shards,
            "val": {"file": VAL_NAME, "sha256": vsha, "docs": len(vtexts), "web_chars": vw, "domain_chars": vd,
                    "web_units": [list(u) for u in web.val_units()]}}
-    man_f.write_text(json.dumps(man, indent=1))
+    man_f.write_text(json.dumps(man, indent=1), encoding="utf-8")
     card = data_card(man, sources, stream_report(sources, dom, dpos), web_dir)
     card["totals"]["shard_bytes"] = sum((out / s["file"]).stat().st_size for s in shards)
     card["totals"]["bytes_per_1e9_chars"] = int(card["totals"]["shard_bytes"] / max(1, card["totals"]["train_chars"]) * 1e9)
-    (out / "data_card.json").write_text(json.dumps(card, indent=1))
+    (out / "data_card.json").write_text(json.dumps(card, indent=1), encoding="utf-8")
     (out / "DATA_CARD.md").write_text(card_markdown(card), encoding="utf-8")
     log(f"data: {len(shards)} train shards, {card['totals']['train_chars'] / 1e9:.2f}B chars, domain share "
         f"{100 * card['totals']['domain_share']:.1f}%; validation {VAL_NAME} ({vw / 1e6:.0f}M web + {vd / 1e6:.1f}M domain)")
@@ -701,9 +707,11 @@ def main(argv=None):
     ap.add_argument("--web-files", type=int, default=None)
     ap.add_argument("--val-groups", type=int, default=2)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--repeat-scale", type=float, default=1,
+                    help="multiply every domain source's passes (MAX_REPEAT); 2 keeps the 15%% share up to ~6.7B chars")
     a = ap.parse_args(argv)
     build(a.out, a.train_chars, a.shard_chars, a.domain_share, a.platform, a.render, a.catalog, a.web_dir,
-          a.web_files, a.val_groups, a.seed, a.eval_dir)
+          a.web_files, a.val_groups, a.seed, a.eval_dir, repeat_scale=a.repeat_scale)
 
 
 if __name__ == "__main__":

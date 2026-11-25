@@ -2,6 +2,8 @@
 
     python train_pc.py --mode full  --data DIR   the Colab run: 12000 steps at 4096 from the pretrained BASE model
                                                  (NVIDIA GPU: a few hours; on a CPU it would take weeks)
+    ... --base v6                                the same from the clean base model (train_data/base_v6, notebook
+                                                 MODE "pretrain"); its own state (local_run/full_v6) and tokenizer
     python train_pc.py --mode topup --data DIR   continue the newest SFT model for a few hundred steps (CPU: a night)
     python train_pc.py --mode refine --data DIR  NVIDIA GPU: continue the finished Colab model (v5) for 1500 steps on
                                                  the newest data (v5, session) and the weak areas, with replay of the
@@ -47,6 +49,10 @@ HERE = Path(__file__).resolve().parent
 RPA_DEFAULT = HERE.parent.parent
 sys.path.insert(0, str(HERE.parent))
 import sft_setup as T                                          # noqa: E402  (one source of truth with Colab cell 7)
+sys.path.insert(1, str(HERE.parent / "pretrain"))
+sys.path.append(str(HERE.parent.parent / "assistant"))
+import base_setup as BS                                        # noqa: E402  (the clean base model, v6)
+from model_backend import tokenizer_problem                    # noqa: E402  (a model and the tokenizer it needs)
 
 NANOCHAT_COMMIT = "92d63d4e8bb4df75c3b71618f31ddde2378b2bcd"   # the nanochat version the patch is written against
 TOKENS_PER_STEP = 32768          # Colab: SFT_SEQ 4096 x device batch 2 x 4 micro-batches; every mode keeps it
@@ -110,13 +116,44 @@ def lr_for_span(g0, g1, lr):
 BASE_LRS = {"embedding_lr": 0.3, "unembedding_lr": 0.008, "matrix_lr": 0.02}   # base_train.py defaults (pinned)
 
 
-def base_lrs(rpa):
+BASES = ("current", "v6")      # MODE "full": the base model the SFT starts from (notebook cell 1 BASE)
+
+
+def base_root(rpa, base="current"):
+    """The base model pack: "current" the Colab base (train_data/base, from Drive nanochat_base), "v6" the clean
+    base (train_data/base_v6: pretrain_pc.py's pack, or Drive nanochat_base_v6 downloaded by data_pc.py)."""
+    return Path(rpa) / "train_data" / ("base_v6" if base == "v6" else "base")
+
+
+def run_name(mode, base="current"):
+    """The run's state folder under local_run: a full run on the v6 base has its own (local_run/full_v6), so
+    switching BASE never throws a run in progress away."""
+    return "full_v6" if mode == "full" and base == "v6" else mode
+
+
+def pick_tokenizer(rpa, src_root, meta):
+    """(tokenizer folder, problem) for a start model: its own pack's tokenizer; the installed model's only for an
+    older model whose pack has none, and never one the model was not trained with (tokenizer_problem)."""
+    tried = []
+    for p in (Path(src_root) / "tokenizer", Path(rpa) / "nanochat_base" / "tokenizer"):
+        if (p / "tokenizer.pkl").exists() and (p / "token_bytes.pt").exists():
+            why = tokenizer_problem(meta or {}, p)
+            if why is None:
+                return p, None
+            tried.append(why)
+        if (meta or {}).get("tokenizer_sha1") and p == Path(src_root) / "tokenizer":
+            break                                  # a recorded tokenizer must come with the model
+    return None, ("; ".join(tried) if tried else f"no tokenizer (tokenizer.pkl + token_bytes.pt) in "
+                  f"{Path(src_root) / 'tokenizer'}")
+
+
+def base_lrs(rpa, root=None):
     """The learning rates Colab's SFT run used: chat_sft inherits them from the base model's meta (user_config).
     Passed explicitly to every chunk, because a saved SFT checkpoint stores them as None (chat_sft saves its
     user_config before it fills them in) and chat_sft then falls back to its own defaults, which halve the output
-    layer's rate (unembedding 0.004 instead of base_train's 0.008)."""
+    layer's rate (unembedding 0.004 instead of base_train's 0.008). root: the base pack (default train_data/base)."""
     out = dict(BASE_LRS)
-    d = Path(rpa) / "train_data" / "base" / "base_checkpoints" / "d8"
+    d = Path(root or Path(rpa) / "train_data" / "base") / "base_checkpoints" / "d8"
     step = newest(d)
     if step is not None:
         try:
@@ -562,6 +599,9 @@ def main(argv=None):
     ap.add_argument("--rpa", default=str(RPA_DEFAULT), help='the "rpa model" folder')
     ap.add_argument("--mode", choices=["full", "topup", "refine"], required=True)
     ap.add_argument("--data", required=True, help="the rendered training data (sft_render)")
+    ap.add_argument("--base", choices=BASES, default="current",
+                    help="full: the base model: current (train_data/base, the Colab base) or v6 (train_data/base_v6, "
+                         "the clean base; notebook cell 1 BASE)")
     ap.add_argument("--start", default=None, help="topup: a model folder with chatsft_checkpoints/d8 (+ tokenizer) to "
                                                   "continue; full: a folder with base_checkpoints/d8")
     ap.add_argument("--start-from", choices=START_FROM, default="auto",
@@ -579,7 +619,8 @@ def main(argv=None):
     ap.add_argument("--device-batch", type=int, default=0, help="rows per pass (0: from GPU memory; 1 on a CPU)")
     ap.add_argument("--lr", type=float, default=None, help=f"--init-lr-frac (full {FULL_LR}, topup {TOPUP_LR}, "
                                                            f"refine {REFINE_LR})")
-    ap.add_argument("--smoltalk", type=int, default=None, help=f"general chat rows (full {SMOLTALK_ROWS}, topup 0)")
+    ap.add_argument("--smoltalk", type=int, default=None, help=f"general chat rows (full {SMOLTALK_ROWS}, full on the "
+                                                               "v6 base 0, topup 0)")
     ap.add_argument("--threads", type=int, default=0, help="CPU threads (0: all but one at low priority)")
     ap.add_argument("--full-speed", action="store_true", help="CPU: all threads, normal priority")
     ap.add_argument("--no-compile", action="store_true", default=(os.name == "nt"),
@@ -607,13 +648,16 @@ def main(argv=None):
     a.chunks = a.chunks or (max(1, round(a.steps / REFINE_CHUNK)) if refine else 1 if gpu else max(1, round(a.steps / 50)))
     a.chunks = max(1, min(a.chunks, a.steps))
     a.lr = a.lr if a.lr is not None else (FULL_LR if full else REFINE_LR if refine else TOPUP_LR)
-    a.smoltalk = a.smoltalk if a.smoltalk is not None else (SMOLTALK_ROWS if full and not a.measure else 0)
+    # SmolTalk (general chat rows) only on the current base: the clean base (v6) stays clean (SmolTalk is largely
+    # another model's output, under that model licence's naming / notice terms; training/pretrain/DATA_CARD.md)
+    a.smoltalk = a.smoltalk if a.smoltalk is not None else (
+        SMOLTALK_ROWS if full and not a.measure and a.base != "v6" else 0)
     dbs = a.device_batch or (gpu_batch(mem, a.seq) if gpu else 1)
     if TOKENS_PER_STEP % (a.seq * dbs):
         raise SystemExit(f"--device-batch {dbs} does not divide {TOKENS_PER_STEP} tokens per step at window {a.seq}")
     accum = TOKENS_PER_STEP // (a.seq * dbs)
 
-    run_dir = rpa / "local_run" / ("measure" if a.measure else a.mode)
+    run_dir = rpa / "local_run" / ("measure" if a.measure else run_name(a.mode, a.base))
     state_f = run_dir / "state.json"
     if (a.restart or a.measure) and run_dir.exists() and not a.check:
         shutil.rmtree(run_dir, ignore_errors=True)
@@ -644,18 +688,23 @@ def main(argv=None):
         src_root, src_step = Path(state["start"]), state["start_step"]
     else:
         src_root = Path(a.start).expanduser().resolve() if a.start else (
-            rpa / "train_data" / "base" if full else start_root(rpa, a.start_from))
+            base_root(rpa, a.base) if full else start_root(rpa, a.start_from))
         src_step = newest(src_root / ("base_checkpoints" if full else "chatsft_checkpoints") / "d8")
     src_d8 = src_root / ("base_checkpoints" if full else "chatsft_checkpoints") / "d8"
-    tok = next((p for p in (src_root / "tokenizer", rpa / "nanochat_base" / "tokenizer")
-                if (p / "tokenizer.pkl").exists() and (p / "token_bytes.pt").exists()), None)
+    try:
+        src_meta = json.loads((src_d8 / f"meta_{src_step:06d}.json").read_text(encoding="utf-8")) if src_step is not None else {}
+    except (OSError, ValueError):
+        src_meta = {}
+    tok, tok_why = pick_tokenizer(rpa, src_root, src_meta)
 
     problems = []
     if src_step is None:
         problems.append(f"no model_<N>.pt + meta_<N>.json in {src_d8}"
-                        + (" (the pretrained base model from Drive nanochat_base/base_checkpoints/d8)" if full else ""))
+                        + ((" (the clean base: notebook MODE \"pretrain\" on this PC, or Drive nanochat_base_v6 from "
+                            "Colab PROFILE \"v6\")" if a.base == "v6" else
+                            " (the pretrained base model from Drive nanochat_base/base_checkpoints/d8)") if full else ""))
     if tok is None:
-        problems.append(f"no tokenizer (tokenizer.pkl + token_bytes.pt) in {src_root / 'tokenizer'}")
+        problems.append(tok_why)
     for f in (data / "val.jsonl", data / "catalog.jsonl"):
         if not f.exists():
             problems.append(f"missing {f}")
@@ -697,7 +746,9 @@ def main(argv=None):
         print(f"note: the data was rendered for a {_mt + 28}-token window but this run trains at {a.seq}: longer rows "
               "are skipped (the notebook's cell 3 renders it for this window)")
 
-    views, stats, bud, table = T.plan_for_local(str(data), a.mode, a.steps, TOKENS_PER_STEP, smoltalk_rows=a.smoltalk) \
+    cpt = BS.plan_chars_per_token(tok) if tok else None          # the tokenizer's own characters per token (v6 card)
+    views, stats, bud, table = T.plan_for_local(str(data), a.mode, a.steps, TOKENS_PER_STEP, smoltalk_rows=a.smoltalk,
+                                                chars_per_token=cpt) \
         if data.exists() and (data / "val.jsonl").exists() else ({}, {}, 0, [])
     done = state.get("done", 0)
     bounds = [k * a.steps // a.chunks for k in range(a.chunks + 1)]       # chunk k trains steps bounds[k]..bounds[k+1]
@@ -720,7 +771,10 @@ def main(argv=None):
     print(f"plan             : {a.steps} steps x {TOKENS_PER_STEP:,} tokens at window {a.seq} (device batch {dbs}, "
           f"{accum} micro-batches per step) in {a.chunks} chunk(s) of up to {chunk}; {done} done | lr {a.lr} | "
           f"SmolTalk rows {a.smoltalk}")
-    print("base rates       :", " ".join(lr_flags(state.get("base_lrs") or base_lrs(rpa))),
+    if full:
+        print("base model       :", f"{a.base} ({src_root})", "| tokenizer", tok,
+              f"({cpt} characters per token)" if cpt else "")
+    print("base rates       :", " ".join(lr_flags(state.get("base_lrs") or base_lrs(rpa, src_root if full else None))),
           "(Colab's, times the lr above)")
     if table:
         print(f"data mixture     : about {bud / 1e6:.1f}M tokens of conversations; views per row:")
@@ -745,7 +799,7 @@ def main(argv=None):
         import signal
         signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     if not state:
-        state = {"mode": a.mode, "steps": a.steps, "chunks": a.chunks, "seq": a.seq, "device_batch": dbs,
+        state = {"mode": a.mode, "base": a.base if full else None, "steps": a.steps, "chunks": a.chunks, "seq": a.seq, "device_batch": dbs,
                  "start": str(src_root), "start_step": src_step, "lr": a.lr, "smoltalk": a.smoltalk, "data": str(data),
                  "data_sig": data_sig(data), "views": views, "done": 0, "started": time.strftime("%Y-%m-%d %H:%M"),
                  "tokenizer": str(tok), "seed": 1 if full else int(time.time()) % 100000 * 100 + 1,
@@ -753,7 +807,7 @@ def main(argv=None):
                  "drive_origin": drive_id(src_root) or (local_origin(rpa) if src_root == rpa / "nanochat_base" else None)}
     else:
         state["views"] = views                               # same plan unless the data changed
-    state.setdefault("base_lrs", base_lrs(rpa))               # one set of rates for every chunk of this run
+    state.setdefault("base_lrs", base_lrs(rpa, src_root if full else None))   # one set of rates for every chunk
     state_f.write_text(json.dumps(state, indent=1), encoding="utf-8")
     log = run_dir / "train.log"
     threads = a.threads or (os.cpu_count() or 4) if (a.full_speed or gpu) else (a.threads or max(1, (os.cpu_count() or 2) - 1))
@@ -845,7 +899,7 @@ def main(argv=None):
         raise SystemExit("no finished model in " + str(last))
     meta_f = last / f"meta_{fstep:06d}.json"
     m = json.loads(meta_f.read_text(encoding="utf-8"))
-    m["ooa_local"] = {"mode": a.mode, "steps": a.steps, "chunks": a.chunks, "from": str(src_d8), "from_step": src_step,
+    m["ooa_local"] = {"mode": a.mode, "base": state.get("base"), "steps": a.steps, "chunks": a.chunks, "from": str(src_d8), "from_step": src_step,
                       "seq": a.seq, "data_sig": state.get("data_sig"), "time": time.strftime("%Y%m%d_%H%M%S")}
     meta_f.write_text(json.dumps(m, indent=2), encoding="utf-8")
     state["result"] = str(last)

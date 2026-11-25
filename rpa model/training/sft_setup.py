@@ -162,7 +162,14 @@ print0(f"SFT attention window: base config sequence_len {_base_seq} -> {model.co
 META_ANCHOR = '                "user_config": user_config, # inputs to the training script\n'
 META_FIX = ('                "user_config": user_config, # inputs to the training script\n'
             '                "trained_window": orig_model.window_sizes[-1][0], # OOA: the window SFT trained with\n'
-            '                "compute_dtype": str(COMPUTE_DTYPE).replace("torch.", ""), # OOA: bfloat16 / float16\n')
+            '                "compute_dtype": str(COMPUTE_DTYPE).replace("torch.", ""), # OOA: bfloat16 / float16\n'
+            '                "tokenizer_sha1": _ooa_tok_sha1(), # OOA: the model pack must carry this tokenizer\n')
+TOK_SHA = '''
+def _ooa_tok_sha1():   # OOA: the tokenizer this model trains with (model_backend.tokenizer_problem checks it)
+    import hashlib as _h
+    from nanochat.common import get_base_dir as _gbd
+    with open(_os_ooa.path.join(_gbd(), "tokenizer", "tokenizer.pkl"), "rb") as _f:
+        return _h.sha1(_f.read()).hexdigest()'''
 TASKS_START = "train_tasks = ["
 TASKS_END = "# total: 24K"
 IMPORT_ANCHOR = "from tasks.smoltalk import SmolTalk"
@@ -231,7 +238,8 @@ def patch_chat_sft(s, sft_dir, views, smoltalk_rows=0, seed=1, window_fix=True):
     for a in (WINDOW_ANCHOR, META_ANCHOR, TASKS_START, TASKS_END, IMPORT_ANCHOR, LOADER_OLD, STEP_ANCHOR, END_ANCHOR,
               LOSS_LOG_ANCHOR, VAL_ANCHOR):
         assert s.count(a) >= 1, "chat_sft.py changed upstream, cannot patch: " + a[:60]
-    s = s.replace(IMPORT_ANCHOR, IMPORT_ANCHOR + "\nfrom tasks.ooa import OOADialogues\nimport math as _ooa_math", 1)
+    s = s.replace(IMPORT_ANCHOR, IMPORT_ANCHOR + "\nfrom tasks.ooa import OOADialogues\nimport math as _ooa_math"
+                  + ("\nimport os as _os_ooa" + TOK_SHA if window_fix else ""), 1)
     a = s.index(TASKS_START)
     b = s.index("\n", s.index(TASKS_END))
     s = s[:a] + tasks_block(sft_dir, views, smoltalk_rows, seed) + s[b:]
@@ -296,9 +304,12 @@ def short_list(names, n=6):
     return ", ".join(names[:n]) + (f" and {len(names) - n} more" if len(names) > n else "")
 
 
-def plan_for_notebook(sft_dir, steps, tokens_per_step, smoltalk_rows=0, smoltalk_tokens=500, want=None):
-    """(views, stats, budget, table lines) for cell 7."""
-    stats = file_stats(sft_dir)
+def plan_for_notebook(sft_dir, steps, tokens_per_step, smoltalk_rows=0, smoltalk_tokens=500, want=None,
+                      chars_per_token=None):
+    """(views, stats, budget, table lines) for cell 7. chars_per_token: characters of a JSONL line per token of the
+    base model's tokenizer (its tokenizer_card.json, base_setup.plan_chars_per_token); None = CHARS_PER_TOKEN, the
+    old web-only tokenizer's."""
+    stats = file_stats(sft_dir, chars_per_token=chars_per_token or CHARS_PER_TOKEN)
     b = budget(steps, tokens_per_step)
     if smoltalk_rows:
         b -= int(smoltalk_rows * smoltalk_tokens)
@@ -356,13 +367,14 @@ def plan_topup(stats, budget_tokens, shares=None, replay=TOPUP_REPLAY):
     return plan_mixture(stats, budget_tokens, want, catalog_min=0.0)
 
 
-def plan_for_local(sft_dir, mode, steps, tokens_per_step, smoltalk_rows=0, smoltalk_tokens=500):
+def plan_for_local(sft_dir, mode, steps, tokens_per_step, smoltalk_rows=0, smoltalk_tokens=500, chars_per_token=None):
     """(views, stats, budget, table lines) for the local notebook: "full" plans exactly like Colab cell 7
     (plan_for_notebook); "topup" plans a top-up round (plan_topup with TOPUP_SHARES); "refine" a GPU refine of the
     finished Colab model (plan_topup with REFINE_SHARES and REFINE_REPLAY)."""
     if mode == "full":
-        return plan_for_notebook(sft_dir, steps, tokens_per_step, smoltalk_rows, smoltalk_tokens)
-    stats = file_stats(sft_dir)
+        return plan_for_notebook(sft_dir, steps, tokens_per_step, smoltalk_rows, smoltalk_tokens,
+                                 chars_per_token=chars_per_token)
+    stats = file_stats(sft_dir, chars_per_token=chars_per_token or CHARS_PER_TOKEN)
     b = budget(steps, tokens_per_step)
     if smoltalk_rows:
         b -= int(smoltalk_rows * smoltalk_tokens)

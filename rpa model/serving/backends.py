@@ -3,6 +3,23 @@ training/ooa_self_improve.py). NOT tested in the build environment (needs nanoch
 import sys
 
 
+def tokenizer_problem(meta):
+    """model_backend.tokenizer_problem for the model pack nanochat loads ($NANOCHAT_BASE_DIR/tokenizer): a model
+    must be served with the tokenizer it was trained with (the clean base v6 has its own)."""
+    import os
+    import sys
+    from pathlib import Path
+    from nanochat.common import get_base_dir
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "assistant"))
+    try:
+        from model_backend import tokenizer_problem as check
+    except ImportError:                                     # a serving folder without the assistant: no check
+        return None
+    finally:
+        sys.path.pop(0)
+    return check(meta, os.path.join(get_base_dir(), "tokenizer"))
+
+
 class NanochatBackend:
     def __init__(self, source="sft", max_new_tokens=1024, base_temp=0.2):
         import torch
@@ -10,7 +27,10 @@ class NanochatBackend:
         from nanochat.checkpoint_manager import load_model
         from nanochat.engine import Engine
         _, _, _, _, self.device = compute_init(autodetect_device_type())
-        self.model, self.tok, _ = load_model(source, self.device, phase="eval")
+        self.model, self.tok, meta = load_model(source, self.device, phase="eval")
+        bad = tokenizer_problem(meta)
+        if bad:
+            raise RuntimeError("model pack: " + bad)
         self.engine = Engine(self.model, self.tok)
         self.max_new_tokens, self.base_temp = max_new_tokens, base_temp
 

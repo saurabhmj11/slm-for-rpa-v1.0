@@ -11,6 +11,7 @@ from top to bottom). It drives the three scripts in this folder, which reuse the
 | `eval_pc.py` | Scores the new model and the installed one through the full assistant (`serving/ooa_server.Router`: catalog lock, repair, verify, 2 self-corrections) on sets 1-3 (`eval/plain_requests*.jsonl`) and the beginner set (`eval/beginner_requests.jsonl`), like Colab cell 8, and installs the new model only if it is better. |
 | `setup_pc.py` | Notebook cell 2's first-run setup (standard library only): checks the Python (64-bit, 3.10+), copies `platform/`, `nanochat_base/`, `sft/`, `train_data/` and `assistant/assistant_data/` from an older `rpa model` folder next to this one (the code-only update zip has none of them), and puts nanochat at the pinned commit in `rpa model/nanochat`: from the older folder, else `git clone`, else GitHub's zip of the commit (Git is not needed). |
 | `rl_pc.py` | MODE `rl` (NVIDIA GPU): reinforcement learning on the newest trained model, the Colab cell 9 recipe (`training/rl_setup.py`): nanochat's `scripts/chat_rl.py` from the pinned commit, patched and written as `scripts/chat_rl_ooa.py`; fresh requests (never in the training data, never close to a test prompt) with the server's prompts; the platform checker scores every expanded answer. Saved every 25 steps, resumes after any stop; the result goes through `eval_pc.py` like a top-up. |
+| `pretrain_pc.py` | MODE `pretrain` (NVIDIA GPU): the clean base model (v6). Builds the data with `training/pretrain/pretrain_data.py` (FineWeb-Edu, ODC-By 1.0, streamed from Hugging Face + 15% the platform's own docs / code / catalog / rendered rows; no ClimbMix), trains the tokenizer (nanochat `tok_train`, 16,384 tokens, `tokenizer_card.json`), runs nanochat's `scripts/base_train.py` from the pinned commit patched by `training/pretrain/base_setup.py` (NaN guard, 2 newest checkpoints kept, the tokenizer's sha1 in every checkpoint), saved every 200 steps and resumed after any stop, and writes the pack `train_data/base_v6`. `--check` shows the plan and estimates, `--measure 30` the real speed. |
 | `topup_nightly.bat` | Windows: the top-up every night at 01:30 (continues the run, then tests and installs). |
 | `setup_wsl.sh` | Optional: a Python environment in WSL / Linux, where `torch.compile` works (faster full training on a GPU). |
 
@@ -47,6 +48,17 @@ from top to bottom). It drives the three scripts in this folder, which reuse the
   `FULL_CHUNKS = 8` the run is saved every 1000 steps and resumes, with the same learning-rate schedule (each chunk
   continues the previous chunk's model and optimizer; flat lr over the first half, then the linear warmdown; the Muon
   momentum ramp counts the run's steps, not the chunk's) and the same planned mixture read with a new shuffle per chunk.
+- **`pretrain`** (NVIDIA GPU): the clean base model (v6), see `training/pretrain/BASE_V6.md`: d8 at a 2048 window on
+  1.51B tokens (20 per parameter), estimated 11-14 h on an RTX 4060 Laptop, about 5 GB of disk. State in
+  `local_run/pretrain/`; the pack `train_data/base_v6` (tokenizer + card, `base_checkpoints/d8`, VERSION, data card).
+  Never touches `train_data/base` or the installed model. `PRETRAIN_DATA = "drive"` uses shards someone uploaded to
+  Drive `nanochat_base_v6/base_data_climbmix`; a v6 tokenizer on Drive (Colab PROFILE "v6") is used instead of training
+  one, so both sides share it.
+- **`full` with `BASE = "v6"`**: the same SFT run from the clean base, with its own tokenizer (its characters per token
+  size the mixture), no SmolTalk rows (licence, see `training/pretrain/DATA_CARD.md`), state in `local_run/full_v6/`.
+  Cell 6 installs it only if it scores better; the install brings its tokenizer along and keeps the old one.
+  Every model trained from now on records the sha1 of its tokenizer; the assistant, the server and the training
+  scripts refuse a model with a tokenizer it was not trained with (`model_backend.tokenizer_problem`).
 - **`topup`** (default without a GPU): continues the **newest trained model** (Drive's newest, with its optimizer
   state when Drive has it; the PC's own when it already grew from that same Drive model in an earlier top-up: the
   model is known by its Drive file id, so it stays the same model when Colab moves it to
@@ -128,6 +140,8 @@ examples) to `nanochat_base/old_model_<date>`, puts the new `model_<N>.pt` + `me
 rpa model/train_data/sft_render/      training data (from Drive or rendered here; feedback_train.jsonl added here)
 rpa model/train_data/drive_model/     Drive's newest trained model + tokenizer (where a top-up starts)
 rpa model/train_data/base/            the pretrained base model (full training)
+rpa model/train_data/base_v6/         the clean base model (MODE pretrain here, or Drive nanochat_base_v6)
+rpa model/local_run/pretrain/base/    pretraining: shards (base_data_climbmix), tokenizer, the 2 newest checkpoints
 rpa model/local_run/<mode>/           a training run: state.json, train.log, the last two chunks
 rpa model/nanochat_base/              the installed model the assistant uses (+ old_model_<date> backups)
 rpa model/sft/catalog.jsonl, examples.jsonl   the installed model's context (the model pack)
