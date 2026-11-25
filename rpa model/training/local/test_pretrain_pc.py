@@ -253,6 +253,16 @@ def test_a_model_is_only_paired_with_its_own_tokenizer():
         assert MB.tokenizer_problem({}, old) is None and MB.tokenizer_problem({}, stale) is None
         assert "before tokenizers were recorded" in MB.tokenizer_problem({}, new)
         assert MB.tokenizer_problem({}, Path(t) / "none").startswith("no tokenizer.pkl")
+        # an RL checkpoint (rl_setup's patched save) carries its start model's tokenizer sha1, so an RL'd v6 model
+        # is still paired with the v6 tokenizer (and an RL'd old model, with none recorded, with the old one)
+        import rl_setup as RL
+        expr = RL.SAVE_NEW[RL.SAVE_NEW.index("{"):RL.SAVE_NEW.index("}\n") + 1]
+        env = dict(step=1, model_config_kwargs={}, WINDOW=4096, SFT_ID={}, user_config={}, mean_reward=0.0,
+                   _last_eval=None)
+        rl_v6 = eval(expr, dict(env, _sft_meta=dict(v6)))          # noqa: S307 (our own source text)
+        assert rl_v6["tokenizer_sha1"] == v6["tokenizer_sha1"] and MB.tokenizer_problem(rl_v6, new) is None
+        rl_old = eval(expr, dict(env, _sft_meta={}))               # noqa: S307
+        assert MB.tokenizer_problem(rl_old, old) is None and "before tokenizers" in MB.tokenizer_problem(rl_old, new)
         # train_pc / rl_pc: the start pack's own tokenizer; the installed one only for an older model
         rpa = Path(t) / "rpa"
         make_tok(rpa / "nanochat_base" / "tokenizer", b"web")

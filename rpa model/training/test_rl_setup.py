@@ -151,6 +151,7 @@ def test_shares():
 def test_patch_and_command():
     args = T.rl_args("/a b/rl_train.jsonl", "/a b/rl_val.jsonl", 5, samples=4, device_batch=2, device_type="cpu")
     assert "--train-path=/a b/rl_train.jsonl" in args and "--num-steps=5" in args and "--device-type=cpu" in args
+    assert "--model-tag=d8" in args          # chatsft_checkpoints/d8 in, chatrl_checkpoints/d8 out, at any depth
     assert T.rl_command("x", "y", 3).startswith("python -m scripts.chat_rl --train-path=x")
     assert T.t4_minutes_per_100_steps(8, 8) > T.t4_minutes_per_100_steps(4, 8) > 0
     if not NANOCHAT:
@@ -159,6 +160,7 @@ def test_patch_and_command():
     s = open(os.path.join(NANOCHAT, "scripts/chat_rl.py"), encoding="utf-8").read()
     assert T.missing_anchors(s) == []
     p = T.patch_chat_rl(s)
+    assert '"tokenizer_sha1": _sft_meta.get("tokenizer_sha1")' in p   # an RL'd v6 model keeps its tokenizer pairing
     compile(p, "chat_rl.py", "exec")
     for need in ("from tasks.ooa_rl import OOARL", "WINDOW = int(meta.get(\"trained_window\")", "def ooa_prompt_tokens",
                  "train_task.score(conversation", "optimizer.state_dict(), # OOA", "\"trained_window\": WINDOW",
@@ -235,8 +237,12 @@ def cpu_smoke(model_dir):
         d8 = os.path.join(base, "chatrl_checkpoints", "d8")
         assert os.path.exists(os.path.join(d8, "model_000001.pt")) and os.path.exists(os.path.join(d8, "optim_000001_rank0.pt"))
         meta = json.load(open(os.path.join(d8, "meta_000001.json")))
-        assert meta["trained_window"] == 4096 and meta["sft"]["step"] and meta["step"] == 1, meta
-        assert "RL attention window: 4096" in out and "| reward " in out
+        sft_dir = os.path.join(base, "chatsft_checkpoints", "d8")
+        sft_meta = json.load(open(os.path.join(sft_dir, sorted(f for f in os.listdir(sft_dir) if f.startswith("meta_"))[-1])))
+        window = sft_meta.get("trained_window") or 4096                 # the SFT model's window (4096 for the real one)
+        assert meta["trained_window"] == window and meta["sft"]["step"] and meta["step"] == 1, meta
+        assert meta.get("tokenizer_sha1") == sft_meta.get("tokenizer_sha1"), meta
+        assert f"RL attention window: {window}" in out and "| reward " in out
         out2 = run(3)
         assert "RL resumes after step 1" in out2 and "optimizer state resumed" in out2, out2[-2000:]
         assert os.path.exists(os.path.join(d8, "model_000002.pt"))

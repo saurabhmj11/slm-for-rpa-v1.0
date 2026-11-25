@@ -773,6 +773,7 @@ SAVE_NEW = '''        save_checkpoint(
                 "model_config": model_config_kwargs,
                 "trained_window": WINDOW, # OOA: the window RL trained with (the serving window check reads it)
                 "sft": SFT_ID, # OOA: the SFT model this run started from (resume only continues the same one)
+                "tokenizer_sha1": _sft_meta.get("tokenizer_sha1"), # OOA: the start model's tokenizer (the pack must carry it)
                 "user_config": user_config,
                 "rl_reward": mean_reward,
                 "eval": _last_eval,
@@ -847,13 +848,14 @@ def patch_chat_rl(s):
 
 def rl_args(train_path, val_path, steps, samples=8, examples_per_step=8, device_batch=2, sample_batch=0,
             max_new=1536, every=25, eval_examples=40, temperature=1.0, init_lr_frac=0.02, device_type=""):
-    """The patched chat_rl's arguments, as a list (paths may hold spaces). init_lr_frac: RL moves a trained model, so
+    """The patched chat_rl's arguments, as a list (paths may hold spaces). --model-tag=d8: the SFT model is always kept
+    in chatsft_checkpoints/d8 and the RL result goes to chatrl_checkpoints/d8, whatever the depth. init_lr_frac: RL moves a trained model, so
     it starts lower than nanochat's 0.05 (a 75M model drifts fast: its JSON breaks before the reward rises)."""
     out = [f"--train-path={train_path}", f"--val-path={val_path}", f"--num-steps={steps}", f"--num-samples={samples}",
            f"--examples-per-step={examples_per_step}", f"--device-batch-size={device_batch}",
            f"--sample-batch-size={sample_batch}", f"--max-new-tokens={max_new}", f"--temperature={temperature}",
            f"--eval-every={every}", f"--eval-examples={eval_examples}", f"--save-every={every}",
-           f"--init-lr-frac={init_lr_frac}", "--run=dummy"]
+           f"--init-lr-frac={init_lr_frac}", "--model-tag=d8", "--run=dummy"]
     return out + ([f"--device-type={device_type}"] if device_type else [])
 
 
