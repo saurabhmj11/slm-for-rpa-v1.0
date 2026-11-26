@@ -36,6 +36,7 @@ import ooa_format as F
 import retrieval
 import repair as RP
 import safety
+import step_builder as SB
 
 
 @dataclass
@@ -84,6 +85,15 @@ class Policy:
     ask_first: bool = True               # ask-first gate: a request that points at something only the user knows
                                          # ("rename them properly", "the usual folder") gets a question before any
                                          # model runs (ooa_format.ask_first); off in fast mode
+    step_builder: str = "long"           # the step-by-step builder (serving/step_builder.py) in smart / ultra (fast
+                                         # mode sets "off"; without a mode it never runs): "off" | "long" (a long or
+                                         # multi-app request, step_builder.wants) | "always" (any request of 2+ steps);
+                                         # its flow is kept when it covers as much of the request as the single
+                                         # answer or more (step_builder.prefer), or the single answer did not verify
+    step_best_of: int = 3                # samples per step (one batch)
+    step_time: float = 60.0              # seconds the step builder may take: its generations are cut then and no
+                                         # second wave starts after STEP_WAVE_SHARE of it, so the single answer
+                                         # always has the rest of the mode's time (0: only the mode's own limits)
 
     @classmethod
     def load(cls, path=None):
@@ -103,13 +113,15 @@ class Policy:
 # default) picks fast, smart or ultra per request (choose_mode).
 #   fast   planner + one builder + checker: one attempt, no parts, no self-correction (simple requests, 1-5 s on CPU)
 #   smart  the agent team without the critic: planner, parallel builders for long plans, checker, fixer (2 rounds),
-#          reporter; whole answers get 2 self-correction retries
+#          reporter; whole answers get 2 self-correction retries; a long or multi-app request is also built step by
+#          step (serving/step_builder.py) and the better of the two flows is kept
 #   ultra  the whole team: understander (restatement first, when the model was trained for it), best-of-4 answers,
-#          parts from shorter plans, parallel builders (2 samples each), fixer (3 rounds), critic, reporter; stops
-#          starting attempts after 120 s and cuts a generation still running at 150 s (Studio waits 180 s)
+#          parts from shorter plans, parallel builders (2 samples each), fixer (3 rounds), step builder (as smart),
+#          critic, reporter; stops starting attempts after 120 s and cuts a generation still running at 150 s
+#          (Studio waits 180 s)
 MODES = {
     "fast": dict(local_retries=0, use_parts=False, parts_first=False, fixer_rounds=0, understander=False, critic=False,
-                 best_of=1, part_best_of=1, stop_after=0.0, time_limit=60.0, ask_first=False),
+                 best_of=1, part_best_of=1, stop_after=0.0, time_limit=60.0, ask_first=False, step_builder="off"),
     "smart": dict(local_retries=2, use_parts=True, parts_first=True, parallel_parts=True, fixer_rounds=2,
                   understander=False, critic=False, best_of=1, part_best_of=1, stop_after=100.0, time_limit=140.0,
                   ask_first=True),
@@ -122,6 +134,7 @@ MODES = {
 # generate_batch(deadline=) (NanochatLocal); other backends (generate() only, models without plans) are only stopped
 # from starting new attempts at the deadline.
 HARD_GRACE = 30.0
+STEP_WAVE_SHARE = 0.6                # the step builder's second wave starts only in this share of Policy.step_time
 MODE_NAMES = ("auto", "fast", "smart", "ultra")
 MODE_LABELS = {"auto": "Auto", "fast": "Fast", "smart": "Smart", "ultra": "Ultra"}
 AUTO_LONG_CLAUSES, AUTO_LONG_WORDS = 5, 60        # a long process
@@ -134,8 +147,10 @@ def choose_mode(request, rewrite=False):
       2. vague  no file, folder, app or data named at all: ultra when the model can restate a request
                 (rewrite rows in its training: the understander then runs), else smart
       3. fast   2 clauses or fewer, 25 words or fewer, no loop words (each, every, repeat ...) and no condition words
-                (if, when, otherwise, only ...)
-      4. smart  everything else (a loop, a condition, 3-4 clauses, a longer sentence)"""
+                (if, when, otherwise, only ...), and not work across apps that the step builder takes
+                (step_builder.wants: 2+ steps in 2+ named apps)
+      4. smart  everything else (a loop, a condition, 3-4 clauses, a longer sentence, steps in several apps)
+    Smart and ultra build a long or multi-app request step by step too (Policy.step_builder)."""
     f = F.request_features(request)
     if f["clauses"] >= AUTO_LONG_CLAUSES or f["words"] > AUTO_LONG_WORDS:
         return "ultra", f"a long process of {f['clauses']} parts"
@@ -143,6 +158,8 @@ def choose_mode(request, rewrite=False):
         return ("ultra" if rewrite else "smart"), "no file, app or data is named"
     if (f["clauses"] <= AUTO_FAST_CLAUSES and f["words"] <= AUTO_FAST_WORDS and not f["loop"]
             and not f["condition"]):
+        if SB.wants(request):
+            return "smart", "steps in several apps"
         return "fast", "a short, simple request"
     why = "a loop" if f["loop"] else "a condition" if f["condition"] else f"{f['clauses']} parts"
     return "smart", why
@@ -271,9 +288,11 @@ class Router:
             return said
         return "context" if self.examples is not None else "plain"
 
-    def prompt(self, request, existing=None, previous=None, problems=None, required=()):
-        """The user turn for the local model: the request + retrieval context (+ previous flow and problems)."""
-        examples = self.examples.search(request, F.MAX_EXAMPLES) if self.examples is not None else []
+    def prompt(self, request, existing=None, previous=None, problems=None, required=(), similar=True):
+        """The user turn for the local model: the request + retrieval context (+ previous flow and problems).
+        similar=False: no similar examples (the step builder's freer samples: a short step request copies a similar
+        example's whole outline too readily)."""
+        examples = self.examples.search(request, F.MAX_EXAMPLES) if self.examples is not None and similar else []
         actions, keep = F.context_actions(request, (), self.cat, self.index, self.policy.context_k, examples=examples,
                                           example_index=self.examples)
         have = {e["id"] for e in actions}
@@ -686,7 +705,10 @@ class Router:
             out = self._local(request, existing, tried, late, can_escalate)
             self._agent("builder (flow only, a model without plans)", t, attempts=len(tried))
             return out
-        out = self._team_answer(request, existing, tried, late, can_escalate, hard)
+        if self.wants_steps(request):
+            out = self._steps_then_single(request, existing, tried, late, can_escalate, hard)
+        else:
+            out = self._team_answer(request, existing, tried, late, can_escalate, hard)
         if out.get("flow") is not None and self.policy.critic and not late():
             out = self._critic(request, out, existing, tried, late, hard)
         return out
@@ -903,6 +925,58 @@ class Router:
         return flow, info + [f"built in {n} parts from the plan, at once"] + [
             f"part {k}: '{a}' is '{b}' of an earlier part" for k, a, b in links]
 
+    def wants_steps(self, request):
+        """Whether the step-by-step builder runs for this request (Policy.step_builder): "always" for any request of
+        2+ steps, "long" for a long or multi-app one (step_builder.wants), never with "off" or a model without plans."""
+        mode = self.policy.step_builder
+        if mode not in ("long", "always") or self.format() != "context":
+            return False
+        return SB.wants(request) if mode == "long" else len(SB.split_steps(request)) >= 2
+
+    def _steps_then_single(self, request, existing, tried, late, can_escalate, hard):
+        """A long or multi-app request (wants_steps): the step builder first (serving/step_builder.py: the request
+        cut into steps, all built at once as short checked pieces, joined and checked), then the single answer (the
+        planner and its builders, as for any request) in the time left, and the better of the two flows is kept
+        (step_builder.prefer: the single answer when the step path failed or the single answer covers more of the
+        request). A step-built flow that leaves no clause of the request uncovered is kept without the single answer
+        (it cannot be beaten on coverage; this also keeps such requests inside the time limits). A question from the
+        single answer is asked only when the step path failed."""
+        steps = SB.split_steps(request)
+        t = time.time()
+        s_late, s_hard = late, hard
+        if self.policy.step_time:
+            wave_end, cut = t + STEP_WAVE_SHARE * self.policy.step_time, t + self.policy.step_time
+            s_late = lambda: late() or time.time() >= wave_end
+            s_hard = min(hard, cut) if hard is not None else cut
+        try:
+            flow, notes, info = SB.build(self, request, existing, tried, s_late, s_hard, steps=steps,
+                                         temperatures=SB.STEP_TEMPERATURES[:max(1, self.policy.step_best_of)])
+        except Exception as ex:                       # never lose the request to the step path
+            flow, notes, info = None, [f"step builder error: {ex}"], {"steps": [s["text"] for s in steps]}
+        summary = {"steps": info.get("steps") or [], "built": info.get("built", 0), "failed": info.get("failed") or [],
+                   "verified": flow is not None, "kept": False, "seconds": info.get("seconds"),
+                   "model_calls": info.get("model_calls", 0)}
+        self._agent("step builder", t, steps=len(summary["steps"]), built=summary["built"], ok=flow is not None)
+        stepped = None
+        if flow is not None:
+            stepped = {"flow": flow, "notes": notes, "plan": F.plan_from_flow(flow, self.cat), "clear": None,
+                       "step_builder": summary}
+            if SB.coverage(self, request, flow) == 0:
+                summary.update(kept=True, single="skipped: the steps cover the whole request")
+                return stepped
+        if late():
+            if stepped is not None:
+                summary["kept"] = True
+                return stepped
+            return {"errors": list(notes) + [OUT_OF_TIME], "plan": [], "step_builder": summary}
+        out = self._team_answer(request, existing, tried, late, can_escalate, hard)
+        if stepped is None:
+            return {**out, "step_builder": summary}
+        if out.get("question") or SB.prefer(self, request, flow, out.get("flow"), steps):
+            summary["kept"] = True
+            return {**stepped, "clear": out.get("clear")}
+        return {**out, "step_builder": summary}
+
     def _critic(self, request, out, existing, tried, late, hard):
         """Coverage check of a verified flow against the request (ooa_format.uncovered_clauses: a clause that names
         something to do and that no step covers). Each such clause is built once as a new part (one batch) and
@@ -960,7 +1034,7 @@ class Router:
         return self._run(request, system, assistant, existing, full_user, deadline)
 
     def _run(self, request, system=None, assistant=False, existing=None, full_user=None, deadline=None):
-        t0, tried, errors, plan = time.time(), [], [], []
+        t0, tried, errors, plan, failed = time.time(), [], [], [], None
         p = self.policy
         asked_by = deadline                     # the caller's own deadline (set when the request arrived)
         if p.stop_after:
@@ -997,6 +1071,7 @@ class Router:
                 return self.done(request, None, "local", tried, [], t0, assistant, existing, reason=ASKED,
                                  question=out["question"])
             errors, plan = out["errors"], out["plan"]
+            failed = {k: out[k] for k in ("step_builder",) if out.get(k)}
         elif self.local is not None:
             errors = ["request looks complex; skipped the local model"]
         if can_escalate:
@@ -1026,7 +1101,7 @@ class Router:
         reason = ("no model produced a flow that passed verification" if can_escalate
                   else "the local model could not produce a verified flow, and cloud escalation is disabled by this client's policy")
         return self.done(request, None, "none", tried, errors or [reason], t0, assistant, existing, reason=reason,
-                         plan=plan)
+                         plan=plan, critic=failed)
 
     def done(self, request, flow, source, tried, info, t0, assistant=False, existing=None, reason=None, plan=None,
              question=None, parts=False, understood=None, critic=None):
@@ -1047,7 +1122,7 @@ class Router:
         if mode:
             res.update(mode=mode["mode"], mode_asked=mode["asked"], mode_reason=mode["why"], report=report,
                        agents=list(self._agents or []))
-            for k in ("critic_added", "critic_missing"):
+            for k in ("critic_added", "critic_missing", "step_builder"):
                 if (critic or {}).get(k):
                     res[k] = critic[k]
         if parts:

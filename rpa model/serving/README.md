@@ -103,6 +103,31 @@ The team is one model playing roles with different prompts (`Router._team`):
   (`link_part_variables`), then merges (`merge_flows`).
 - **checker**: repair + verify for each answer, part and the merged flow. **fixer**: rebuilds only the failed parts
   (batched), each with its previous flow and problems; whole answers get self-correction retries.
+- **step builder** (smart, ultra; `serving/step_builder.py`, `Policy.step_builder`: "long" by default, "off",
+  "always"): for a long or multi-app request (`step_builder.wants`: 3+ steps with 25+ words or a loop / if, or 2+
+  steps in 2+ named apps) the request itself is cut into steps by rules (sentences, ";", then / after that / also /
+  finally, ", <verb>", " and <verb>"; "for each ..." opens a loop, "if ..." an if, "otherwise ..." its else, a step
+  after "then" that sums up ("how many", "the list") closes the loop). Each step is asked as a short plain request
+  of its own ("Read the total for the invoice PDF": pronouns and "each one" made concrete) with retrieval for that
+  step and the variables known for it; ALL steps go into ONE batched generation, best-of-3 at temperatures
+  0.2 / 0.6 / 0.9, each answer checked; the best checked piece of a step is the one that agrees with the other
+  samples, uses the step's best catalog matches and the action its verb points at, and adds nothing it did not ask
+  for (no extra loop or if, no app nobody named, few actions). Loops are built by code (the newest collection
+  before them, a table through `to_records`, then `core/loop`); failed steps are asked once more (one batch) with
+  their problems and the variables the steps before them made; a step whose piece lacks what its words clearly ask
+  for ("email the team ..." without an email) is asked again in other words. A step whose words clearly point at
+  actions ("keep the ones whose ..." -> a filter, "more than 7 days ago" -> now / parse / difference, "collect the
+  links", "working days", a free slot in Outlook; `STEP_HINTS`) gets one more, guided sample in the same batch: its
+  answer starts with those actions as its plan and the model writes the flow (kept only when it passes the checker).
+  A story ("First I open ..., then I ...") drops its "I" / "we" and the sentences about the bot ("Can the bot do
+  this?"); auto leaves a story in fewer than 2 named apps to the single answer. The pieces are joined into their
+  containers, their variables linked, then repaired and checked as a whole. It runs BEFORE the single answer: a
+  step-built flow that leaves no clause of the request uncovered is kept at once; otherwise the single answer runs
+  in the time left and the step-built flow is kept unless the single answer covers more of the request's clauses
+  (`step_builder.prefer`). The reply's `ooa` field has `step_builder` (steps, built, failed, verified, kept,
+  seconds, model_calls). The step path has its own time budget (`Policy.step_time`, 60 s: its generations are cut
+  then, and its second wave starts only in the first 60% of it), so the single answer always has the rest of the
+  mode's time. Fast mode never runs it.
 - **critic** (ultra): a request clause that names something to do and that no step covers (`uncovered_clauses`) is
   built once as a new part and added; if that fails the check, the flow stays and the report says what to check.
 - **reporter**: the summary above. With `store_logs`, requests.jsonl rows carry the mode and the agents' times.
@@ -122,6 +147,7 @@ The team is one model playing roles with different prompts (`Router._team`):
 | context_chars | context budget in characters (0: what the model was trained with) |
 | parts_first, long_clauses, long_plan_lines, part_lines | parts at once for long plans (true, 5, 4, 5) |
 | max_tokens, part_max_tokens | answer budget for a whole flow / one part (2500, 1500; the backend keeps it inside its window) |
+| step_builder, step_best_of, step_time | the step builder in smart / ultra: "long" (default), "off" or "always"; samples per step (3); its time budget in seconds (60; 0: only the mode's limits) |
 
 ## Platform contract (model connection "OneOffice in-house model")
 

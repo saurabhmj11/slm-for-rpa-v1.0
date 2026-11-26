@@ -40,6 +40,7 @@ files = {
     "constrained.py": (H.parent / "assistant/constrained.py").read_text(encoding="utf-8"),
     "serving/ooa_server.py": (H.parent / "serving/ooa_server.py").read_text(encoding="utf-8"),
     "serving/backends.py": (H.parent / "serving/backends.py").read_text(encoding="utf-8"),
+    "serving/step_builder.py": (H.parent / "serving/step_builder.py").read_text(encoding="utf-8"),
     "flow_check.py": (H.parent / "eval/flow_check.py").read_text(encoding="utf-8"),
     "plain_requests.jsonl": (H.parent / "eval/plain_requests.jsonl").read_text(encoding="utf-8"),
     "plain_requests_2.jsonl": (H.parent / "eval/plain_requests_2.jsonl").read_text(encoding="utf-8"),

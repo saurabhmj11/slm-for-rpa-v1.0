@@ -138,7 +138,7 @@ def test_parallel_builders_and_assembler():
     loop after the part that writes the loop; the assembler merges them into the whole flow."""
     answer, _ = _loop_answer()
     m = BatchAware(answer)
-    res = router(m, mode="smart").run(LOOP_REQ)
+    res = router(m, mode="smart", step_builder="off").run(LOOP_REQ)     # the parts alone (no step builder after)
     assert res["verified"] and res.get("built_in_parts") and res["mode"] == "smart", res
     assert m.batches == [1, 2, 1], m.batches                     # planner; parts 1 + 3 together; part 2 (inside)
     assert m.options[0]["on_plan"] and all(not o["on_plan"] for o in m.options[1:])
@@ -153,7 +153,7 @@ def test_parallel_builders_and_assembler():
 def test_fixer_rebuilds_only_failed_parts():
     answer, seen = _loop_answer(fail_part3_first=True)
     m = BatchAware(answer)
-    res = router(m, mode="smart").run(LOOP_REQ)
+    res = router(m, mode="smart", step_builder="off").run(LOOP_REQ)
     assert res["verified"] and res.get("built_in_parts"), res
     assert m.batches == [1, 2, 1, 1] and seen["p3"] == 2, m.batches      # the fixer's batch has part 3 only
     fixer = [a for a in res["agents"] if a["agent"] == "fixer"]
@@ -386,7 +386,9 @@ def test_end_to_end_server():
         out = post({"model": "ooa-assistant", "messages": [{"role": "user", "content": LOOP_REQ}]},
                    {"X-OOA-Mode": "smart"})
         assert out["ooa"]["verified"] and out["ooa"]["mode"] == "smart" and out["ooa"]["built_in_parts"]
-        assert [a["agent"] for a in out["ooa"]["agents"]][:3] == ["planner", "checker", "builders"]
+        # the step builder runs first for this long request (its pieces fail on this fake model); then the team
+        agents = [a["agent"] for a in out["ooa"]["agents"]]
+        assert agents[0] == "step builder" and agents[1:4] == ["planner", "checker", "builders"], agents
         out = post({"model": "ooa-flow-assistant", "messages": [{"role": "user", "content": LOOP_REQ}]})
         assert out["ooa"]["mode"] == "ultra" and out["ooa"]["mode_asked"] == "auto" and out["model"] == "ooa-flow-assistant"
         assert out["ooa"]["report"].startswith("Mode: Ultra (picked by Auto: a long process")
