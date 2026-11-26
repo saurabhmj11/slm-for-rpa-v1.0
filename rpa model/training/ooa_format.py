@@ -478,6 +478,8 @@ MAX_UNDERSTAND_CHARS = 200    # a flow description longer than this is not used 
 MAX_DERIVED_UNDERSTAND = 140  # a sentence made from the steps (clear_request) is cut to this: Steps says the rest
 MAX_FACTS = 6                 # facts per answer (the first ones in flow order)
 MAX_FACT_CHARS = 60           # a longer literal (a mail body, a script) is not a fact
+# arguments that name the flow's own things (a loop item, a session, a variable, a label), not the user's details
+INTERNAL_ARG_KEYS = {"as", "session", "iterator", "variable", "index_as", "error_as"}
 _NONE_WORDS = {"", "none", "nothing", "no", "-", "n/a"}
 _STEP_ARROW = re.compile(r"\s+->\s*(?P<action>[\w.\-]+/[\w.\-]+)\s*$")
 _STEP_PAREN = re.compile(r"\s*\((?P<action>[\w.\-]+/[\w.\-]+)\)\s*$")
@@ -564,14 +566,20 @@ def flow_facts(flow, request, limit=MAX_FACTS):
     value (a path, file name, address, folder, number, word) appears in the request is a fact named after the
     argument ("to = ap@acme.com"); a condition comparing with a literal of the request is "filter = amount > 1000".
     Values longer than MAX_FACT_CHARS or holding variables are left out; each value once. A schedule the request
-    names comes first ("schedule = daily at 9", schedule_of)."""
+    names comes first ("schedule = daily at 9", schedule_of). The flow's internal names are no facts even when the
+    request uses the word: INTERNAL_ARG_KEYS arguments (a loop's "as", a session name, a set variable) and a value
+    that is the name of one of the flow's variables."""
     req = " ".join(str(request or "").split()).lower()
     out, seen = [], set()
+    internal = {str(v.get("name")).lower() for v in (flow.get("variables") if isinstance(flow, dict) else None) or []
+                if isinstance(v, dict) and v.get("name")}
     when = schedule_of(request)
     if when:
         out.append(("schedule", when))
 
     def add(key, value):
+        if key in INTERNAL_ARG_KEYS or (value and value.lower() in internal):
+            return
         if value and value.lower() not in seen and len(out) < limit and _in_request(value, req):
             seen.add(value.lower())
             out.append((key, value))
@@ -601,7 +609,8 @@ def flow_facts(flow, request, limit=MAX_FACTS):
     for s, _ in walk(flow.get("steps") if isinstance(flow, dict) else flow):
         args = s.get("args") if isinstance(s.get("args"), dict) else {}
         for k, v in args.items():
-            arg(k, v)
+            if k not in INTERNAL_ARG_KEYS:
+                arg(k, v)
     return out
 
 

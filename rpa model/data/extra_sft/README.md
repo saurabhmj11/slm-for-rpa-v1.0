@@ -17,8 +17,18 @@ made after the last Colab render, so the PC notebook can train on them even when
   who gets it, which rule, which system) -> one question.
 
 Every flow passed repair.session_fix (no change) and has no ooa_reward problems against data/catalog/catalog.jsonl and
-the platform's flow.v1 schema; every flow request names the details its flow hard-codes (addresses, channels, sheets,
-columns, thresholds, input paths); no request is too close (eval/beginner_score.too_close) to any eval/*.jsonl prompt.
+the platform's flow.v1 schema; no request is too close (eval/beginner_score.too_close) to any eval/*.jsonl prompt.
+
+Grounding (`training/grounding_check.py`, fixed by `training/fix_grounding.py`, tested by `training/test_grounding.py`):
+a flow hard-codes only details its request (for a step-builder part: the step text and the known variables) gives.
+Anything else -- a saved connection (`$jira_connection`, as the platform's Connections), an address, a SharePoint site,
+a team / channel / group / sheet / table / procedure / warehouse / mailbox / project name, a link, a path or the folder
+of a path -- is an input variable with a description and no default; a file the flow makes in a folder the request
+names keeps its name. The texts (clear, understand, facts, steps lines, flow / step descriptions) only repeat the
+request. A value built from a row inside text is written `${row.Name}` (`D:\out\${row.Name}.txt`; a bare `$row.Name`
+inside text is sent literally). Clarify records carry "missing". After a regenerate, run
+`python training/fix_grounding.py data/extra_sft/*.jsonl` and `python training/grounding_check.py data/extra_sft/*.jsonl`
+(exit 0 = nothing made up).
 Records carry the thinking fields (understand, facts, missing, steps) for render_dataset.py --think.
 
 `training/local/data_pc.py` uses a file from here only when Drive's `sft/` does not have it (Drive's upload wins), and

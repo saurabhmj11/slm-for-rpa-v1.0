@@ -134,6 +134,20 @@ def test_facts():
     assert F.flow_facts(templ, "save report_q1.csv") == [("path", "report_q1.csv")]
     assert F.flow_facts({"steps": [{"action": "x/y", "args": {"sheet": "Sheet1"}}]}, "sheet 1") == []
     assert F.parse_facts(F.facts_text(facts)) == facts
+
+
+def test_facts_skip_internal_names():
+    """A loop variable, a session name or a set variable is the flow's own name, not a fact of the request."""
+    flow = {"variables": [{"name": "hire", "type": "Any", "direction": "local"},
+                          {"name": "down", "type": "Number", "direction": "local"}],
+            "steps": [{"action": "ooa.csv/open", "args": {"path": "D:\\Data\\customers.csv", "session": "data"}},
+                      {"action": "core/loop", "args": {"iterator": "list", "over": "$rows", "as": "hire"},
+                       "children": [{"action": "core/set", "args": {"variable": "down", "value": 0}},
+                                    {"action": "ooa.email/send", "args": {"to": "hr@acme.com", "subject": "hire"}}]}]}
+    req = "Open D:\\Data\\customers.csv, read the data list and for each new hire count the down hosts, mail hr@acme.com"
+    facts = F.flow_facts(flow, req)
+    assert ("path", "D:\\Data\\customers.csv") in facts and ("to", "hr@acme.com") in facts
+    assert all(v.lower() not in ("data", "list", "hire", "down") for _, v in facts), facts
     assert F.parse_facts("none") == [] and F.facts_text([]) == "none"
     assert F.fact_coverage([("to", "boss@acme.com"), ("schedule", "daily")], FLOW) == [("to", "boss@acme.com")]
     assert F.schedule_of("roz subah 9 baje") == "roz subah" and F.schedule_of("daily at 7 am send it") == "daily at 7 am"
