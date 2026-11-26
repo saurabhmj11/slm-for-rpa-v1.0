@@ -132,6 +132,29 @@ def test_answer_watch_reads_a_restated_request():
     bad = clear + PLAN3 + '{"kind":"TaskBot","steps":[' + "".join(_step(i) for i in range(1, 30))
     assert _watch_feed(w, bad) is not None and "steps for a plan of 3 lines" in w.reason, w.reason
 
+THINK3 = ("Understand: Move every file of the folder.\nFacts: folder = C:\\In\nMissing: none\nSteps:\n"
+          "1. List the files -> ooa.file/list\n2. For each file -> core/loop\n  3. Move it -> ooa.file/move\n"
+          "Check: 3 steps, 1 loop, all facts used\nFlow:\n")
+
+
+def test_answer_watch_reads_a_thinking_answer():
+    """A thinking answer (Understand / Facts / Missing / Steps / Check): on_plan gets the Steps lines only, the flow is
+    checked against them, the block's header lines never count as a looping plan."""
+    seen = []
+    w = AnswerWatch(lambda piece: piece, on_plan=lambda plan: seen.append(plan) or len(plan) > 2)
+    n = _watch_feed(w, THINK3 + '{"steps":[' + _step(1), pieces=1)
+    assert n == len(THINK3) - 1 and w.kind == "plan" and len(seen[0]) == 3, (n, seen)
+    assert seen[0][0] == "1. List the files -> ooa.file/list"
+    w = AnswerWatch(lambda piece: piece)
+    assert _watch_feed(w, THINK3 + '{"steps":[' + "".join(_step(i) for i in range(1, 4)) + "]}") is None
+    w = AnswerWatch(lambda piece: piece)
+    bad = THINK3 + '{"steps":[' + "".join(_step(i) for i in range(1, 30))
+    assert _watch_feed(w, bad) is not None and "steps for a plan of 3 lines" in w.reason, w.reason
+    # 40 plan lines plus the five header lines is not "past 40 lines"
+    long = THINK3.split("Steps:")[0] + "Steps:\n" + "".join(f"{i}. Step {i} -> ooa.file/move\n" for i in range(1, 41))
+    assert _watch_feed(AnswerWatch(lambda p: p), long + "Check: 40 steps\nFlow:\n{") is None
+
+
 def test_answer_watch_on_plan_stops_after_the_plan():
     seen = []
     w = AnswerWatch(lambda piece: piece, on_plan=lambda plan: seen.append(plan) or len(plan) > 2)

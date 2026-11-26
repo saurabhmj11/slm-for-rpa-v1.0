@@ -157,6 +157,10 @@ FORCE_DATA = False         # cells 6 / 6d skip their work when Drive already has
                            # SFT run is in progress on it). True: build and render it again (from the newest platform)
 ANSWER_FORMAT = "compact"  # cell 6d: answers carry only what the model decides (no variables list, step ids or descriptions);
                            # the server and cell 8 rebuild the full flow (ooa_format.expand_flow). "full" = the old answers
+THINK_FILES = ()           # cell 6d: files whose answers think first (Understand / Facts / Missing / Steps / Check, then the
+                           # flow or the question; render_dataset.py --think), e.g. ("v5_train.jsonl", "session_train.jsonl")
+                           # or ("all",); () = plan-first answers only. Train a mix only on a fresh SFT (the server reads
+                           # it from render_report.json and gives such a model's parts a thinking start)
 GOLD_DROPOUT = 0.5         # cell 6d: share of flow rows whose context misses 20-45% of the needed actions (retrieval misses
                            # them at serving too); 0 = the needed actions are always listed (the old data)
 OLD_FORMAT_CELLS = False   # cells 10-13 (self-improvement, autoresearch, whole-assistant demo) still use plain prompts and
@@ -493,6 +497,8 @@ if RENDER:
                "src": _src, "extra": sorted([os.path.basename(f), os.path.getsize(f)] for f in _extra),
                "code": _SC.code_sig("/content/ooa", _SC.CELL6D_CODE), "max_chars": ROW_CHARS, "max_tokens": ROW_TOKENS,
                "answer_format": ANSWER_FORMAT, "gold_dropout": GOLD_DROPOUT}
+    if THINK_FILES:
+        _want6d["think"] = sorted(THINK_FILES)
     SKIP6D, _why6d = _SC.data_skip(DRIVE_DIR, _SC.STAMP6D, _want6d, _SC.CELL6D_OUT, globals().get("FORCE_DATA", False),
                                    os.environ["NANOCHAT_BASE_DIR"], restart=globals().get("RESTART_SFT", False))
     if SKIP6D:
@@ -505,7 +511,8 @@ if RENDER:
         if os.path.exists(f"{DRIVE_DIR}/sft_render"):
             shutil.rmtree(f"{DRIVE_DIR}/sft_render")
         _x = " ".join(_extra)
-        !cd /content/ooa && python render_dataset.py {_src} {DRIVE_DIR}/sft_render --catalog {DRIVE_DIR}/sft/catalog.jsonl --max-chars {ROW_CHARS} --max-tokens {ROW_TOKENS} --answer-format {ANSWER_FORMAT} --gold-dropout {GOLD_DROPOUT} --extra {_x}
+        _th = ("--think " + " ".join(THINK_FILES)) if THINK_FILES else ""
+        !cd /content/ooa && python render_dataset.py {_src} {DRIVE_DIR}/sft_render --catalog {DRIVE_DIR}/sft/catalog.jsonl --max-chars {ROW_CHARS} --max-tokens {ROW_TOKENS} --answer-format {ANSWER_FORMAT} --gold-dropout {GOLD_DROPOUT} {_th} --extra {_x}
         # catalog question rows stay as they are
         shutil.copy(f"{_src}/train_catalog.jsonl", f"{DRIVE_DIR}/sft_render/train_catalog.jsonl")
         _r = json.load(open(f"{DRIVE_DIR}/sft_render/render_report.json"))

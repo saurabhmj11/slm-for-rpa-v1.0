@@ -65,6 +65,7 @@ REPO_EXTRA = ("data", "extra_sft")                             # "rpa model"/dat
 COPY_RE = re.compile(r" \(\d+\)(\.[^./]+)?$")                  # "long_train (1).jsonl": a second upload
 ANSWER_FORMAT = "compact"                                      # Colab cell 1 ANSWER_FORMAT
 GOLD_DROPOUT = 0.5                                             # Colab cell 1 GOLD_DROPOUT
+THINK_FILES = ()                                               # Colab cell 1 THINK_FILES (thinking answers)
 FILTER_CAP = 60                                                # Colab cell 6: data_filter.py --cap 60
 
 
@@ -506,6 +507,7 @@ def render_extras(rpa, data, sources, log=print):
            "--answer-format", st.get("answer_format", ANSWER_FORMAT),
            "--gold-dropout", st.get("gold_dropout", GOLD_DROPOUT),
            "--dropout-frac", ",".join(str(x) for x in st.get("dropout_frac", (0.2, 0.45))),
+           *(["--think", *st["think"]] if st.get("think") else []),
            "--extra", *[sources[n] for n in T.RENDER_EXTRA if n in sources]]
     rc = run_step(cmd, log)
     if rc != 0:
@@ -550,7 +552,8 @@ def render_local(rpa, seq=4096, log=print, platform=None, filter_here=True, repo
         "cell 6d; 30-60 minutes) ...")
     rc = run_step([sys.executable, tr / "render_dataset.py", src, tmp, "--catalog", sft / "catalog.jsonl",
                    "--max-chars", row_chars(seq), "--max-tokens", row_tokens(seq),
-                   "--answer-format", ANSWER_FORMAT, "--gold-dropout", GOLD_DROPOUT, "--extra", *extra], log)
+                   "--answer-format", ANSWER_FORMAT, "--gold-dropout", GOLD_DROPOUT,
+                   *(["--think", *THINK_FILES] if THINK_FILES else []), "--extra", *extra], log)
     if rc != 0:
         raise SystemExit("render_dataset.py failed (see above)")
     if (src / "train_catalog.jsonl").exists():                 # catalog question rows stay as they are
@@ -583,9 +586,15 @@ def add_feedback(rpa, data, log=print):
         seq = json.loads((data / "render_report.json").read_text(encoding="utf-8"))["settings"]["max_tokens"] + 28
     except (OSError, ValueError, KeyError, TypeError):
         seq = 4096
+    try:                                                       # data that thinks everywhere: feedback rows think too
+        think = "all" in (json.loads((data / "render_report.json").read_text(encoding="utf-8"))["settings"].get("think")
+                          or ())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        think = False
     r = run_quiet([sys.executable, rpa / "training" / "render_dataset.py", work / "empty", work / "out",
                    "--catalog", data / "catalog.jsonl", "--max-chars", row_chars(seq), "--max-tokens", row_tokens(seq),
-                   "--answer-format", ANSWER_FORMAT, "--gold-dropout", GOLD_DROPOUT, "--extra", rec])
+                   "--answer-format", ANSWER_FORMAT, "--gold-dropout", GOLD_DROPOUT,
+                   *(["--think", "all"] if think else []), "--extra", rec])
     out = work / "out" / "feedback_records.jsonl"
     if r.returncode != 0 or not out.exists():
         log("feedback: render failed", r.stderr.strip()[-300:])

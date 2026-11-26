@@ -3,7 +3,7 @@
     python render_dataset.py SRC_DIR OUT_DIR --catalog CATALOG.jsonl [--k 12] [--seed 7] [--extra FILE ...]
                              [--variables-rate 0.3] [--reply-context 0.5] [--max-chars 6500] [--max-tokens 2020]
                              [--no-parts] [--answer-format compact|full] [--gold-dropout 0.5] [--dropout-frac 0.2,0.45]
-                             [--examples-from EARLIER/examples.jsonl]
+                             [--examples-from EARLIER/examples.jsonl] [--think NAME ... | all]
 
 Reads every chat file SRC_DIR/*.jsonl ({"messages": [...]} rows, e.g. sft_clean/) and every neutral-record file given
 with --extra ({"kind": "flow"|"fix"|"clarify", ...}), and writes OUT_DIR/<same name>.jsonl in chat format:
@@ -27,6 +27,12 @@ with --extra ({"kind": "flow"|"fix"|"clarify", ...}), and writes OUT_DIR/<same n
   - --gold-dropout (default 0.5) of the flow / fix rows get a context that misses --dropout-frac (20-45%) of the
     needed actions (never core/loop, core/if; ooa_format.drop_gold), so the model learns to write an action it knows
     when retrieval did not offer it. Plan and flow still use the right action.
+  - --think NAME ...: the flow / fix / rewrite / clarify rows of these files (output names, e.g. v5_train.jsonl, or
+    "all") get the thinking answer (ooa_format "thinking answers": Understand / Facts / Missing / Steps / Check before
+    the flow or the question; render_think_answer). Other files keep plan-first answers, so a mix trains both; a
+    record's own boolean "think" overrides its file. Records may carry hand-written "understand", "facts", "steps"
+    (and "missing" for clarify); the rest is derived from the flow. Parts of a long flow get Understand = the part
+    request and no facts, as the server's think_prefix writes them.
 Files named val*.jsonl / eval*.jsonl are held out: rendered the same way, never used as examples.
 Also writes OUT_DIR/examples.jsonl (the example index the server loads), OUT_DIR/catalog.jsonl and
 OUT_DIR/render_report.json. Standard library only; one pass to load, one to render (about 60k rows in a few minutes).
@@ -121,10 +127,11 @@ def load_items(path, extra, cat, fixes):
 
 def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.3, reply_context=0.5,
            max_chars=F.MAX_ROW_CHARS, parts=True, log=print, max_tokens=F.MAX_ROW_TOKENS, answer_format=F.ANSWER_COMPACT,
-           gold_dropout=F.GOLD_DROPOUT, dropout_frac=F.GOLD_DROPOUT_FRAC, examples_from=None):
+           gold_dropout=F.GOLD_DROPOUT, dropout_frac=F.GOLD_DROPOUT_FRAC, examples_from=None, think=()):
     """examples_from: an examples.jsonl of an earlier render (e.g. Colab's sft_render); its requests come first in the
     example index, then this render's, so a file rendered alone (training/local/data_pc.py: a new --extra file that
-    Colab's render lacks) sees the same examples as in one render of everything."""
+    Colab's render lacks) sees the same examples as in one render of everything.
+    think: output file names whose rows get thinking answers ("all": every file)."""
     t0 = time.time()
     src, out = Path(src), Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -172,23 +179,25 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
                            "max_chars": max_chars, "max_tokens": max_tokens,
                            "format": F.FORMAT_COMPACT if answer_format == F.ANSWER_COMPACT else F.FORMAT_VERSION,
                            "answer_format": answer_format, "gold_dropout": gold_dropout,
-                           "dropout_frac": list(dropout_frac),
+                           "dropout_frac": list(dropout_frac), "think": sorted(set(think or ())),
                            "max_context_chars": F.context_for(F.window_of(max_tokens)),
                            "clauses": {"min": F.CLAUSE_MIN, "k": F.CLAUSE_K, "votes": F.CLAUSE_VOTES,
                                        "whole_votes": F.WHOLE_VOTES, "max_actions": F.MAX_CONTEXT_ACTIONS}},
               "files": {}, "examples": len(ex_index), "session_fixes": fixes[0]}
     for name, items, bad in loaded:
         rng = random.Random(f"{seed}:{name}")
+        think_file = "all" in (think or ()) or name in (think or ())
         c = {"rows": len(items), "written": 0, "flow": 0, "fix": 0, "clarify": 0, "rewrite": 0, "kept": 0, "reply_with_context": 0,
-             "part": 0, "split_long": 0,
+             "part": 0, "split_long": 0, "think": 0,
              "skipped_too_long": 0, "skipped_unusable": bad, "max_chars": 0, "chars": 0}
         with open(out / name, "w", encoding="utf-8") as f:
             for it in items:
                 row = None
                 if it["type"] == "record":
                     rec = it["record"]
+                    rec_think = rec["think"] if isinstance(rec.get("think"), bool) else think_file
                     row = F.render_chat(rec, cat, index, ex_index, rng, k, variables_rate, max_chars, max_tokens,
-                                        **opts)
+                                        think=rec_think, **opts)
                     if row is None:
                         c["skipped_unusable"] += 1
                         continue
@@ -196,6 +205,7 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
                         row["messages"] = it["system"] + row["messages"]
                     kind = rec.get("kind")
                 elif it["type"] == "chat":
+                    rec_think = False
                     row, kind = it["row"], "kept"
                     if it.get("single") and it.get("request") and rng.random() < reply_context:
                         msgs = [dict(m) for m in row["messages"]]
@@ -214,9 +224,11 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
                     # too long for the window: teach it in parts, the way the server builds a long flow
                     rows = []
                     for req, part, carried in F.split_flow(rec["flow"], cat):
-                        prow = F.render_chat({"kind": "flow", "request": req, "flow": part, "variables": carried},
-                                             cat, index, ex_index, rng, k, variables_rate, max_chars, max_tokens,
-                                             **opts)
+                        prec = {"kind": "flow", "request": req, "flow": part, "variables": carried}
+                        if rec_think:            # as the server's think_prefix gives a part: its request, no facts
+                            prec.update(understand=req, facts=[])
+                        prow = F.render_chat(prec, cat, index, ex_index, rng, k, variables_rate, max_chars, max_tokens,
+                                             think=rec_think, **opts)
                         if prow is not None:
                             rows.append((prow, "part"))
                     c["split_long"] += 1 if rows else 0
@@ -227,6 +239,8 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
                         c["skipped_too_long"] += 1
                         continue
                     c[kind] += 1
+                    if rec_think and kind not in ("kept", "reply_with_context"):
+                        c["think"] += 1
                     c["written"] += 1
                     c["chars"] += n
                     c["max_chars"] = max(c["max_chars"], n)
@@ -234,7 +248,7 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
         c["avg_chars"] = round(c.pop("chars") / max(1, c["written"]))
         report["files"][name] = c
         log(f"{name}: {c['written']}/{c['rows']} written (flow {c['flow']}, fix {c['fix']}, clarify {c['clarify']}, "
-            f"rewrite {c['rewrite']}, "
+            f"rewrite {c['rewrite']}, think {c['think']}, "
             f"kept {c['kept']}, reply+context {c['reply_with_context']}, part {c['part']} from {c['split_long']} long flows), "
             f"{c['skipped_too_long']} too long, "
             f"{c['skipped_unusable']} unusable")
@@ -242,7 +256,7 @@ def render(src, out, catalog, k=F.DEFAULT_K, seed=7, extra=(), variables_rate=0.
     if Path(catalog).resolve() != cat_out.resolve():
         shutil.copyfile(catalog, cat_out)
     report["totals"] = {k2: sum(f[k2] for f in report["files"].values())
-                        for k2 in ("rows", "written", "flow", "fix", "clarify", "rewrite", "kept", "reply_with_context", "part", "split_long",
+                        for k2 in ("rows", "written", "flow", "fix", "clarify", "rewrite", "think", "kept", "reply_with_context", "part", "split_long",
                                    "skipped_too_long", "skipped_unusable")}
     report["seconds"] = round(time.time() - t0, 1)
     with open(out / "render_report.json", "w", encoding="utf-8") as f:
@@ -272,13 +286,16 @@ def main(argv=None):
                     help="share of flow rows whose context misses some needed actions (0 = never)")
     ap.add_argument("--dropout-frac", default=",".join(str(x) for x in F.GOLD_DROPOUT_FRAC),
                     help="low,high share of the needed actions such a row misses")
+    ap.add_argument("--think", nargs="*", default=[],
+                    help="output file names whose rows get thinking answers (Understand / Facts / Missing / Steps / "
+                         "Check before the flow), or 'all'")
     ap.add_argument("--examples-from", default=None,
                     help="examples.jsonl of an earlier render: its requests join the example index first")
     a = ap.parse_args(argv)
     frac = tuple(float(x) for x in a.dropout_frac.split(","))
     render(a.src, a.out, a.catalog, a.k, a.seed, a.extra, a.variables_rate, a.reply_context, a.max_chars, not a.no_parts,
            max_tokens=a.max_tokens, answer_format=a.answer_format, gold_dropout=a.gold_dropout, dropout_frac=frac,
-           examples_from=a.examples_from)
+           examples_from=a.examples_from, think=a.think)
 
 
 if __name__ == "__main__":

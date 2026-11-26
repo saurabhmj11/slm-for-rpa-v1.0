@@ -536,6 +536,93 @@ def test_ask_first():
     assert S.MODES["fast"]["ask_first"] is False and S.MODES["smart"]["ask_first"] and S.MODES["ultra"]["ask_first"]
 
 
+
+def think_answer(flow, request, **rec):
+    return F.render_think_answer(flow, CAT, F.ANSWER_FULL, dict(rec, request=request))
+
+
+def test_thinking_answer_is_read_as_a_plan():
+    """A model trained on thinking answers (Understand / Facts / Missing / Steps / Check, then the flow): its Steps are
+    the plan, its Understand sentence is what Studio shows as understood."""
+    m = Scripted(lambda req, p, a: think_answer(CSV_TO_EXCEL, req, understand="Put the CSV into an Excel sheet"))
+    res = router(m).run(CSV_REQ)
+    assert res["verified"] and res["understood"] == "Put the CSV into an Excel sheet.", res
+    assert res["plan"] == F.plan_from_flow(CSV_TO_EXCEL, CAT)
+    for mode in ("fast", "smart", "ultra"):
+        res = router(m).run(CSV_REQ, mode=mode)
+        assert res["verified"] and res["understood"].startswith("Put the CSV"), (mode, res)
+
+
+def test_thinking_steps_and_facts_coverage_trigger_self_correction():
+    short = json.loads(json.dumps(CSV_TO_EXCEL))
+    short["steps"] = short["steps"][:-1]
+    steps = F.plan_to_steps(F.plan_from_flow(CSV_TO_EXCEL, CAT))
+
+    def answer(req, prompt, attempt):
+        if attempt == 0:          # Steps name an action the flow lacks; a fact the flow does not use
+            return think_answer(short, req, facts={"path": "orders.csv"}).replace(
+                "\n".join(F.plan_to_steps(F.plan_from_flow(short, CAT))), "\n".join(steps))
+        return think_answer(CSV_TO_EXCEL, req)
+    m = Scripted(answer)
+    res = router(m, local_retries=1).run(CSV_REQ)
+    assert res["verified"] and len(m.prompts) == 2, res
+    second = m.prompts[1]
+    assert f"- The plan names {CSV_TO_EXCEL['steps'][-1]['action']} but no step of the flow uses it." in second
+    assert "- The facts say path = orders.csv but no step of the flow uses it." in second, second
+
+
+def test_thinking_missing_detail_asks():
+    q = "Which folder do you mean? Please tell me its name or path."
+    m = Scripted(lambda req, p, a: F.render_think_question({"request": req, "question": q, "missing": ["folder"]}))
+    res = router(m, ask_first=False).run(CSV_REQ)
+    assert not res["verified"] and res["question"] == q and len(m.prompts) == 1, res
+    # Missing said, a flow that does not verify: the user is asked instead of retrying
+    bad = "Understand: Copy it.\nFacts: none\nMissing: folder\nSteps:\n1. Copy it -> ooa.file/copy\nCheck: 1 step\nFlow:\n{oops"
+    m2 = Scripted(lambda req, p, a: bad)
+    res = router(m2, ask_first=False, local_retries=2).run(CSV_REQ)
+    assert res["question"] == F.ask_question(["folder"]) and len(m2.prompts) == 1, res
+    res = router(Scripted(lambda req, p, a: bad), ask_first=False).run(CSV_REQ, mode="smart")
+    assert res["question"] == F.ask_question(["folder"]), res
+
+
+def test_thinking_model_parts_start_with_a_thinking_block():
+    plan = F.plan_from_flow(LOOP_WHOLE, CAT)
+    parts = F.plan_parts(plan)
+    p1, p2, p3 = _loop_parts()
+    by_req = {F.chunk_request(parts[0]["chunk"]): p1, F.chunk_request(parts[2]["chunk"]): p3}
+
+    def answer(req, prompt, attempt):
+        if req == LOOP_REQ:
+            return think_answer(LOOP_WHOLE, req)
+        if req.startswith("With the current file: "):
+            return think_answer(p2, req)
+        return think_answer(by_req[req], req)
+    m = PlanAware(answer)
+    m.info = {"think": True}
+    r = router(m, local_retries=2)
+    assert r.supports_think()
+    res = r.run(LOOP_REQ)
+    assert res["verified"] and res.get("built_in_parts"), res
+    pre = [x for x in m.prefixes if x]
+    assert len(pre) == 3 and all(x.startswith("Understand: ") and "\nMissing: none\nSteps:\n" in x
+                                 and x.endswith("\nFlow:\n") for x in pre), pre
+    assert "\nSteps:\n1. Copy it to the archive -> ooa.file/copy\n" in pre[1], pre
+    assert F.outline(json.loads(res["flow"])) == F.outline(LOOP_WHOLE)
+    # a model without thinking answers keeps the "Plan:" prefix
+    assert router(PlanAware(answer)).part_prefix("x", parts[0]["chunk"]).startswith("Plan:\n")
+
+
+def test_thinking_model_is_known_from_its_render_report():
+    import tempfile
+    d = Path(tempfile.mkdtemp())
+    F.ExampleIndex.from_flows([("Read a csv file and save it as excel", CSV_TO_EXCEL)]).save(d / "examples.jsonl")
+    (d / "render_report.json").write_text(json.dumps({"settings": {"think": ["v5_train.jsonl"]},
+                                                      "totals": {"think": 12, "rewrite": 3}}))
+    r = router(Scripted(lambda req, p, a: ""), examples=str(d / "examples.jsonl"))
+    assert r.supports_think() and r.supports_rewrite()
+    (d / "render_report.json").write_text(json.dumps({"settings": {"think": []}, "totals": {"think": 0}}))
+    assert not router(Scripted(lambda req, p, a: ""), examples=str(d / "examples.jsonl")).supports_think()
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

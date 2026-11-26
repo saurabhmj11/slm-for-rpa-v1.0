@@ -88,6 +88,7 @@ class RepetitionGuard:
 
 _STEP_ID = re.compile(r'"id"\s*:\s*"([^"\\$][^"\\]{0,79})"')    # step ids (and the flow's own id), not "$var$" args
 _PLAN_NUM = re.compile(r"^\s*\d+[.)]\s*")
+_THINK_KEYS = ("clear request:", "understand:", "facts:", "missing:", "steps:", "check:")   # header lines, never a loop
 
 
 class AnswerWatch:
@@ -116,6 +117,10 @@ class AnswerWatch:
 
     def _plan(self, text):
         t = text.lstrip()
+        if t.startswith("Understand:"):               # a thinking answer: its Steps lines are the plan
+            i = t.find("\nSteps:")
+            body = t[i + len("\nSteps:"):] if i >= 0 else ""
+            return [l.rstrip() for l in body.split("\n") if l.strip() and not l.lstrip().startswith("Check:")]
         if t.startswith("Clear request:"):            # a restatement line before the plan (ooa_format.CLEAR_HEAD)
             i = t.find("\nPlan:")
             t = t[i + 1:] if i >= 0 else ""
@@ -131,7 +136,8 @@ class AnswerWatch:
             if head.startswith("{"):                                    # flow JSON only (the format before plans)
                 self.flow_at, self.plan_lines = len(t) - len(head), 0
                 return False
-            if not any(head.startswith(p) or p.startswith(head) for p in ("Plan:", "Flow:", "Clear request:")):
+            if not any(head.startswith(p) or p.startswith(head) for p in ("Plan:", "Flow:", "Clear request:",
+                                                                          "Understand:")):
                 self.flow_at, self.plan_lines = 10 ** 9, 0               # a question or a chat reply: not watched
                 return False
             i = t.find("Flow:")
@@ -146,13 +152,14 @@ class AnswerWatch:
             lines = t.split("\n")
             for line in lines[self._done_lines:-1]:                      # complete lines not seen yet
                 key = _PLAN_NUM.sub("", line).strip().lower()
-                if key and key != "plan:" and not key.startswith("clear request:"):
+                if key and key != "plan:" and not key.startswith(_THINK_KEYS):
                     self._lines_seen[key] += 1
                     if self._lines_seen[key] >= self.max_same_line:
                         self.reason, self.kind = f"the plan repeats the line '{key[:60]}'", "loop"
                         return True
             self._done_lines = max(self._done_lines, len(lines) - 1)
-            if self._done_lines > self.max_plan_lines + 2:     # "Plan:" and a "Clear request:" line
+            extra = 6 if head.startswith("Understand:") else 2   # "Plan:" + "Clear request:"; a thinking block's 5 lines
+            if self._done_lines > self.max_plan_lines + extra:
                 self.reason, self.kind = f"the plan runs past {self.max_plan_lines} lines", "loop"
                 return True
             return False

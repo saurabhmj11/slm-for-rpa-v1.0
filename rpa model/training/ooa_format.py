@@ -21,6 +21,9 @@ Assistant turn, one of:
     rewrite:  "Clear request: <one clear sentence naming the steps>\nPlan:\n...\nFlow:\n..." (a beginner's request,
               restated in tool words before the plan; rendered for "rewrite" records, gen_beginner.py)
     clarify:  "Question: <one short question>"
+    think:    "Understand: <sentence>\\nFacts: k = v; ...\\nMissing: none\\nSteps:\\n1. <words> -> <id>\\n...\\nCheck: <n> steps, ...\\n
+              Flow:\\n<flow>" or "...Missing: <slot>\\nQuestion: ..." (models trained with render_dataset.py --think; see the
+              "thinking answers" section)
     reply:    plain text (not a task)
 parse_answer() also reads old answers that are only the flow JSON, so models trained before this format keep working.
 
@@ -44,7 +47,7 @@ PREVIOUS_HEADER = "### Previous flow"
 PROBLEMS_HEADER = "### Problems"
 PLAN_HEAD, FLOW_HEAD, QUESTION_HEAD = "Plan:", "Flow:", "Question:"
 CLEAR_HEAD = "Clear request:"  # a restatement before the plan (rewrite records): the model says what it understood
-ANSWER_STARTS = ("{", PLAN_HEAD, QUESTION_HEAD, FLOW_HEAD, CLEAR_HEAD)   # how a flow / question answer can open
+ANSWER_STARTS = ("{", PLAN_HEAD, QUESTION_HEAD, FLOW_HEAD, CLEAR_HEAD, "Understand:")   # how a flow / question answer can open
 MAX_CLEAR_CHARS = 320         # a longer restatement keeps only the top-level steps (clear_request)
 
 DEFAULT_K = 12                # BM25 candidates per request
@@ -452,6 +455,411 @@ def clear_request(flow, catalog=None, limit=MAX_CLEAR_CHARS, request=None):
     return text if text.endswith(".") else text + "."
 
 
+# ---------------------------------------------------------------------------------------------- thinking answers
+# An optional block the assistant writes before the flow ("think first"), for models trained on it (render_dataset.py
+# --think: per file, so a data mix can hold both answer styles):
+#     Understand: <one sentence: what the user wants>
+#     Facts: <key = value; ...: the literal details of the request the flow uses> | none
+#     Missing: none | <slot, slot: details only the user knows -> the answer goes on with "Question: ...">
+#     Steps:
+#     1. <step in plain words> -> <action id>          (a loop's / if's steps indented two spaces per level,
+#       2. <body step> -> <action id>                   numbered in document order, as the plan lines)
+#     Check: <n> steps[, <k> loop(s)][, <k> if(s)][, all facts used]
+#     Flow:
+#     <compact flow JSON>
+# Steps replaces the old "Plan:" (same lines, " -> id" instead of " (id)"); parse_answer gives them back as plan lines,
+# so the step-by-step builder, plan_coverage and the critic read a thinking answer like a plan-first one.
+UNDERSTAND_HEAD, FACTS_HEAD, MISSING_HEAD, STEPS_HEAD, CHECK_HEAD = (
+    "Understand:", "Facts:", "Missing:", "Steps:", "Check:")
+THINK_HEADS = (UNDERSTAND_HEAD, FACTS_HEAD, MISSING_HEAD, STEPS_HEAD, CHECK_HEAD)
+FORMAT_THINK = "think-v1"
+NONE_WORD = "none"
+MAX_UNDERSTAND_CHARS = 200    # a flow description longer than this is not used as the "Understand" sentence
+MAX_DERIVED_UNDERSTAND = 140  # a sentence made from the steps (clear_request) is cut to this: Steps says the rest
+MAX_FACTS = 6                 # facts per answer (the first ones in flow order)
+MAX_FACT_CHARS = 60           # a longer literal (a mail body, a script) is not a fact
+_NONE_WORDS = {"", "none", "nothing", "no", "-", "n/a"}
+_STEP_ARROW = re.compile(r"\s+->\s*(?P<action>[\w.\-]+/[\w.\-]+)\s*$")
+_STEP_PAREN = re.compile(r"\s*\((?P<action>[\w.\-]+/[\w.\-]+)\)\s*$")
+MISSING_WORDS = {"folder": "which folder", "file": "which file", "files": "which files", "recipient": "who gets it",
+                 "app": "which app", "website": "which website", "condition": "which ones (the rule)",
+                 "sheet": "which sheet", "report": "which report", "data": "where the data comes from",
+                 "list": "which list", "place": "where it goes", "what": "what to do, with which files or app",
+                 "records": "which records", "details": "the exact details"}
+_QUESTION_SLOTS = [(re.compile(p, re.I), s) for p, s in (
+    (r"\bwhich (?:records|accounts|leads|cases|tickets|items|rows|ones|users|orders|invoices|issues|deals)\b|"
+     r"\bkaun se\b|\bkaunse\b", "records"),
+    (r"\bwhich (?:documents|docs|files|attachments|pdfs)\b|\bfiles\b", "files"),
+    (r"\bwhich (?:file|document|workbook|csv|pdf)\b|\bthe file\b|\bfile name\b|\bfile's\b", "file"),
+    (r"\bfolder\b", "folder"), (r"\bsheet\b", "sheet"), (r"\breport\b", "report"),
+    (r"\bwho\b|\brecipients?\b|email address", "recipient"),
+    (r"\bwebsite\b|\burl\b|\blink\b", "website"), (r"\bapp\b|\bsystem\b|\btool\b", "app"),
+    (r"\brule\b|\bwhich ones\b|\bthreshold\b|\babove\b|\bbelow\b", "condition"), (r"\blist\b", "list"),
+    (r"\bwhere (?:should|do|to|is the right place)\b|\bsave it\b|\bput it\b", "place"), (r"\bdata\b", "data"))]
+
+
+def plan_to_steps(plan_lines):
+    """Plan lines '<n>. <words> (<id>)' -> Steps lines '<n>. <words> -> <id>' (indent and numbers kept)."""
+    return [_STEP_PAREN.sub(lambda m: " -> " + m.group("action"), l.rstrip()) for l in plan_lines or []]
+
+
+def steps_to_plan(step_lines):
+    """Steps lines -> plan lines (the inverse of plan_to_steps); a line that already ends '(<id>)' is kept."""
+    return [_STEP_ARROW.sub(lambda m: " (" + m.group("action") + ")", l.rstrip()) for l in step_lines or []
+            if l.strip()]
+
+
+_FACT_TOKEN = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+|https?://[^\s\"']+|[\w-][\w.-]*\.(?:csv|xlsx|xlsm|xls|docx|doc|pdf|txt|"
+                         r"json|xml|zip|png|jpe?g|pptx?|msg|eml|html?|log)\b", re.I)
+_ANY_REF = re.compile(r"\$\{[^}]*\}|\$\w+\$?")
+
+
+def _fact_value(v):
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return str(v)
+    if not isinstance(v, str):
+        return None
+    s = " ".join(v.split())
+    if not (1 <= len(s) <= MAX_FACT_CHARS) or "$" in s or "{" in s or "\n" in v:
+        return None
+    return s
+
+
+def _fact_values(v):
+    """The fact candidates of one argument value: the whole literal (_fact_value), or else the file names, addresses
+    and links written inside a text that also holds variables ('${folder}\\report.csv' -> 'report.csv')."""
+    one = _fact_value(v)
+    if one or not isinstance(v, str) or "$" not in v:
+        return [one] if one else []
+    return [m.group(0) for m in _FACT_TOKEN.finditer(_ANY_REF.sub(" ", v)) if len(m.group(0)) <= MAX_FACT_CHARS]
+
+
+def _in_request(value, request_lower):
+    v = value.lower()
+    if len(v) < 3 and not v.isdigit():
+        return False
+    if re.fullmatch(r"[\w.]+", v):                     # a word / number: whole-word match ("1" is not "Sheet1")
+        return re.search(r"(?<![\w.])" + re.escape(v) + r"(?![\w])", request_lower) is not None
+    return v in request_lower
+
+
+_SCHEDULE = re.compile(
+    r"\b(?:daily|weekly|monthly|hourly|every\s+(?:day|morning|evening|night|hour|week|month|weekday|"
+    r"(?:mon|tues|wednes|thurs|fri|satur|sun)day|\d+\s+(?:minutes|hours|days))|"
+    r"(?:har|roz)\s+(?:din|subah|shaam|hafte|mahine|somvar))"
+    r"(?:\s+(?:at|by|before)\s+\d{1,2}(?::\d\d)?\s*(?:am|pm)?)?", re.I)
+
+
+def schedule_of(request):
+    """The schedule a request names ('daily at 9', 'every Monday'), or None. A flow has no schedule step (the platform
+    schedules the bot), so this fact is never looked for in the flow (fact_coverage)."""
+    m = _SCHEDULE.search(str(request or ""))
+    return " ".join(m.group(0).split()) if m else None
+
+
+def flow_facts(flow, request, limit=MAX_FACTS):
+    """The request's literal details that the flow uses: [(key, value)] in flow order. A step argument whose literal
+    value (a path, file name, address, folder, number, word) appears in the request is a fact named after the
+    argument ("to = ap@acme.com"); a condition comparing with a literal of the request is "filter = amount > 1000".
+    Values longer than MAX_FACT_CHARS or holding variables are left out; each value once. A schedule the request
+    names comes first ("schedule = daily at 9", schedule_of)."""
+    req = " ".join(str(request or "").split()).lower()
+    out, seen = [], set()
+    when = schedule_of(request)
+    if when:
+        out.append(("schedule", when))
+
+    def add(key, value):
+        if value and value.lower() not in seen and len(out) < limit and _in_request(value, req):
+            seen.add(value.lower())
+            out.append((key, value))
+
+    def cond(c):
+        if not isinstance(c, dict) or not {"op", "left"} <= set(c):
+            return False
+        right = _fact_value(c.get("right"))
+        left = _var(c["left"]) if isinstance(c.get("left"), str) else None
+        if right and left and _in_request(right, req) and right.lower() not in seen and len(out) < limit:
+            seen.add(right.lower())
+            out.append(("filter", f"{left} {c['op']} {right}"))
+        return True
+
+    def arg(key, v):
+        if isinstance(v, dict):
+            if not cond(v):
+                for k2, v2 in v.items():
+                    arg(key if k2 in ("args", "value", "right", "left") else k2, v2)
+        elif isinstance(v, list):
+            for x in v:
+                arg(key, x)
+        else:
+            for x in _fact_values(v):
+                add(key, x)
+
+    for s, _ in walk(flow.get("steps") if isinstance(flow, dict) else flow):
+        args = s.get("args") if isinstance(s.get("args"), dict) else {}
+        for k, v in args.items():
+            arg(k, v)
+    return out
+
+
+def facts_text(facts):
+    """[(key, value)] or {key: value} or a string -> 'key = value; key = value', or 'none'."""
+    if isinstance(facts, str):
+        return " ".join(facts.split()) or NONE_WORD
+    pairs = list(facts.items()) if isinstance(facts, dict) else [tuple(p) for p in facts or [] if len(p) == 2]
+    return "; ".join(f"{k} = {v}" for k, v in pairs) or NONE_WORD
+
+
+def parse_facts(text):
+    """'key = value; ...' -> [(key, value)] ([] for none)."""
+    t = " ".join(str(text or "").split())
+    if t.lower().rstrip(".") in _NONE_WORDS:
+        return []
+    out = []
+    for part in t.split(";"):
+        k, eq, v = part.partition("=")
+        if eq and k.strip() and v.strip():
+            out.append((k.strip(), v.strip()))
+    return out
+
+
+def parse_missing(text):
+    """'none' -> []; 'folder, recipient' -> ['folder', 'recipient'] (free words kept as they are)."""
+    t = " ".join(str(text or "").split()).rstrip(".")
+    if t.lower() in _NONE_WORDS:
+        return []
+    return [p.strip() for p in re.split(r",|;|\band\b", t) if p.strip()]
+
+
+def missing_slots(record):
+    """The Missing slots of a clarify record: its own "missing", else what the ask-first gate finds in the request,
+    else what its question asks about (_QUESTION_SLOTS); at most two, 'details' when nothing is known."""
+    m = record.get("missing")
+    if isinstance(m, str):
+        m = parse_missing(m)
+    if isinstance(m, list) and m:
+        return [str(x) for x in m][:2]
+    gate = ask_first(record.get("request"))
+    if gate and gate.get("missing"):
+        return gate["missing"][:2]
+    q = re.sub(r"\([^)]*\)", " ", str(record.get("question") or ""))
+    q = q.split("?")[0]                                   # the first question only, without its examples
+    found = [s for rx, s in _QUESTION_SLOTS if rx.search(q)]
+    return list(dict.fromkeys(found))[:2] or ["details"]
+
+
+def missing_question(missing):
+    """The question for a thinking answer's Missing slots when the model wrote none: ask_question for known slots,
+    else 'Happy to help. Could you tell me <the missing words>?'."""
+    slots = [m for m in missing or [] if m in ASK_SLOTS]
+    if slots and len(slots) == len(missing):
+        return ask_question(slots)
+    return "Happy to help. Could you tell me " + " and ".join(MISSING_WORDS.get(m, m) for m in (missing or ["details"])[:2]) + "?"
+
+
+def _sentence(text, limit=None):
+    t = " ".join(str(text or "").split())
+    if limit and len(t) > limit:
+        return ""
+    t = t[:1].upper() + t[1:]
+    return t if not t or t.endswith((".", "?", "!")) else t + "."
+
+
+def understand_text(record, flow=None, catalog=None, request=None):
+    """The "Understand" sentence of a record: its own "understand", else its "clear" restatement, else the flow's
+    description (plain text naming no app the request does not, at most MAX_UNDERSTAND_CHARS), else
+    clear_request(flow) cut to MAX_DERIVED_UNDERSTAND; a clarify record without one says what it cannot tell."""
+    request = request if request is not None else record.get("request")
+    for key in ("understand", "clear"):
+        t = _sentence(record.get(key))
+        if t:
+            return t
+    if isinstance(flow, dict):
+        d = flow.get("description")
+        if isinstance(d, str) and 15 <= len(d.strip()) <= MAX_UNDERSTAND_CHARS and not any(c in d for c in "${}`\""):
+            said = {m.lower() for m in _APPS.findall(str(request or ""))}
+            if all(m.lower() in said for m in _APPS.findall(d)):
+                return _sentence(d)
+        return _sentence(steps_sentence(flow, catalog, request))
+    slots = missing_slots(record)
+    said = " ".join(str(request or "").split()).rstrip(".?!")
+    said = said if len(said) <= 120 else said[:117].rsplit(" ", 1)[0] + "..."
+    return _sentence(said) + " Not said: " + "; ".join(MISSING_WORDS.get(s, s) for s in slots) + "."
+
+
+def steps_sentence(flow, catalog=None, request=None, limit=MAX_DERIVED_UNDERSTAND):
+    """A derived "Understand" sentence: clear_request(flow) when it fits limit, else its top-level steps in plain words
+    from both ends ("Find the overdue issues, add up the column, ..., then email Rahul the summary"), so the start and
+    the goal are both said."""
+    full = clear_request(flow, catalog, limit=10 ** 6, request=request)
+    if len(full) <= limit:
+        return full
+    cat = _as_dict(catalog)
+
+    def words(s):                       # a loop / if is named with the first step of its body
+        t = _lower_first(step_text(s, cat, describe=clear_step_ok(s, cat, request)))
+        for _, body in branches(s):
+            first = [b for b in body if isinstance(b, dict) and not _HOUSEKEEPING.search(str(b.get("action") or ""))]
+            if first:
+                return t + ": " + words(first[0])
+        return t
+    tops = [words(s) for s in (flow.get("steps") if isinstance(flow, dict) else flow) or []
+            if isinstance(s, dict) and not _HOUSEKEEPING.search(str(s.get("action") or ""))]
+    if len(tops) < 2:
+        return clear_request(flow, catalog, limit=limit, request=request)
+    head, last = [tops[0]], tops[-1]
+    for t in tops[1:-1]:
+        if len(", ".join(head + [t])) + len(last) + 12 > limit:
+            break
+        head.append(t)
+    gap = ", ..." if len(head) < len(tops) - 1 else ""
+    text = ", ".join(head) + gap + ", then " + last
+    if len(text) > limit + 40:
+        return clear_request(flow, catalog, limit=limit, request=request)
+    return text[:1].upper() + text[1:]
+
+
+def check_text(step_lines, facts=()):
+    """The Check line's words for Steps lines: '<n> steps, <k> loop(s), <k> if(s)[, all facts used]'."""
+    acts = [i["action"] for i in plan_items(steps_to_plan(step_lines))]
+    n, loops, ifs = len(plan_items(step_lines)), acts.count("core/loop"), acts.count("core/if")
+    out = [f"{n} step" + ("s" if n != 1 else "")]
+    if loops:
+        out.append(f"{loops} loop" + ("s" if loops > 1 else ""))
+    if ifs:
+        out.append(f"{ifs} if" + ("s" if ifs > 1 else ""))
+    if facts:
+        out.append("all facts used")
+    return ", ".join(out)
+
+
+def think_steps(flow, catalog=None, record=None):
+    """Steps lines for a flow: the record's own "steps" when they name the flow's actions in its order, else
+    plan_to_steps(plan_from_flow(flow))."""
+    derived = plan_to_steps(plan_from_flow(flow, catalog))
+    own = (record or {}).get("steps")
+    if isinstance(own, list) and own and all(isinstance(x, str) for x in own):
+        if plan_actions(steps_to_plan(own)) == plan_actions(steps_to_plan(derived)):
+            return [l.rstrip() for l in own if l.strip()]
+    return derived
+
+
+def think_block(understand, facts, missing, step_lines=None):
+    """The thinking block before "Flow:" / "Question:" (no trailing newline)."""
+    lines = [UNDERSTAND_HEAD + " " + (_sentence(understand) or "-"), FACTS_HEAD + " " + facts_text(facts),
+             MISSING_HEAD + " " + (", ".join(missing) if missing else NONE_WORD)]
+    if step_lines is not None:
+        lines += [STEPS_HEAD] + list(step_lines) + [CHECK_HEAD + " " + check_text(step_lines, facts)]
+    return "\n".join(lines)
+
+
+def render_think_answer(flow, catalog=None, answer_format="full", record=None, request=None):
+    """The thinking answer for a flow: think_block (Understand / Facts / Missing: none / Steps / Check) + "Flow:" +
+    the flow (compact_flow for answer_format "compact"). record: the neutral record (its own understand / facts /
+    steps win over the derived ones; facts given as {key: value}, [[key, value]] or text)."""
+    record = record or {}
+    request = request if request is not None else record.get("request")
+    cat = _as_dict(catalog)
+    facts = record.get("facts") if record.get("facts") is not None else flow_facts(flow, request)
+    body = compact_flow(flow) if answer_format == ANSWER_COMPACT else flow
+    block = think_block(understand_text(record, flow, cat, request), facts, [], think_steps(flow, cat, record))
+    return block + "\n" + FLOW_HEAD + "\n" + compact(body)
+
+
+def render_think_question(record):
+    """The thinking answer of a clarify record: Understand / Facts / Missing: <slots> + "Question: <question>"."""
+    slots = missing_slots(record)
+    facts = record.get("facts") if record.get("facts") is not None else []
+    return think_block(understand_text(record), facts, slots) + "\n" + QUESTION_HEAD + " " + \
+        " ".join(str(record.get("question") or "").split())
+
+
+def think_prefix(request, plan_lines, facts=()):
+    """The start of a thinking answer whose steps are known (a part of a plan built in parts): the block with
+    Understand = the part's request, the given steps and their Check, then "Flow:" (the model writes the flow)."""
+    steps = plan_to_steps(plan_lines)
+    return think_block(request, facts, [], steps) + "\n" + FLOW_HEAD + "\n"
+
+
+def parse_think(text):
+    """A thinking block at the start of text -> (fields, rest): fields {"understand", "facts" [(k, v)], "facts_text",
+    "missing" [slots], "steps" [lines], "check"}; rest is the text from the first "Flow:" / "Question:" / "Plan:" line
+    on ('' when the answer stops before it)."""
+    f = {"understand": None, "facts": [], "facts_text": None, "missing": [], "steps": [], "check": None}
+    lines = str(text).split("\n")
+    section = None
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith((FLOW_HEAD, QUESTION_HEAD, PLAN_HEAD)):
+            return f, "\n".join(lines[i:]).strip()
+        head = next((h for h in THINK_HEADS if s.startswith(h)), None)
+        if head:
+            section, val = head, s[len(head):].strip()
+            if head == UNDERSTAND_HEAD:
+                f["understand"] = val or None
+            elif head == FACTS_HEAD:
+                f["facts_text"], f["facts"] = val, parse_facts(val)
+            elif head == MISSING_HEAD:
+                f["missing"] = parse_missing(val)
+            elif head == CHECK_HEAD:
+                f["check"] = val or None
+            elif val:                                     # "Steps: 1. ..." on the same line
+                f["steps"].append(val)
+            continue
+        if not s:
+            continue
+        if section == STEPS_HEAD:
+            f["steps"].append(line.rstrip())
+        elif section == UNDERSTAND_HEAD:                  # a sentence that ran onto a second line
+            f["understand"] = ((f["understand"] or "") + " " + s).strip()
+    return f, ""
+
+
+def is_think(text):
+    t = str(text or "").lstrip()
+    return t.startswith(THINK_HEADS)
+
+
+def _haystack(flow):
+    out = []
+
+    def add(v):
+        if isinstance(v, dict):
+            for x in v.values():
+                add(x)
+        elif isinstance(v, list):
+            for x in v:
+                add(x)
+        elif isinstance(v, (str, int, float)) and not isinstance(v, bool):
+            out.append(" ".join(str(v).split()).lower())
+    for s, _ in walk(flow.get("steps") if isinstance(flow, dict) else flow):
+        add(s.get("args"))
+    for v in (flow.get("variables") if isinstance(flow, dict) else None) or []:
+        if isinstance(v, dict):
+            add(v.get("default"))
+            add(v.get("value"))
+    return out
+
+
+def fact_coverage(facts, flow):
+    """Facts [(key, value)] of a thinking answer that no step argument (or variable default) of the flow holds: the
+    flow left a detail of the request out. A filter fact ('amount > 1000') is checked by its last word."""
+    hay = _haystack(flow)
+    missed = []
+    for k, v in facts or []:
+        want = " ".join(str(v).split()).lower()
+        if k == "schedule":
+            continue
+        if k == "filter" and " " in want:
+            want = want.rsplit(" ", 1)[1]
+        if want and want != NONE_WORD and not any(want in h for h in hay):
+            missed.append((k, v))
+    return missed
+
+
 # ---------------------------------------------------------------------------------------------- compact answers
 # A compact answer's flow holds only what the model must decide: the steps (action, args, out, containers and their
 # branches; disabled), plus "outputs" (names of the flow's output variables) and any rare flow-level setting
@@ -783,7 +1191,8 @@ def answer_flow_text(ans, catalog=None, request=None, known=()):
     return compact(expand_flow(obj, catalog, request, ans.get("plan"), known))
 
 
-_PLAN_LINE = re.compile(r"^(?P<indent>\s*)(?:\d+[.)]\s*)?(?P<text>.*?)\s*(?:\((?P<action>[\w.\-]+/[\w.\-]+)\))?\s*$")
+_PLAN_LINE = re.compile(r"^(?P<indent>\s*)(?:\d+[.)]\s*)?(?P<text>.*?)\s*(?:\((?P<action>[\w.\-]+/[\w.\-]+)\)|"
+                        r"->\s*(?P<arrow>[\w.\-]+/[\w.\-]+))?\s*$")     # "(id)": a plan line; "-> id": a Steps line
 _BRANCH_PREFIX = re.compile(r"^(?:" + "|".join(re.escape(w.strip()) for w in _BRANCH_WORDS.values()) + r")\s*")
 
 
@@ -796,7 +1205,7 @@ def plan_items(plan):
         m = _PLAN_LINE.match(line.rstrip())
         indent = len(m.group("indent").replace("\t", "  "))
         items.append({"depth": indent // 2, "text": _BRANCH_PREFIX.sub("", m.group("text")).strip(),
-                      "action": m.group("action"), "line": line.rstrip()})
+                      "action": m.group("action") or m.group("arrow"), "line": line.rstrip()})
     return items
 
 
@@ -1228,9 +1637,20 @@ def parse_answer(text, expand=False, catalog=None, request=None, known=()):
     expand: a compact flow (is_compact) is rebuilt into a full one (expand_flow with catalog, request, known and the
     answer's plan) and flow_text is that full flow; "compact_text" then keeps what the model wrote. A full flow (a
     model trained before compact answers) is left exactly as written.
-    "clear": the restatement of an answer that opens with "Clear request: ..." (else None); the rest is read as usual."""
+    "clear": the restatement of an answer that opens with "Clear request: ..." (else None); the rest is read as usual.
+    A thinking answer ("Understand: ... Facts: ... Missing: ... Steps: ... Check: ...", then "Flow:" or "Question:")
+    gives "think": True, its fields (parse_think: "understand", "facts", "missing", "steps", "check"), "clear" = the
+    Understand sentence and "plan" = its Steps as plan lines (steps_to_plan). Missing details and no flow: a question
+    (the model's own, else ask_question of the missing slots)."""
     t = str(text or "").split("<|assistant_end|>")[0].strip()
-    clear = None
+    think = None
+    if is_think(t):
+        think, t = parse_think(t)
+        if think["steps"] and (not t or t.startswith(FLOW_HEAD)):
+            t = PLAN_HEAD + "\n" + "\n".join(steps_to_plan(think["steps"])) + ("\n" + t if t else "")
+        elif not t and think["missing"]:
+            t = QUESTION_HEAD + " " + missing_question(think["missing"])
+    clear = think["understand"] if think else None
     if t.startswith(CLEAR_HEAD):          # "Clear request: ..." then the usual answer
         m = re.search(r"(?m)^[ \t]*(?=" + "|".join(re.escape(h) for h in (PLAN_HEAD, FLOW_HEAD, QUESTION_HEAD)) + ")", t)
         head = t[len(CLEAR_HEAD):m.start()] if m else t[len(CLEAR_HEAD):]
@@ -1250,6 +1670,10 @@ def parse_answer(text, expand=False, catalog=None, request=None, known=()):
                    flow_text=body[m.end():].strip() if m else None)
     elif t.startswith("{") or t.startswith("```"):
         res.update(kind="flow", flow_text=t)
+    if think is not None:
+        res.update(think=True, **think)
+        if not t and (think["understand"] or think["steps"]):
+            res["kind"] = "flow"          # cut off inside the block: a flow answer without a flow yet
     if expand and res["kind"] == "flow" and res["flow_text"] is not None:
         full = answer_flow_text(res, catalog, request, known)
         if full is not None and full != res["flow_text"]:
@@ -1683,7 +2107,7 @@ def drop_gold(gold, rng, rate=GOLD_DROPOUT, frac=GOLD_DROPOUT_FRAC):
 
 def render_chat(record, catalog, action_index, example_index=None, rng=None, k=DEFAULT_K, variables_rate=0.3,
                 max_chars=MAX_ROW_CHARS, max_tokens=MAX_ROW_TOKENS, context_chars=None, answer_format=ANSWER_FULL,
-                gold_dropout=0.0, dropout_frac=GOLD_DROPOUT_FRAC):
+                gold_dropout=0.0, dropout_frac=GOLD_DROPOUT_FRAC, think=False):
     """A neutral record -> {"messages": [user, assistant]} in this format (None when the record is unusable).
     record: {"kind": "flow", "request", "flow"} | {"kind": "fix", "request", "previous", "problems", "flow"} |
             {"kind": "clarify", "request", "question"} |
@@ -1696,7 +2120,10 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
     max_tokens implies, the same budget the server gives a model with that window).
     answer_format: ANSWER_FULL (the flow as stored) or ANSWER_COMPACT (compact_flow: code fills in the rest at
     serving, expand_flow). gold_dropout: share of flow / fix rows whose Actions list misses some needed actions
-    (drop_gold); the answer is unchanged."""
+    (drop_gold); the answer is unchanged.
+    think: the answer is a thinking answer (render_think_answer / render_think_question: Understand, Facts, Missing,
+    Steps, Check before the flow or question); a record's own boolean "think" overrides it. A rewrite record's "clear"
+    then becomes the Understand sentence (no "Clear request:" line)."""
     import random
     rng = rng or random.Random(0)
     cat = _as_dict(catalog)
@@ -1705,6 +2132,8 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
     kind, request = record.get("kind"), str(record.get("request") or "").strip()
     if not request or kind not in ("flow", "fix", "clarify", "rewrite"):
         return None
+    if isinstance(record.get("think"), bool):
+        think = record["think"]
     u = rng.random()
     n_ex = 0 if u < 0.1 else (1 if u < 0.55 else 2)
     use_vars = rng.random() < variables_rate
@@ -1716,7 +2145,8 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
         actions, required = context_actions(request, (), cat, action_index, k, rng, examples, example_index,
                                             exclude_request=request)
         user = build_user(request, actions, examples, (), required=required, context_limit=context_chars)
-        return {"messages": [{"role": "user", "content": user}, {"role": "assistant", "content": QUESTION_HEAD + " " + q}]}
+        answer = render_think_question(record) if think else QUESTION_HEAD + " " + q
+        return {"messages": [{"role": "user", "content": user}, {"role": "assistant", "content": answer}]}
     flow = record.get("flow")
     if not isinstance(flow, dict) or not isinstance(flow.get("steps"), list) or not flow["steps"]:
         return None
@@ -1738,9 +2168,12 @@ def render_chat(record, catalog, action_index, example_index=None, rng=None, k=D
             return None
         previous = to_dollar_name_dollar(previous)  # as the server shows it (Router._previous)
     clear = None
-    if kind == "rewrite":
-        clear = str(record.get("clear") or "").strip() or clear_request(flow, cat)
-    answer = render_flow_answer(flow, cat, answer_format, clear)
+    if think:
+        answer = render_think_answer(flow, cat, answer_format, record, request)
+    else:
+        if kind == "rewrite":
+            clear = str(record.get("clear") or "").strip() or clear_request(flow, cat)
+        answer = render_flow_answer(flow, cat, answer_format, clear)
     limits = (context_chars, context_chars // 2, 0)
     if len(answer) > max_chars or (len(answer) * 10 > max_tokens * 16 and approx_tokens(answer) > max_tokens):
         limits = (0,)                    # cannot fit whatever the context: one render, the caller splits it

@@ -100,7 +100,8 @@ def test_lock_skips_the_plan():
 
 def test_reply_starts():
     d = lambda t: t
-    for ok in (["Plan:\n1."], ["Question: x"], ["{"], ["Pl"], ["Q"], ["Flow:"], ["Clear request: Move it"], ["Cle"]):
+    for ok in (["Plan:\n1."], ["Question: x"], ["{"], ["Pl"], ["Q"], ["Flow:"], ["Clear request: Move it"], ["Cle"],
+               ["Understand: Move the files."], ["Und"]):
         assert not C.not_a_flow(ok, d), ok
     for chat in (["Please"], ["Hello"], ["The answer"], ["Click"]):
         assert C.not_a_flow(chat, d), chat

@@ -256,6 +256,7 @@ class Router:
             raise ValueError(f"unknown mode {mode!r}: one of {', '.join(MODE_NAMES)}")
         self.default_mode = mode
         self.trained_rewrite = self._trained_rewrite(examples) if self.examples is not None else False
+        self.trained_think = self._trained_think(examples) if self.examples is not None else False
         self._agents = None          # per request (a copy of the router runs each moded request): the agents that ran
 
     # -- prompt format ------------------------------------------------------------------------------
@@ -324,6 +325,35 @@ class Router:
             return False
         return isinstance(n, int) and n > 0
 
+    @staticmethod
+    def _trained_think(examples):
+        """True when the model pack's training data had thinking answers (render_report.json beside the example index:
+        settings.think names files, or totals.think > 0)."""
+        f = Path(examples).resolve().parent / "render_report.json"
+        try:
+            r = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        st, tot = r.get("settings") if isinstance(r, dict) else None, r.get("totals") if isinstance(r, dict) else None
+        n = tot.get("think", 0) if isinstance(tot, dict) else 0
+        return bool(isinstance(st, dict) and st.get("think")) or (isinstance(n, int) and n > 0)
+
+    def supports_think(self):
+        """Whether the local model writes thinking answers (Understand / Facts / Missing / Steps / Check before the
+        flow): the backend says so (info["think"]) or its training data had them. Such a model's parts start with
+        ooa_format.think_prefix instead of "Plan:", and it needs no "Clear request:" understander (it says what it
+        understood by itself)."""
+        info = getattr(self.local, "info", None)
+        if isinstance(info, dict) and isinstance(info.get("think"), bool):
+            return info["think"]
+        return bool(self.trained_think)
+
+    def part_prefix(self, request, chunk):
+        """The given start of a part's answer: its plan lines (and "Flow:"), as a thinking block for a model that
+        thinks (ooa_format.think_prefix), else "Plan: ..." (ooa_format.answer_prefix)."""
+        lines = F.chunk_plan_lines(chunk)
+        return F.think_prefix(request, lines) if self.supports_think() else F.answer_prefix(lines)
+
     def supports_rewrite(self):
         """Whether the local model writes "Clear request: ..." when asked: the backend says so (info["rewrite"]) or
         its training data had rewrite rows. Older models skip the understander."""
@@ -333,12 +363,13 @@ class Router:
         return bool(self.trained_rewrite)
 
     # -- one answer: parse -> repair -> verify -------------------------------------------------------
-    def verify(self, text, existing=None, plan=None, request=None):
+    def verify(self, text, existing=None, plan=None, request=None, facts=None):
         """Flow text -> (flow dict, repair notes) when it passes, else (None, problems). plan: the answer's plan
         lines; an action the plan names that no step uses is a problem too. A compact flow (a model trained on
         compact answers: no variables list, steps without ids) is first rebuilt into a full one (ooa_format.expand_flow:
         variables declared from what the steps make and read, step ids, descriptions from the plan, name from the
-        request); a full flow is checked as written."""
+        request); a full flow is checked as written. facts: a thinking answer's Facts [(key, value)]; a fact no step
+        uses is a problem too (ooa_format.fact_coverage: the flow left a detail of the request out)."""
         if text is None:
             return None, ["The answer has a plan but no flow after 'Flow:'."]
         text = extract_json(text)
@@ -360,6 +391,7 @@ class Router:
         flow, notes = RP.repair(flow, self.cat)
         problems = R.problems(json.dumps(flow, separators=(",", ":"), ensure_ascii=False))
         problems += [f"The plan names {a} but no step of the flow uses it." for a in F.plan_coverage(plan, flow, self.cat)]
+        problems += [f"The facts say {k} = {v} but no step of the flow uses it." for k, v in F.fact_coverage(facts, flow)]
         if problems:
             return None, problems
         # the platform writes variables $name$ (Studio saves them so, and only $name$ is replaced inside text)
@@ -484,8 +516,13 @@ class Router:
                     return {"flow": flow, "notes": info, "plan": plan, "parts": True, "clear": clear}
                 errors = info
                 continue                                     # whole answers next
-            flow, info = self.verify(ans["flow_text"] if ans["kind"] == "flow" else raw, existing, ans["plan"], request)
+            flow, info = self.verify(ans["flow_text"] if ans["kind"] == "flow" else raw, existing, ans["plan"], request,
+                                     ans.get("facts"))
             tried.append({"source": "local", "ok": flow is not None})
+            if flow is None and ans.get("missing") and attempt == 0:
+                # a thinking answer that says a detail is missing and whose flow does not verify: ask for it
+                tried[-1]["kind"] = "question"
+                return {"question": F.missing_question(ans["missing"]), "plan": [], "clear": clear}
             looped = bool(stop and stop.startswith("loop"))
             if stop:
                 tried[-1]["stop"] = stop
@@ -556,7 +593,7 @@ class Router:
                 if items:
                     creq = f"With the current {items[-1]}: {creq[:1].lower() + creq[1:]}"
             part, prev, probs = None, None, None
-            prefix = F.answer_prefix(F.chunk_plan_lines(chunk)) if self.policy.part_plan_given else None
+            prefix = self.part_prefix(creq, chunk) if self.policy.part_plan_given else None
             for attempt in range(max(1, self.policy.part_attempts)):
                 if late():
                     return None, [OUT_OF_TIME]
@@ -656,7 +693,7 @@ class Router:
 
     def _team_answer(self, request, existing, tried, late, can_escalate, hard):
         p = self.policy
-        rewrite = p.understander and self.supports_rewrite()
+        rewrite = p.understander and self.supports_rewrite() and not self.supports_think()
         rule = self.parts_rule(request, can_escalate) if p.use_parts and p.parts_first else None
         prev = probs = None
         plan, errors, decomposed, clear = [], [], False, None
@@ -698,7 +735,7 @@ class Router:
                     plan_stop = plan_stop or ans["plan"]
                     continue
                 flow, info = self.verify(ans["flow_text"] if ans["kind"] == "flow" else raw, existing, ans["plan"],
-                                         request)
+                                         request, ans.get("facts"))
                 tried.append({"source": "local", "ok": flow is not None})
                 if stop:
                     tried[-1]["stop"] = stop
@@ -706,6 +743,9 @@ class Router:
                     self._agent("checker", t, ok=True)
                     return {"flow": flow, "notes": info, "plan": ans["plan"], "clear": clear}
                 tried[-1]["preview"] = (raw or "")[:300]
+                if ans.get("missing") and asked is None and not it.get("prefix") and not (attempt and plan):
+                    # a thinking answer that says a detail is missing and whose flow does not verify: ask for it
+                    asked = {"question": F.missing_question(ans["missing"]), "clear": ans.get("clear")}
                 if fail is None:
                     fail = (raw, stop, ans, info)
             self._agent("checker", t, ok=False)
@@ -813,7 +853,7 @@ class Router:
                     reqs[i] = (creq, known)
                     prev, probs = last[i]
                     prompt = self.prompt(creq, known, prev, probs, required=need)
-                    prefix = F.answer_prefix(F.chunk_plan_lines(chunks[i]["chunk"])) if p.part_plan_given else None
+                    prefix = self.part_prefix(creq, chunks[i]["chunk"]) if p.part_plan_given else None
                     for it in self._samples({"prompt": prompt, "attempt": rnd, "max_tokens": p.part_max_tokens,
                                              "prefix": prefix}, p.part_best_of, rnd * 31 + i):
                         items.append(it)
