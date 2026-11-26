@@ -9,6 +9,9 @@ exactly as Colab cells 6 / 6d do. Used by ooa_local_pc.ipynb (cells 3-4); everyt
     train_data/base/         the pretrained base model (base_checkpoints/d8 + optimizer) for the full training
     train_data/base_v6/      the clean base model (BASE "v6"): this PC's own (MODE "pretrain") or Drive nanochat_base_v6
     train_data/v6_tokenizer/ MODE "pretrain": Drive's v6 tokenizer when Colab made one (the PC then uses the same one)
+    train_data/colab_run/    MODE "colab": the Colab SFT run in progress (cell 7, Drive <base>/sft_run): its
+                             state.json, its last saved chunk (model + optimizer) and the base model's tokenizer, so
+                             train_pc.py --mode colab finishes the run here (the data: Drive sft_render, exactly)
 
 Files Drive shows as "name (1).jsonl" are copies made by a second upload: they are reported and never used.
 A refine / top-up also trains on the new files of RENDER_EXTRA that Colab's render does not have yet (e.g.
@@ -16,7 +19,7 @@ session_train.jsonl, made after the v5 run): taken from Drive sft/ when uploaded
 (data/extra_sft/), and rendered here alone with the settings and catalog of Colab's render (render_extras); the full
 run stays exactly the Colab data.
 
-    python data_pc.py --rpa DIR --drive-id ID [--mode topup|refine|full|install|pretrain] [--refresh] [--seq 4096]
+    python data_pc.py --rpa DIR --drive-id ID [--mode topup|refine|full|install|pretrain|colab] [--refresh] [--seq 4096]
                       [--base current|v6]            full: the Colab base (nanochat_base) or the clean base (v6)
     python data_pc.py --rpa DIR --fake-drive FOLDER ...     a local folder laid out like the Drive folder (tests)
 """
@@ -320,6 +323,67 @@ class Sync:
             self.log(f"{out['shards']} shards from Drive -> {dst}")
         return out
 
+    def colab_run(self, base=None):
+        """MODE "colab": the Colab SFT run in progress (cell 7: Drive <base folder>/sft_run/state.json and the last
+        chunk it saved) -> train_data/colab_run (state.json, chunks/chunk_<done-1>/ with model, meta and optimizer,
+        tokenizer/). base: "current" (nanochat_base) or "v6" (nanochat_base_v6); None: the folder whose run is not
+        finished (the newer one when both are). A run with no chunk saved yet also gets its base model
+        (base_model). -> {"folder", "started", "done", "chunks", "chunk_step"}."""
+        names = {"current": "nanochat_base", "v6": "nanochat_base_v6"}
+        folders = [names[base]] if base else list(names.values())
+        root = self.td / "colab_run"
+        runs = []
+        for folder in folders:
+            if f"{folder}/sft_run/state.json" not in self.drive.files:
+                continue
+            tmp = self.td / f".colab_state_{folder}.json"
+            self.fetch(f"{folder}/sft_run/state.json", tmp, refresh=True)
+            try:
+                st = json.loads(tmp.read_text(encoding="utf-8"))
+            finally:
+                tmp.unlink(missing_ok=True)
+            runs.append((folder, st))
+        if not runs:
+            raise SystemExit("Drive has no Colab SFT run (" + " / ".join(f"{f}/sft_run/state.json" for f in folders)
+                             + "): Colab cell 7 has not started one; MODE \"colab\" only continues a Colab run")
+        going = [r for r in runs if not r[1].get("finished")]
+        if not going:
+            raise SystemExit("the Colab SFT run on Drive is finished (" + ", ".join(f for f, _ in runs) + "): nothing "
+                             "to continue here; MODE \"install\" tests and installs its model")
+        folder, st = max(going, key=lambda r: str(r[1].get("started", "")))
+        if len(going) > 1:
+            self.log(f"two Colab runs in progress ({', '.join(f for f, _ in going)}): continuing the newer one, "
+                     f"{folder} (BASE in cell 1 picks the other)")
+        done = int(st.get("done", 0) or 0)
+        if root.exists():                                  # an older download: only this run's files stay
+            for p in (root / "chunks").glob("chunk_*") if (root / "chunks").exists() else []:
+                if p.name != f"chunk_{done - 1:03d}":
+                    shutil.rmtree(p, ignore_errors=True)
+        cstep = None
+        if done:
+            cdir = f"{folder}/sft_run/chunks/chunk_{done - 1:03d}"
+            cstep = self.newest_pair(cdir)
+            if not cstep:
+                raise SystemExit(f"Drive's Colab run says {done} chunk(s) are done but {cdir} has no model: run Colab "
+                                 "cell 7 once more (it notices that and starts the run over) or let it finish")
+            dst = root / "chunks" / f"chunk_{done - 1:03d}"
+            for name in (f"model_{cstep}.pt", f"meta_{cstep}.json", f"optim_{cstep}_rank0.pt"):
+                if f"{cdir}/{name}" in self.drive.files:
+                    self.fetch(f"{cdir}/{name}", dst / name)
+            self.log(f"the Colab run's last saved chunk: {done} of {st.get('chunks')} (step {int(cstep)})")
+        else:
+            self.base_model("v6" if folder.endswith("_v6") else "current")
+            self.log("the Colab run has no chunk saved yet: it starts here from its base model")
+        self.tokenizer(root, folder)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "state.json").write_text(json.dumps(st, indent=1), encoding="utf-8")
+        (root / "source.json").write_text(json.dumps({"folder": folder, "time": time.strftime("%Y-%m-%d %H:%M")}),
+                                          encoding="utf-8")
+        self.log(f"Colab SFT run {folder}/sft_run (started {st.get('started')}): {done} of {st.get('chunks')} chunks "
+                 f"done on Colab; this PC trains the rest (train_pc.py --mode colab)")
+        return {"folder": folder, "started": st.get("started"), "done": done, "chunks": st.get("chunks"),
+                "chunk_step": int(cstep) if cstep else None}
+
     # -- data -----------------------------------------------------------------------------------------------
     def render_from_drive(self, refresh=False, seq=4096, fillable=()):
         """Drive sft_render -> train_data/sft_render when Drive has one that differs from the local copy (its
@@ -542,7 +606,7 @@ def local_render_extras(mark):
 
 
 def sync(drive, rpa, mode="topup", refresh=False, seq=4096, log=print, platform=None, base="current",
-         pretrain_data="build"):
+         pretrain_data="build", colab_base=None):
     """Everything a mode needs. -> {"data": sft_render folder, "render": how it got here, "drive_model": ..., ...}
     Every mode but full also gets the new RENDER_EXTRA files Colab's render lacks (render_extras; from Drive sft/ when
     uploaded, else the repo's data/extra_sft) instead of rendering everything here; full stays exactly the Colab data.
@@ -555,6 +619,9 @@ def sync(drive, rpa, mode="topup", refresh=False, seq=4096, log=print, platform=
         out["drive_model"] = s.sft_model(optimizer=grow)
     if mode == "full":
         out["base_step"] = s.base_model(base)
+    if mode == "colab":                                       # finish the Colab run here: exactly its data
+        out["colab"] = s.colab_run(colab_base)
+        mode = "full"
     if mode == "pretrain":                                    # the clean base: its domain text is the rendered data
         out["pretrain"] = s.pretrain_inputs(shards=pretrain_data == "drive")
         mode = "full"                                         # the data exactly as Colab's (nothing added)
@@ -603,8 +670,10 @@ def main(argv=None):
     ap.add_argument("--rpa", required=True)
     ap.add_argument("--drive-id", default="")
     ap.add_argument("--fake-drive", default="", help="a local folder laid out like the Drive folder")
-    ap.add_argument("--mode", default="topup", choices=["topup", "refine", "full", "install", "pretrain"])
+    ap.add_argument("--mode", default="topup", choices=["topup", "refine", "full", "install", "pretrain", "colab"])
     ap.add_argument("--base", default="current", choices=["current", "v6"], help="full: the base model to download")
+    ap.add_argument("--colab-base", default=None, choices=["current", "v6"],
+                    help="colab: which base folder's Colab run (default: the one in progress)")
     ap.add_argument("--pretrain-data", default="build", choices=["build", "drive"])
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--seq", type=int, default=4096)
@@ -617,7 +686,7 @@ def main(argv=None):
         return
     drive = FolderDrive(a.fake_drive) if a.fake_drive else GdownDrive(a.drive_id)
     print(json.dumps(sync(drive, a.rpa, a.mode, a.refresh, a.seq, platform=a.platform, base=a.base,
-                          pretrain_data=a.pretrain_data), indent=1, default=str))
+                          pretrain_data=a.pretrain_data, colab_base=a.colab_base), indent=1, default=str))
 
 
 if __name__ == "__main__":

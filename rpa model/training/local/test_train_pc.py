@@ -1237,3 +1237,150 @@ def test_notebooks_check_weights():
     assert c8.index("check_model_dir(") < c8.index("_load_model(EVAL_SOURCE")
     # the Drive model a broken Colab run leaves aside is never taken for the newest model on the PC
     assert not D.SFT_ON_DRIVE.match("nanochat_base/chatsft_checkpoints_broken_20261124_101010/d8/model_012000.pt")
+
+
+def colab_drive(root):
+    """A fake Drive with a Colab SFT run in progress (cell 7): 3 of 12 chunks done, the last one saved."""
+    import hashlib
+    root = make_drive(root)
+    run = root / "nanochat_base/sft_run"
+    put_model(run / "chunks/chunk_001", 2000, b"old", b"ok")
+    put_model(run / "chunks/chunk_002", 3000, b"m3", b"ok")
+    sig = hashlib.sha1((root / "sft_render/render_report.json").read_bytes()).hexdigest()[:12]
+    st = {"steps": 12000, "chunks": 12, "seq": 4096, "device_batch": 2, "tokens_per_step": 32768, "lr": 0.8,
+          "smoltalk": 3000, "seed": 1, "data": "/content/drive/MyDrive/ooa-nanochat/sft_render", "data_sig": sig,
+          "base": {"dir": "/content/drive/MyDrive/ooa-nanochat/nanochat_base", "tag": "d8", "step": 4577,
+                   "tokenizer_sha1": hashlib.sha1(b"tok").hexdigest()},
+          "views": {"long_train.jsonl": 3.1, "v5_train.jsonl": 6.0}, "base_lrs": {"embedding_lr": 0.3,
+          "unembedding_lr": 0.008, "matrix_lr": 0.02}, "done": 3, "finished": False, "data_order": "one_stream",
+          "data_cursor": 12345, "started": "2026-11-25 08:00",
+          "nan_stops": [{"chunk": 3, "why": "Validation bpb is nan at step 3500", "optimizer": "loaded"}]}
+    (run / "state.json").write_text(json.dumps(st), encoding="utf-8")
+    return root, st
+
+
+def test_colab_run_continues_on_the_pc(monkeypatch, capsys):
+    """MODE "colab": data_pc downloads Drive's SFT run in progress (state, last chunk, tokenizer, its exact data) and
+    train_pc trains the remaining chunks with the run's own plan: the same chunk bounds, learning-rate spans, mixture,
+    seed, base rates and the data cursor Colab reached; a different render or a finished run is refused."""
+    import pytest
+    monkeypatch.setattr(T, "nonfinite_tensors", fake_nonfinite)
+    monkeypatch.setattr(P, "device_info", lambda: ("cuda", "RTX 4060 Laptop", 8.0, (8, 9)))
+    monkeypatch.setattr(P, "kill_leftover", lambda *a, **k: None)
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        drive, st = colab_drive(t / "drive")
+        rpa = t / "rpa"
+        for f in ("scripts/chat_sft.py", "nanochat/gpt.py"):
+            (rpa / "nanochat" / f).parent.mkdir(parents=True, exist_ok=True)
+            (rpa / "nanochat" / f).write_text("#\n", encoding="utf-8")
+        logs = []
+        out = D.sync(D.FolderDrive(drive), rpa, "colab", log=lambda *x: logs.append(" ".join(map(str, x))))
+        data = Path(out["data"])
+        cr = rpa / "train_data/colab_run"
+        assert out["colab"] == {"folder": "nanochat_base", "started": st["started"], "done": 3, "chunks": 12,
+                                "chunk_step": 3000}, out
+        assert sorted(p.name for p in (cr / "chunks").iterdir()) == ["chunk_002"]          # only the last chunk
+        assert (cr / "chunks/chunk_002/optim_003000_rank0.pt").exists() and (cr / "tokenizer/tokenizer.pkl").exists()
+        assert not (data / "feedback_train.jsonl").exists() and out["render"] == "downloaded"
+        assert P.main(["--rpa", str(rpa), "--mode", "colab", "--data", str(data), "--check"]) == 0
+        o = capsys.readouterr().out
+        assert "Colab run        : started 2026-11-25 08:00 on Colab, 3 of 12 chunks done" in o, o
+        assert "this PC trains chunks 4-12" in o and "data cursor 12345" in o and "12000 steps x 32,768 tokens" in o
+        assert "3 done" in o and "lr 0.8" in o and "SmolTalk rows 3000" in o and "chunk_002 step 3000" in o
+        assert not (rpa / "local_run/colab").exists()                                     # --check writes nothing
+        calls = []
+
+        def fake_write(nano, d, views, smoltalk, seed, compile_ok):
+            calls.append(("script", dict(views), smoltalk, seed))
+
+        def fake_chunk(cmd, cwd, env, log, total, offset, prio, watch):
+            calls.append(("chunk", cmd, {k: env[k] for k in ("OOA_STEP_OFFSET", "OOA_DATA_START", "NANOCHAT_DTYPE")}))
+            step = int([c for c in cmd if c.startswith("--num-iterations=")][0].split("=")[1]) // 4
+            put_model(Path(env["NANOCHAT_BASE_DIR"]) / "chatsft_checkpoints/d8", step, b"m", b"ok")
+            Path(env["OOA_DATA_OUT"]).write_text(json.dumps({"start": int(env["OOA_DATA_START"]), "fetched": 100,
+                                                             "size": 99999}), encoding="utf-8")
+            if offset == 5000:
+                raise KeyboardInterrupt()                                  # the PC stops in chunk 6
+            return 0, 1.2
+        monkeypatch.setattr(P, "write_script", fake_write)
+        monkeypatch.setattr(P, "run_chunk", fake_chunk)
+        with pytest.raises(KeyboardInterrupt):
+            P.main(["--rpa", str(rpa), "--mode", "colab", "--data", str(data)])
+        chunks = [c for c in calls if c[0] == "chunk"]
+        first = chunks[0][1]
+        assert "--model-step=3000" in first and "--load-optimizer=1" in first and "--total-batch-size=32768" in first
+        lr0, wd, final = P.lr_for_span(3 / 12, 4 / 12, 0.8)
+        assert f"--init-lr-frac={lr0:.6f}" in first and f"--final-lr-frac={final:.6f}" in first
+        assert "--unembedding-lr=0.008" in first and "--device-batch-size=1" in first     # 8 GB: 1 row x 8 passes
+        assert [c[2]["OOA_STEP_OFFSET"] for c in chunks] == ["3000", "4000", "5000"]
+        assert [c[2]["OOA_DATA_START"] for c in chunks] == ["12345", "12445", "12545"]       # Colab's stream goes on
+        assert chunks[0][2]["NANOCHAT_DTYPE"] == "bfloat16"
+        assert all(c[1] == st["views"] and c[2] == 3000 and c[3] == 1 for c in calls if c[0] == "script")
+        ls = json.loads((rpa / "local_run/colab/state.json").read_text(encoding="utf-8"))
+        assert ls["done"] == 5 and ls["colab_started"] == st["started"] and ls["mode"] == "colab"
+        assert ls["data_cursor"] == 12545 and ls["install_step"] == 12000
+        # run again: it continues here at chunk 6 (Colab did not go further)
+        calls.clear()
+        monkeypatch.setattr(P, "run_chunk", lambda cmd, cwd, env, log, total, offset, prio, watch:
+                            fake_chunk(cmd, cwd, env, log, total, -1, prio, watch) and
+                            calls[-1][2].update(off=str(offset)) or (0, 1.2))
+        assert P.main(["--rpa", str(rpa), "--mode", "colab", "--data", str(data)]) == 0
+        o = capsys.readouterr().out
+        offs = [c[2]["off"] for c in calls if c[0] == "chunk"]
+        assert "TRAINED" in o and offs == [str(k * 1000) for k in range(5, 12)], offs
+        ls = json.loads((rpa / "local_run/colab/state.json").read_text(encoding="utf-8"))
+        assert ls["done"] == 12 and ls["result"].endswith("chunk_011")
+        # the eval treats it like a full run (no other start model to compare with)
+        assert E.start_pack(rpa, ls, data, cr / "tokenizer") is None
+        # tested (eval_pc marks it finished): running again does nothing
+        ls["finished"] = "20261126_101010"
+        (rpa / "local_run/colab/state.json").write_text(json.dumps(ls), encoding="utf-8")
+        with pytest.raises(SystemExit) as ex:
+            P.main(["--rpa", str(rpa), "--mode", "colab", "--data", str(data)])
+        assert "already finished on this PC" in str(ex.value)
+        # Drive's data is not the run's (a new render): refused with what to do
+        (data / "render_report.json").write_text(json.dumps({"seconds": "other", "settings": V4}), encoding="utf-8")
+        with pytest.raises(SystemExit):
+            P.main(["--rpa", str(rpa), "--mode", "colab", "--data", str(data), "--check", "--restart"])
+        assert "is not the data the Colab run trains on" in capsys.readouterr().out
+        # a finished Colab run: nothing to continue
+        st["finished"] = True
+        (drive / "nanochat_base/sft_run/state.json").write_text(json.dumps(st), encoding="utf-8")
+        with pytest.raises(SystemExit) as ex:
+            D.sync(D.FolderDrive(drive), rpa, "colab", log=lambda *x: None)
+        assert "finished" in str(ex.value)
+
+
+def test_notebook_colab_mode():
+    code = [s for s, k in notebook_cells() if k == "code"]
+    assert '"colab"' in code[0] and '"pretrain", "colab")' in code[1] and 'MODE "colab" needs an NVIDIA GPU' in code[1]
+    assert '"colab_run" if MODE_NOW == "colab"' in code[2]
+    md = "\n".join(s for s, k in notebook_cells() if k == "markdown")
+    assert '`"colab"` (NVIDIA GPU)' in md and "finish it here" in md
+
+
+def test_colab_run_newer_on_drive_wins(monkeypatch, capsys):
+    """The PC continued a Colab run to chunk 5, then Colab saved chunk 7: the PC continues from Colab's chunk 7."""
+    monkeypatch.setattr(T, "nonfinite_tensors", fake_nonfinite)
+    monkeypatch.setattr(P, "device_info", lambda: ("cuda", "RTX 4060 Laptop", 8.0, (8, 9)))
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        drive, st = colab_drive(t / "drive")
+        rpa = t / "rpa"
+        for f in ("scripts/chat_sft.py", "nanochat/gpt.py"):
+            (rpa / "nanochat" / f).parent.mkdir(parents=True, exist_ok=True)
+            (rpa / "nanochat" / f).write_text("#\n", encoding="utf-8")
+        run = rpa / "local_run/colab"
+        put_model(run / "chunks/chunk_004", 5000)
+        (run / "state.json").write_text(json.dumps(dict(st, mode="colab", done=5, colab_started=st["started"],
+                                                        device_batch=1, start_d8="x", start_step=3000)),
+                                        encoding="utf-8")
+        put_model(drive / "nanochat_base/sft_run/chunks/chunk_006", 7000, b"m7", b"ok")
+        (drive / "nanochat_base/sft_run/state.json").write_text(json.dumps(dict(st, done=7)), encoding="utf-8")
+        data = Path(D.sync(D.FolderDrive(drive), rpa, "colab", log=lambda *x: None)["data"])
+        assert sorted(p.name for p in (rpa / "train_data/colab_run/chunks").iterdir()) == ["chunk_006"]
+        assert P.main(["--rpa", str(rpa), "--mode", "colab", "--data", str(data), "--check"]) == 0
+        o = capsys.readouterr().out
+        assert "Colab went further (7 chunks) than this PC (5)" in o and "chunk_006 step 7000" in o
+        assert "this PC trains chunks 8-12" in o and "7 done" in o, o

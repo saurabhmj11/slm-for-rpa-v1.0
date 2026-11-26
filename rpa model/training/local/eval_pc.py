@@ -230,7 +230,7 @@ def start_pack(rpa, st, data, tok):
     nothing installed or an older model. It is scored with the run's own catalog and examples (the context it was
     trained with). None when the run started from the installed model (then the installed one is the reference)."""
     rpa = Path(rpa)
-    if not st.get("start") or st.get("mode") == "full":
+    if not st.get("start") or st.get("mode") in ("full", "colab"):
         return None
     sroot = Path(st["start"])
     if sroot.resolve() == (rpa / "nanochat_base").resolve():

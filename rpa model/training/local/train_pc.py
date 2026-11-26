@@ -8,6 +8,11 @@
     python train_pc.py --mode refine --data DIR  NVIDIA GPU: continue the finished Colab model (v5) for 1500 steps on
                                                  the newest data (v5, session) and the weak areas, with replay of the
                                                  rest (sft_setup.REFINE_SHARES); saved every 250 steps
+    python train_pc.py --mode colab --data DIR   NVIDIA GPU: FINISH the Colab SFT run in progress here (cell 7's
+                                                 chunked run, when Colab misbehaves or runs out of hours): data_pc.py
+                                                 --mode colab downloads Drive sft_run/state.json, its last saved chunk
+                                                 and Drive's sft_render; the remaining chunks train with the run's own
+                                                 plan (steps, chunks, learning rates, data mixture, seed, data cursor)
     ... --check                                  only show what would be used
     ... --measure 3                              train 3 steps, print seconds per step, change nothing
     ... --restart                                throw away a run in progress and start over
@@ -33,7 +38,8 @@ never share a state. The result is the newest chunk; eval_pc.py scores it and in
 Broken weights (nan / inf) never go further: the start model is checked before anything runs (also --check), and a
 broken one is refused with what to use instead (--start-from pc / drive; notebook cell 1 REFINE_FROM), never swapped
 silently. The optimizer state saved with the start model is loaded only when it is finite (optimizer_choice). While a
-chunk trains, its output is watched (follow): the step's own loss not a number for NAN_STEPS steps in a row
+chunk trains, a step whose loss or gradients are not finite is skipped (sft_setup's step guard; float16 keeps its
+GradScaler scale at 1 or above) and its output is watched (follow): such steps for NAN_STEPS steps in a row
 (chat_sft's guard, sft_setup) or a validation bpb that is not a number stops the chunk; nothing of it is saved, the state notes it, and the
 next try of that chunk starts with a fresh optimizer state when the loaded one may be the cause.
 """
@@ -61,6 +67,7 @@ from sft_chunks import (NANOCHAT_COMMIT, NAN_STEPS, BASE_LRS, MOMENTUM_OLD, MOME
                         DATA_ORDER)
 
 TOKENS_PER_STEP = 32768          # Colab: SFT_SEQ 4096 x device batch 2 x 4 micro-batches; every mode keeps it
+COLAB_RUN = ("train_data", "colab_run")   # MODE "colab": Drive's SFT run in progress, as data_pc.py downloads it
 FULL_STEPS = 12000               # Colab SFT_ITERS 48000 micro-batches = 12000 optimizer steps
 FULL_LR = 0.8                    # Colab: nanochat's default --init-lr-frac
 TOPUP_LR = 0.3                   # a top-up only adjusts an already trained model
@@ -213,6 +220,55 @@ def broken_message(rpa, root, step, bad, mode="refine"):
     return msg
 
 
+def colab_base(st):
+    """The base a Colab run trains on: "v6" when its base folder is nanochat_base_v6, else "current"."""
+    return "v6" if str((st.get("base") or {}).get("dir", "")).replace("\\", "/").rstrip("/").endswith("_v6") \
+        else "current"
+
+
+def colab_source(rpa, start=None):
+    """The Colab SFT run (cell 7) data_pc.py --mode colab downloaded to train_data/colab_run (or start): -> (folder, its
+    state.json, the d8 folder of the model the next chunk starts from, its step). The model is the last chunk Colab
+    saved (colab_run/chunks/chunk_<done-1>); a run with no chunk saved yet starts from its base model (train_data/base,
+    train_data/base_v6 for a v6 run). ({} , None, None) parts when nothing was downloaded."""
+    root = Path(start).expanduser().resolve() if start else Path(rpa).joinpath(*COLAB_RUN)
+    try:
+        st = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return root, {}, None, None
+    done = int(st.get("done", 0) or 0)
+    if done:
+        d8 = root / "chunks" / f"chunk_{done - 1:03d}"
+    else:
+        d8 = base_root(rpa, colab_base(st)) / "base_checkpoints" / ((st.get("base") or {}).get("tag") or "d8")
+    return root, st, d8, newest(d8)
+
+
+def colab_problems(st, data, tok, tps, seq, dbs):
+    """Why the downloaded Colab run cannot be continued here (empty: it can)."""
+    out = []
+    if not st:
+        return ["no Colab SFT run here (train_data/colab_run/state.json): run the data cell with MODE \"colab\" "
+                "(data_pc.py --mode colab) first"]
+    if st.get("finished"):
+        out.append("the Colab SFT run is finished (all its chunks are done): nothing to continue; MODE \"install\" "
+                   "tests and installs its model")
+    if st.get("data_sig") != data_sig(data):
+        out.append(f"the training data here ({data}: render {data_sig(data)}) is not the data the Colab run trains on "
+                   f"(render {st.get('data_sig')}): run the data cell again with REFRESH_DATA = True so it downloads "
+                   "Drive's sft_render, or let Colab finish the run")
+    want = (st.get("base") or {}).get("tokenizer_sha1")
+    if want and tok and (Path(tok) / "tokenizer.pkl").exists() and SC.file_sha1(Path(tok) / "tokenizer.pkl") != want:
+        out.append(f"the tokenizer in {tok} is not the one the Colab run trains with: run the data cell again")
+    if tps % (seq * dbs):
+        out.append(f"device batch {dbs} x window {seq} does not divide the run's {tps} tokens per step")
+    gone = sorted(n for n in (st.get("views") or {}) if not (Path(data) / n).exists())
+    if gone:
+        out.append(f"files the Colab run trains on are missing in {data}: {T.short_list(gone)} (run the data cell "
+                   "again with REFRESH_DATA = True)")
+    return out
+
+
 def write_script(nano, data, views, smoltalk, seed, compile_ok):
     """nanochat/scripts/chat_sft_ooa.py for one chunk (sft_chunks.write_script, the same as Colab cell 7)."""
     return SC.write_script(nano, data, views, smoltalk, seed, compile_ok, HERE.parent)
@@ -290,7 +346,7 @@ def main(argv=None):
         pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rpa", default=str(RPA_DEFAULT), help='the "rpa model" folder')
-    ap.add_argument("--mode", choices=["full", "topup", "refine"], required=True)
+    ap.add_argument("--mode", choices=["full", "topup", "refine", "colab"], required=True)
     ap.add_argument("--data", required=True, help="the rendered training data (sft_render)")
     ap.add_argument("--base", choices=BASES, default="current",
                     help="full: the base model: current (train_data/base, the Colab base) or v6 (train_data/base_v6, "
@@ -330,12 +386,20 @@ def main(argv=None):
     rpa = Path(a.rpa).expanduser().resolve()
     data = Path(a.data).expanduser().resolve()
     nano = rpa / "nanochat"
-    full, refine = a.mode == "full", a.mode == "refine"
+    full, refine, colab = a.mode == "full", a.mode == "refine", a.mode == "colab"
     dev, dev_name, mem, cap = device_info()
     gpu = dev == "cuda"
     seq_given = bool(a.seq)
     a.seq = a.seq or default_seq(gpu)
     a.steps = a.steps or (FULL_STEPS if full else REFINE_STEPS if refine else TOPUP_STEPS)
+    tps = TOKENS_PER_STEP
+    if colab:                                   # the Colab run's own plan; nothing of it is chosen here
+        c_root, c_st, c_d8, c_step = colab_source(rpa, a.start)
+        if c_st:
+            a.steps, a.chunks, a.seq = int(c_st["steps"]), int(c_st["chunks"]), int(c_st["seq"])
+            tps, a.lr, a.smoltalk = int(c_st["tokens_per_step"]), float(c_st["lr"]), int(c_st.get("smoltalk", 0))
+            if a.measure:
+                a.steps, a.chunks = a.measure, 1
     if a.measure:
         a.steps, a.chunks = a.measure, 1
     a.chunks = a.chunks or (max(1, round(a.steps / REFINE_CHUNK)) if refine else 1 if gpu else max(1, round(a.steps / 50)))
@@ -346,18 +410,36 @@ def main(argv=None):
     a.smoltalk = a.smoltalk if a.smoltalk is not None else (
         SMOLTALK_ROWS if full and not a.measure and a.base != "v6" else 0)
     dbs = a.device_batch or (gpu_batch(mem, a.seq) if gpu else 1)
-    if TOKENS_PER_STEP % (a.seq * dbs):
-        raise SystemExit(f"--device-batch {dbs} does not divide {TOKENS_PER_STEP} tokens per step at window {a.seq}")
-    accum = TOKENS_PER_STEP // (a.seq * dbs)
+    if tps % (a.seq * dbs):
+        raise SystemExit(f"--device-batch {dbs} does not divide {tps} tokens per step at window {a.seq}")
+    accum = tps // (a.seq * dbs)
 
     run_dir = rpa / "local_run" / ("measure" if a.measure else run_name(a.mode, a.base))
     state_f = run_dir / "state.json"
     if (a.restart or a.measure) and run_dir.exists() and not a.check:
         shutil.rmtree(run_dir, ignore_errors=True)
     state = json.loads(state_f.read_text(encoding="utf-8")) if state_f.exists() else {}
+    if colab and state and not a.measure:
+        if a.restart:
+            state = {}
+        elif not c_st or state.get("colab_started") != c_st.get("started"):
+            if c_st:
+                print(f"note: the Colab run downloaded now (started {c_st.get('started')}) is not the one this PC "
+                      f"continued (started {state.get('colab_started')}): it is continued instead")
+            state = {}
+        elif state.get("finished"):
+            raise SystemExit(f"this Colab run (started {c_st.get('started')}) was already finished on this PC and "
+                             f"tested ({state.get('finished')}): nothing to do. --restart (RESTART_TRAINING = True) "
+                             "trains its remaining chunks here again.")
+        elif int(c_st.get("done", 0) or 0) > int(state.get("done", 0) or 0):
+            print(f"note: Colab went further ({c_st.get('done')} chunks) than this PC ({state.get('done')}): this PC "
+                  "continues from Colab's newest chunk")
+            state = {}
+        if not state and not a.check:
+            shutil.rmtree(run_dir, ignore_errors=True)
     if state.get("finished"):
         state = {}                                    # the last run is complete (eval_pc.py took it): a new one
-    if state and not full and not a.start and a.start_from != "auto" and \
+    if state and a.mode in ("topup", "refine") and not a.start and a.start_from != "auto" and \
             Path(state["start"]) != start_root(rpa, a.start_from):
         print(f"note: the run in progress started from {model_name(rpa, state['start'])}; --start-from "
               f"{a.start_from} (REFINE_FROM) asks for {model_name(rpa, start_root(rpa, a.start_from))}: a new run "
@@ -376,14 +458,19 @@ def main(argv=None):
             if not a.check:
                 shutil.rmtree(run_dir, ignore_errors=True)
 
-    # where the run starts: the base model (full) or the newest SFT model (topup)
-    if state:
+    # where the run starts: the base model (full), the newest SFT model (topup / refine), the Colab run's last chunk
+    if colab:
+        src_root = c_root
+        src_d8, src_step = (Path(state["start_d8"]), state["start_step"]) if state else (c_d8, c_step)
+        src_d8 = src_d8 or c_root / "chunks"
+    elif state:
         src_root, src_step = Path(state["start"]), state["start_step"]
     else:
         src_root = Path(a.start).expanduser().resolve() if a.start else (
             base_root(rpa, a.base) if full else start_root(rpa, a.start_from))
         src_step = newest(src_root / ("base_checkpoints" if full else "chatsft_checkpoints") / "d8")
-    src_d8 = src_root / ("base_checkpoints" if full else "chatsft_checkpoints") / "d8"
+    if not colab:
+        src_d8 = src_root / ("base_checkpoints" if full else "chatsft_checkpoints") / "d8"
     try:
         src_meta = json.loads((src_d8 / f"meta_{src_step:06d}.json").read_text(encoding="utf-8")) if src_step is not None else {}
     except (OSError, ValueError):
@@ -391,7 +478,9 @@ def main(argv=None):
     tok, tok_why = pick_tokenizer(rpa, src_root, src_meta)
 
     problems = []
-    if src_step is None:
+    if colab:
+        problems += colab_problems(c_st, data, tok, tps, a.seq, dbs)
+    if src_step is None and not (colab and not c_st):
         problems.append(f"no model_<N>.pt + meta_<N>.json in {src_d8}"
                         + ((" (the clean base: notebook MODE \"pretrain\" on this PC, or Drive nanochat_base_v6 from "
                             "Colab PROFILE \"v6\")" if a.base == "v6" else
@@ -408,12 +497,16 @@ def main(argv=None):
         problems.append(f"{data} is not rendered data (no examples.jsonl): run the data cell (data_pc.py) first")
     if full and not gpu and not (a.allow_cpu or a.measure):
         problems.append("full training needs an NVIDIA GPU (12000 steps; a CPU would take weeks): use --mode topup")
+    if colab and not gpu and not (a.allow_cpu or a.measure):
+        problems.append("continuing the Colab run needs an NVIDIA GPU (thousands of steps; a CPU would take weeks)")
     if refine and not gpu and not (a.allow_cpu or a.measure):
         problems.append(f"refine is sized for an NVIDIA GPU ({a.steps} steps; about a day per 1500 steps on a CPU): "
                         "use --mode topup on this PC")
     health = model_health(src_d8, src_step) if src_step is not None else ("unchecked", [])
     if health[0] == "broken":
-        problems.append(broken_message(rpa, src_root, src_step, health[1], a.mode) if not full else
+        problems.append(f"the Colab run's model {src_d8} (step {src_step}) has broken weights (nan/inf) in: "
+                        f"{T.short_list(health[1])}: Colab saved no good chunk to continue from" if colab else
+                        broken_message(rpa, src_root, src_step, health[1], a.mode) if not full else
                         f"the base model in {src_d8} (step {src_step}) has broken weights (nan/inf) in: "
                         f"{T.short_list(health[1])}; download it again (notebook cell 3 with REFRESH_DATA = True)")
     if gpu and cap and cap < (7, 5) and not a.no_compile:
@@ -428,8 +521,9 @@ def main(argv=None):
     if state:                                                 # a run in progress keeps its own settings
         a.lr, dbs = state["lr"], state["device_batch"]
         a.smoltalk = state.get("smoltalk", a.smoltalk)
-        accum = TOKENS_PER_STEP // (a.seq * dbs)
-    if state and state.get("data_sig") != data_sig(data):
+        tps = state.get("tokens_per_step", tps)
+        accum = tps // (a.seq * dbs)
+    if state and state.get("data_sig") != data_sig(data) and not colab:
         print("note: the training data changed since this run started; the run continues on the new data")
     try:
         _mt = json.loads((data / "render_report.json").read_text(encoding="utf-8"))["settings"]["max_tokens"]
@@ -440,34 +534,52 @@ def main(argv=None):
               "are skipped (the notebook's cell 3 renders it for this window)")
 
     cpt = BS.plan_chars_per_token(tok) if tok else None          # the tokenizer's own characters per token (v6 card)
-    views, stats, bud, table = T.plan_for_local(str(data), a.mode, a.steps, TOKENS_PER_STEP, smoltalk_rows=a.smoltalk,
-                                                chars_per_token=cpt) \
-        if data.exists() and (data / "val.jsonl").exists() else ({}, {}, 0, [])
-    done = state.get("done", 0)
+    if colab:                                                   # the Colab run's own mixture, never planned again
+        views = dict(c_st.get("views") or {})
+        stats = T.file_stats(str(data), chars_per_token=cpt or T.CHARS_PER_TOKEN) if data.is_dir() else {}
+        bud = T.budget(a.steps, tps) - int(a.smoltalk * 500)
+        table = T.mixture_table({n: stats[n] for n in views if n in stats},
+                                {n: v for n, v in views.items() if n in stats}, bud) if stats else []
+    else:
+        views, stats, bud, table = T.plan_for_local(str(data), a.mode, a.steps, tps, smoltalk_rows=a.smoltalk,
+                                                    chars_per_token=cpt) \
+            if data.exists() and (data / "val.jsonl").exists() else ({}, {}, 0, [])
+    done = state.get("done", 0) if state or not colab else int(c_st.get("done", 0) or 0)
+    if a.measure:
+        done = 0
     bounds = chunk_bounds(a.steps, a.chunks)                    # chunk k trains steps bounds[k]..bounds[k+1]
     chunk = max(bounds[k + 1] - bounds[k] for k in range(a.chunks))
     print("assistant folder :", rpa)
     print("device           :", dev_name, f"({mem:.0f} GB)" if gpu else "", "| torch.compile", "off" if a.no_compile else "on")
     print("mode             :", a.mode, "| from", src_d8, f"step {src_step}")
-    if not full:
+    if colab and c_st:
+        print("Colab run        :", f"started {c_st.get('started')} on Colab, {c_st.get('done', 0)} of "
+              f"{c_st.get('chunks')} chunks done there ({c_st.get('base', {}).get('tag')} base "
+              f"{colab_base(c_st)}); this PC trains chunks {int(state.get('done', c_st.get('done', 0)) or 0) + 1}-"
+              f"{c_st.get('chunks')} with the run's own plan (seed {c_st.get('seed')}, data cursor "
+              f"{state.get('data_cursor', c_st.get('data_cursor'))})")
+    if not full and not colab:
         print("start model      :", start_label(rpa, src_root) if a.start_from == "auto" or a.start else
               f"{model_name(rpa, src_root)} (--start-from {a.start_from}: notebook cell 1 REFINE_FROM)")
     print("weights          :", {"ok": "all finite (checked)", "broken": "BROKEN (nan/inf), see below"}.get(
         health[0], "not checked: " + "; ".join(health[1])))
     _k = state.get("done", 0)                              # the next chunk: from the start model or the last chunk
-    _fd = src_d8 if _k == 0 else run_dir / "chunks" / f"chunk_{_k - 1:03d}"
-    _fs = src_step if _k == 0 else newest(_fd)
+    _fd = src_d8 if _k == 0 or (colab and not state) else run_dir / "chunks" / f"chunk_{_k - 1:03d}"
+    _fs = src_step if _k == 0 or (colab and not state) else newest(_fd)
+    if colab and not state:
+        _k = int(c_st.get("done", 0) or 0)
     if _fs is not None and health[0] != "broken":
         print("optimizer        :", optimizer_choice(_fd, _fs, a.optimizer, any(
             e["chunk"] == _k and e["optimizer"] == "loaded" for e in state.get("nan_stops", [])))[1])
     print("training data    :", data, f"(render {data_sig(data)})")
-    print(f"plan             : {a.steps} steps x {TOKENS_PER_STEP:,} tokens at window {a.seq} (device batch {dbs}, "
+    print(f"plan             : {a.steps} steps x {tps:,} tokens at window {a.seq} (device batch {dbs}, "
           f"{accum} micro-batches per step) in {a.chunks} chunk(s) of up to {chunk}; {done} done | lr {a.lr} | "
           f"SmolTalk rows {a.smoltalk}")
     if full:
         print("base model       :", f"{a.base} ({src_root})", "| tokenizer", tok,
               f"({cpt} characters per token)" if cpt else "")
-    print("base rates       :", " ".join(lr_flags(state.get("base_lrs") or base_lrs(rpa, src_root if full else None))),
+    print("base rates       :", " ".join(lr_flags(state.get("base_lrs") or (c_st.get("base_lrs") if colab else None)
+                                              or base_lrs(rpa, src_root if full else None))),
           "(Colab's, times the lr above)")
     if table:
         print(f"data mixture     : about {bud / 1e6:.1f}M tokens of conversations; views per row:")
@@ -491,6 +603,20 @@ def main(argv=None):
     if os.name != "nt":                                        # a SIGTERM (stopped cell) ends the chunk cleanly too
         import signal
         signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    if colab and not state:                  # the Colab run, continued here: its plan, its last chunk as chunk done-1
+        cd = int(c_st.get("done", 0) or 0)
+        state = {k_: c_st.get(k_) for k_ in ("steps", "chunks", "seq", "tokens_per_step", "lr", "smoltalk", "seed",
+                                              "views", "base_lrs", "data_order", "data_cursor", "data_sig")}
+        state.update(mode="colab", base=colab_base(c_st), device_batch=dbs, start=str(c_root), start_d8=str(src_d8),
+                     start_step=src_step, data=str(data), done=cd, started=time.strftime("%Y-%m-%d %H:%M"),
+                     tokenizer=str(tok), install_step=a.steps, drive_origin=None, colab_started=c_st.get("started"),
+                     colab_done=cd, colab_nan_stops=c_st.get("nan_stops", []))
+        if cd and not a.measure:
+            copy_model(src_d8, src_step, run_dir / "chunks" / f"chunk_{cd - 1:03d}")
+        views = state["views"]
+        done = cd
+        if a.measure:
+            state["done"] = done = 0
     if not state:
         state = {"mode": a.mode, "base": a.base if full else None, "steps": a.steps, "chunks": a.chunks, "seq": a.seq, "device_batch": dbs,
                  "start": str(src_root), "start_step": src_step, "lr": a.lr, "smoltalk": a.smoltalk, "data": str(data),
@@ -499,7 +625,7 @@ def main(argv=None):
                  "data_order": DATA_ORDER, "data_cursor": 0,
                  "install_step": a.steps if full else src_step + a.steps,
                  "drive_origin": drive_id(src_root) or (local_origin(rpa) if src_root == rpa / "nanochat_base" else None)}
-    else:
+    elif not colab:
         state["views"] = views                               # same plan unless the data changed
     state.setdefault("base_lrs", base_lrs(rpa, src_root if full else None))   # one set of rates for every chunk
     state_f.write_text(json.dumps(state, indent=1), encoding="utf-8")
@@ -523,6 +649,8 @@ def main(argv=None):
         work = run_dir / "work"
         shutil.rmtree(work, ignore_errors=True)
         wb = prepare_work(work / "nanochat_base", from_dir, from_step, tok)
+        if colab:
+            views = state["views"]
         if (run_dir / "task_data").exists():
             shutil.copytree(run_dir / "task_data", wb / "task_data", dirs_exist_ok=True)
         f_status, f_bad = model_health(from_dir, from_step)
@@ -539,7 +667,7 @@ def main(argv=None):
         env = dict(os.environ, NANOCHAT_BASE_DIR=str(wb), OOA_TRAINING_DIR=str(HERE.parent), PYTHONUTF8="1",
                    PYTHONIOENCODING="utf-8", NANOCHAT_DTYPE=dtype, OMP_NUM_THREADS=str(1 if gpu else threads),
                    OOA_STEP_OFFSET=str(bounds[k]), OOA_DATA_START=str(data_start), OOA_DATA_OUT=str(data_out))
-        cmd = chunk_command(sys.executable, a.seq, dbs, TOKENS_PER_STEP, steps_k, (lr0, wd, final), from_step,
+        cmd = chunk_command(sys.executable, a.seq, dbs, tps, steps_k, (lr0, wd, final), from_step,
                             load_opt, state["base_lrs"], 100 if gpu else -1, None if gpu else "cpu")
         t0 = time.time()
         watch = {}

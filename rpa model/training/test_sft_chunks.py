@@ -496,7 +496,9 @@ print("RESULT", json.dumps({{"status": r["status"], "trained_now": r["trained_no
 
 def test_tiny_cpu_run_with_a_session_break():
     """Chunk 1 of 3 in one process, then a new process (a new Colab session, after a disconnect in the middle of
-    chunk 2) continues chunks 2-3; the finished model is installed to chatsft_checkpoints/<tag>."""
+    chunk 2) continues chunks 2-3; the finished model is installed to chatsft_checkpoints/<tag>. In chunk 1 the first
+    micro-batch of step 1 gets a nan loss (OOA_TEST_NAN): the step guard skips that step, the training goes on and
+    the chunk is saved with finite weights."""
     if not NANO or not Path(NANO, "scripts/chat_sft.py").exists():
         print("  (skipped: set NANOCHAT_DIR to the pinned nanochat)")
         return
@@ -511,15 +513,19 @@ def test_tiny_cpu_run_with_a_session_break():
         tag = SC.base_tag(base)
         bstep = SC.newest(base / "base_checkpoints" / tag)
 
-        def session(stop, work):
+        def session(stop, work, **extra):
             code = SESSION.format(here=str(HERE), base=str(base), data=str(data), nano=str(nano), work=str(work),
                                   stop=stop)
-            r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=1200)
+            r = subprocess.run([sys.executable, "-c", code], env=dict(env, **extra), capture_output=True, text=True,
+                               timeout=1200)
             assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-4000:]
             return r.stdout, json.loads(r.stdout.rsplit("RESULT ", 1)[1])
 
-        out, res = session(1, t / "work1")
+        out, res = session(1, t / "work1", OOA_TEST_NAN="1:1")
         assert res == {"status": "paused", "trained_now": 1}, out
+        assert T.SKIP_MARK + " step 00001: loss not a number in micro-batch [1] of 2" in out, out
+        log1 = (t / "work1/train.log").read_text(encoding="utf-8")
+        assert "| skipped: 1" in log1 and "loss: nan" not in log1 and T.NAN_MARK not in log1, log1[-3000:]
         assert "NEW SFT RUN" in out and "SFT attention window" in out and "chunk 1/3 saved to Drive" in out
         assert "continues at chunk 2" in out
         st = json.loads((base / "sft_run/state.json").read_text(encoding="utf-8"))

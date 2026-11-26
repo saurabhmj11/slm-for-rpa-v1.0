@@ -395,6 +395,7 @@ def run_chunk(cmd, cwd, env, log, total_steps, step_offset, prio, watch=None, ev
 STEP_RE = re.compile(r"step (\d+) \(([\d.]+)%\) \| loss: ([-+]?(?:nan|inf|[\d.]+(?:e[-+]?\d+)?))"
                      r".*?dt: ([\d.]+)ms", re.I)
 VAL_RE = re.compile(r"Step (\d+) \| Validation bpb: (\S+)")
+SKIP_SHOWN = 20                  # skipped-step lines shown in full before only every 50th
 
 
 def follow(p, lf, dts, total_steps, step_offset, watch=None, every=10):
@@ -403,9 +404,12 @@ def follow(p, lf, dts, total_steps, step_offset, watch=None, every=10):
     NaN stop (sft_setup NAN_MARK: the step's own loss not a number for NAN_STEPS steps in a row) -> the chunk is ended
     (nothing of it is saved: chat_sft saves only at its last step) and watch["nan"] says what was seen. The loss on
     the step lines is NOT counted: it is chat_sft's running average, which stays nan for good after one nan step
-    (a float16 run's GradScaler skips such a step and the model stays fine)."""
+    (a float16 run's GradScaler skips such a step and the model stays fine). The step guard's lines (sft_setup
+    SKIP_MARK: a step skipped because a micro-batch loss or the gradients were not finite) are shown: the first
+    SKIP_SHOWN, then every 50th."""
     watch = {} if watch is None else watch
     shown_nan = False
+    skips = 0
     for line in p.stdout:
         lf.write(line)
         lf.flush()
@@ -430,6 +434,13 @@ def follow(p, lf, dts, total_steps, step_offset, watch=None, every=10):
             why = (f"Validation bpb is {v.group(2)} at step {step_offset + int(v.group(1))}"
                    + (" (before any training step of this chunk: the model it started from gives nan)"
                       if int(v.group(1)) == 0 else ""))
+        elif line.startswith(T.SKIP_MARK):
+            skips += 1
+            if skips <= SKIP_SHOWN or skips % 50 == 0:
+                print("   " + line.rstrip(), flush=True)
+            if skips == SKIP_SHOWN:
+                print(f"   (more skipped steps are only in the log, every 50th is shown here; {NAN_STEPS} nan steps in "
+                      "a row stop the training)", flush=True)
         elif T.NAN_MARK in line:
             print("   " + line.rstrip(), flush=True)
             why = line.split(":", 1)[-1].strip()
@@ -697,8 +708,10 @@ def colab_sft(base_dir, data, steps, chunks, seq, device_batch, tokens_per_step,
                 continue
             raise SystemExit(f"STOPPED: chunk {k + 1} went unstable ({why}) with a fresh optimizer state too, so "
                              f"running it again will not help. The chunks before it are kept on Drive and the "
-                             f"previous model is untouched. Send the 'step ... | loss' and 'Validation bpb' lines above "
-                             f"and the end of {log}.")
+                             f"previous model is untouched. To finish this run on a PC with an NVIDIA GPU instead "
+                             f"(bfloat16 there does not overflow like the T4's float16): the PC notebook with "
+                             f"MODE = \"colab\" continues it from chunk {k + 1} (train_pc.py --mode colab). Send "
+                             f"the 'step ... | loss', 'OOA SKIP' and 'Validation bpb' lines above and the end of {log}.")
         if rc != 0 or cstep is None:
             tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-30:] if log.exists() else []
             print("\n".join("   | " + l for l in tail))

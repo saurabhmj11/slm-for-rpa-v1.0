@@ -547,8 +547,13 @@ print("base model:", os.environ["NANOCHAT_BASE_DIR"], "| characters per token:",
 #    1024 on the t4 profile) and the checkpoint saves "trained_window" and the tokenizer's sha1;
 #  - the mix above, each piece reading its share with its own shuffle; conversations longer than the window are skipped,
 #    never cut ("Training data actually read" at the end of each piece);
-#  - NaN guard: a loss that is not a number for 5 steps, or a validation that is not a number, stops the piece before
-#    it saves anything ("OOA NAN STOP"); it is tried once more with a fresh optimizer state, and never saved.
+#  - step guard: a step where a micro-batch loss or the (unscaled) gradients are not finite is skipped, the model
+#    unchanged ("OOA SKIP" lines); float16's GradScaler scale is never let below 1 (a collapsed scale turned every
+#    weight nan without being noticed). The loss line shows gnorm / scale / skipped.
+#  - NaN guard: 5 such steps in a row, 50 skipped steps in a row, or a validation that is not a number stop the piece
+#    before it saves anything ("OOA NAN STOP", saying whether the weights themselves are finite); it is tried once
+#    more with a fresh optimizer state, and never saved. If it stops again, the PC notebook's MODE "colab" can finish
+#    the run on a PC GPU (bfloat16).
 # Piece k starts from the model + optimizer state piece k-1 saved on Drive (sft_run/chunks), with the learning rate of
 # its part of ONE run's schedule (constant, then down to 0 over the second half) and the base model's learning rates.
 # A new run moves the previous trained model aside (chatsft_checkpoints_before_<date>, never deleted); the new model

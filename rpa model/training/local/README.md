@@ -34,6 +34,15 @@ from top to bottom). It drives the three scripts in this folder, which reuse the
   it only if it beats the Colab model it started from (and the model this PC had); if it does not, the Colab model is
   installed when it beats the PC's older one. `REFINE_THEN_RL = True` runs RL (MODE `rl`) and its test right after. If RL stops, run cell 6 again:
   it continues RL without testing the refine again (cell 5 skips the finished refine meanwhile).
+- **`colab`** (NVIDIA GPU): **finishes the Colab SFT run in progress** (Colab cell 7's chunked run) on this PC, when
+  Colab keeps stopping, runs out of hours or goes nan in float16 on the T4. `data_pc.py --mode colab` downloads Drive
+  `<base>/sft_run/state.json`, the last chunk Colab saved (model, meta, optimizer) and the base tokenizer into
+  `train_data/colab_run`, and Drive's `sft_render` exactly (no extra files, no feedback). `train_pc.py --mode colab`
+  then trains the remaining chunks with the run's own plan: steps, chunk bounds, learning-rate spans, base rates,
+  data mixture (`views`, never planned again), seed and the data cursor Colab reached; only the device batch is this
+  GPU's (same tokens per step). It refuses a different render, another tokenizer or a finished run. State in
+  `local_run/colab/`; when Colab saves more chunks meanwhile, the next data cell downloads the newer chunk and the PC
+  continues from it. Cell 6 tests and installs the result like a full run. The Colab run on Drive is not changed.
 - New files Colab's render lacks (e.g. `session_train.jsonl`, made after the v5 run): every mode but `full` takes them
   from Drive `sft/` when uploaded, else from the repo (`data/extra_sft/`), and renders only them here
   (`data_pc.render_extras`: Colab's settings, catalog and example index first; byte-identical to rendering them with

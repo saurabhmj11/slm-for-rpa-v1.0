@@ -118,33 +118,35 @@ def test_patch_chat_sft_pinned_nanochat():
 
 
 def test_nan_guard_stops_before_saving():
-    """The guard patch_chat_sft puts after the loss line / the validation line: a loss that is not a number for
-    NAN_STEPS steps in a row (or a nan validation) ends chat_sft with NAN_EXIT before its last step saves anything."""
+    """The guard patch_chat_sft puts after the loss line / the validation line: NAN_STEPS steps in a row whose loss or
+    gradients are not a number (the step guard skipped them), or SKIP_STOP skipped steps in a row for any reason, or a
+    nan validation end chat_sft with NAN_EXIT before its last step saves anything."""
     import math
     printed = []
-    g = {"_ooa_math": math, "_ooa_bad_loss": [0], "print0": printed.append}
-    exec("def step_(train_loss, step):\n" + T.LOSS_GUARD, g)
+    g = {"_ooa_math": math, "_ooa_bad_loss": [0], "_ooa_skip_run": [0], "print0": printed.append,
+         "_ooa_weight_note": lambda m: "the weights are all finite", "orig_model": None}
+    exec("def step_(_ooa_bad_step, step):\n" + T.LOSS_GUARD, g)
     exec("def val_(val_bpb, step):\n    if True:\n" + T.VAL_GUARD, g)
-
-    class Loss:
-        def __init__(self, v):
-            self.v = v
-
-        def item(self):
-            return self.v
-    nan = float("nan")
-    for i, v in enumerate([2.0, nan, float("inf"), nan, nan, 1.9, nan, nan, nan, nan], 1):   # never 5 in a row
-        g["step_"](Loss(v), i)
+    for i, bad in enumerate([False, True, True, True, True, False, True, True, True, True], 1):   # never 5 in a row
+        g["step_"](bad, i)
     assert not printed
     try:
-        g["step_"](Loss(nan), 11)
-        raise RuntimeError("the 5th nan step in a row must stop")
+        g["step_"](True, 11)
+        raise RuntimeError("the 5th bad step in a row must stop")
     except SystemExit as ex:
         assert ex.code == T.NAN_EXIT == 86
     assert printed[0].startswith(T.NAN_MARK) and "(step 11)" in printed[0] and "nothing was saved" in printed[0]
+    assert "the weights are all finite" in printed[0]
+    g["_ooa_bad_loss"][0], g["_ooa_skip_run"][0] = 0, T.SKIP_STOP                # float16 overflow without end
+    try:
+        g["step_"](False, 70)
+        raise RuntimeError(f"{T.SKIP_STOP} skipped steps in a row must stop")
+    except SystemExit as ex:
+        assert ex.code == T.NAN_EXIT
+    assert f"{T.SKIP_STOP} steps in a row were skipped" in printed[-1]
     g["val_"](1.23, 0)
     try:
-        g["val_"](nan, 0)
+        g["val_"](float("nan"), 0)
         raise RuntimeError("a nan validation must stop")
     except SystemExit as ex:
         assert ex.code == T.NAN_EXIT
@@ -156,16 +158,123 @@ def test_nan_guard_stops_before_saving():
     out = T.patch_chat_sft(src, "/d", {"a.jsonl": 1.0})
     compile(out, "chat_sft.py", "exec")
     loss_line = out.index(T.LOSS_LOG_ANCHOR)
-    assert loss_line < out.index("_ooa_bad_loss[0] = 0 if") < out.index("if step % 10 == 0:", loss_line)
+    assert loss_line < out.index("_ooa_bad_loss[0] = _ooa_bad_loss[0] + 1 if") < out.index("if step % 10 == 0:", loss_line)
     assert out.index(T.VAL_ANCHOR) < out.index("if not _ooa_math.isfinite(val_bpb)") < out.index("save_checkpoint(\n")
     assert out.index("_ooa_bad_loss = [0]") < out.index("while True:") and "import math as _ooa_math" in out
     assert '"compute_dtype": str(COMPUTE_DTYPE)' in out
-    for anchor in (T.LOSS_LOG_ANCHOR, T.VAL_ANCHOR):
+    # the step guard sits between the backward passes and the optimizer step, the loss line shows it
+    assert out.index("_ooa_losses.append(") < out.index("_ooa_gn = (") < out.index("scaler.step(optimizer)")
+    assert out.count("scaler.step(optimizer)") == 1 and out.count("    muon_momentum = get_muon_momentum(step)\n") == 1
+    assert "| gnorm: {_ooa_gnorm:.3g}" in out and "def _ooa_weight_note(m):" in out
+    for anchor in (T.LOSS_LOG_ANCHOR, T.VAL_ANCHOR, T.OPT_ANCHOR, T.MICRO_ANCHOR, T.EMA_OLD):
         try:
             T.patch_chat_sft(src.replace(anchor, "    pass\n"), "/d", {"a.jsonl": 1.0})
             raise RuntimeError("a missing anchor must stop the patch")
         except AssertionError as ex:
             assert "changed upstream" in str(ex)
+
+
+def _step_harness():
+    """One training step of the patched chat_sft (sft_setup.MICRO_NEW .. OPT_NEW) as code to exec in a namespace."""
+    import textwrap
+    body = T.MICRO_NEW + ("        loss = loss / grad_accum_steps\n"
+                          "        if scaler is not None:\n            scaler.scale(loss).backward()\n"
+                          "        else:\n            loss.backward()\n        x, y = next(train_loader)\n") + T.OPT_NEW
+    return compile(textwrap.dedent(body), "step_guard", "exec")
+
+
+def test_step_guard_skips_bad_steps_and_keeps_the_weights_finite():
+    """The step guard on a tiny model (CPU, torch): a micro-batch with a nan loss -> the step is skipped (weights and
+    optimizer state unchanged, a SKIP line), the next step trains; with a GradScaler whose scale collapsed below 2^-128
+    (1/scale = inf: chat_sft's own code then writes nan into every weight without the scaler noticing) the step is
+    skipped and the scale is put back to the floor."""
+    try:
+        import torch
+    except ImportError:
+        print("  (skipped: no torch)")
+        return
+    import math
+    torch.manual_seed(0)
+    code = _step_harness()
+
+    def setup(scaler):
+        model = torch.nn.Sequential(torch.nn.Linear(4, 8), torch.nn.ReLU(), torch.nn.Linear(8, 1))
+        opt = torch.optim.AdamW(model.parameters(), lr=0.01)
+        for gr in opt.param_groups:
+            gr["kind"] = "adamw"
+        data = [(torch.randn(16, 4), torch.randn(16, 1)) for _ in range(200)]
+        it = iter(data)
+
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.m = model
+
+            def forward(self, x, y):
+                return torch.nn.functional.mse_loss(self.m(x), y)
+        m = M()
+        printed = []
+        ns = {"torch": torch, "model": m, "orig_model": m, "optimizer": opt, "scaler": scaler, "grad_accum_steps": 2,
+              "train_loader": it, "device": "cpu", "print0": printed.append, "is_ddp_initialized": lambda: False,
+              "dist": None, "_ooa_math": math, "_ooa_skipped": [0], "_ooa_skip_run": [0], "_ooa_step_loss": [0.0],
+              "_ooa_inject": set(), "step": 0}
+        ns["x"], ns["y"] = next(it)
+        return ns, printed
+
+    def snap(ns):
+        return [p.detach().clone() for p in ns["orig_model"].parameters()]
+
+    ns, printed = setup(None)                                     # bfloat16 / float32: no scaler
+    ns["_ooa_inject"] = {(2, 1)}                                  # step 2, micro-batch 1: loss nan
+    for step in range(4):
+        ns["step"] = step
+        before = snap(ns)
+        exec(code, ns)
+        same = all(torch.equal(a, b) for a, b in zip(before, snap(ns)))
+        assert same == (step == 1), (step, same)
+        assert ns["_ooa_bad_step"] == (step == 1) and ns["_ooa_loss_bad"] == (step == 1)
+        assert all(bool(torch.isfinite(p).all()) for p in ns["orig_model"].parameters())
+        assert all(p.grad is None for p in ns["orig_model"].parameters())        # gradients dropped either way
+    assert ns["_ooa_skipped"] == [1] and ns["_ooa_skip_run"] == [0] and len(printed) == 1, printed
+    assert printed[0].startswith(T.SKIP_MARK + " step 00002: loss not a number in micro-batch [1] of 2"), printed
+    st = ns["optimizer"].state[next(iter(ns["orig_model"].parameters()))]
+    assert int(st["step"]) == 3                                   # 4 steps, 1 skipped: the optimizer stepped 3 times
+
+    try:
+        torch.amp.GradScaler("cpu")
+    except Exception as ex:                                       # noqa: BLE001
+        print("  (GradScaler part skipped:", type(ex).__name__, ex, ")")
+        return
+    # chat_sft's own step (OPT_ANCHOR) with a collapsed scale: 1/scale = inf, nothing flagged, the weights go nan
+    import textwrap
+    raw = compile(textwrap.dedent(T.MICRO_NEW + "        loss = loss / grad_accum_steps\n"
+                                  "        scaler.scale(loss).backward()\n        x, y = next(train_loader)\n"
+                                  + T.OPT_ANCHOR), "raw", "exec")
+    scaler = torch.amp.GradScaler("cpu", init_scale=2.0 ** -130)
+    ns, printed = setup(scaler)
+    exec(raw, ns)
+    assert not all(bool(torch.isfinite(p).all()) for p in ns["orig_model"].parameters()), \
+        "expected chat_sft's own step to break the weights at scale 2^-130 (the incident's mechanism)"
+    # the guarded step: skipped, weights finite, the scale back at the floor; then training goes on
+    scaler = torch.amp.GradScaler("cpu", init_scale=2.0 ** -130)
+    ns, printed = setup(scaler)
+    before = snap(ns)
+    exec(code, ns)
+    assert all(torch.equal(a, b) for a, b in zip(before, snap(ns))) and ns["_ooa_skipped"] == [1]
+    assert ns["_ooa_bad_step"] and scaler.get_scale() == T.SCALE_FLOOR, scaler.get_scale()
+    assert printed and printed[0].startswith(T.SKIP_MARK + " step 00001: gradient norm ") and "-> 1:" in printed[0], printed
+    for step in range(1, 4):
+        ns["step"] = step
+        exec(code, ns)
+        assert all(bool(torch.isfinite(p).all()) for p in ns["orig_model"].parameters())
+    assert ns["_ooa_skip_run"] == [0] and scaler.get_scale() >= T.SCALE_FLOOR
+    # an overflow the scaler catches (scaled gradients inf, losses finite): skipped, the scale halves, not "bad"
+    scaler.update(new_scale=2.0 ** 127)                         # loss x 2^127 overflows float32 in the backward
+    ns["step"] = 4
+    ns["x"], ns["y"] = torch.randn(16, 4) * 1e6, torch.randn(16, 1) * 1e6
+    exec(code, ns)
+    assert ns["_ooa_found"] > 0 and not ns["_ooa_bad_step"] and ns["_ooa_skip_run"] == [1]
+    assert scaler.get_scale() == 2.0 ** 126 and "overflow caught by GradScaler" in printed[-1], printed[-1]
 
 
 if __name__ == "__main__":

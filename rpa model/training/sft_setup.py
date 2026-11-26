@@ -15,9 +15,12 @@ locally (test_sft_setup.py) and copied into the notebook like the other training
    sequence_len to --max-seq-len right after loading and recomputes the window sizes (and the rotary table when it is
    too short), prints the windows, and saves "trained_window" in the checkpoint meta for the serving check
    (assistant/model_backend.window_check). (b) our data mixture, (c) rows longer than the window are skipped, not cut,
-   (d) per-file consumption is counted and printed at the end, (e) a NaN guard: the run stops (exit code
-   NAN_EXIT, before anything is saved) when the training loss is not a number for NAN_STEPS steps in a row or the
-   validation bpb is not a number, so a run that went unstable never saves a broken model over a good one.
+   (d) per-file consumption is counted and printed at the end, (e) a step guard: a step whose micro-batch loss or
+   unscaled gradients are not finite is skipped (the model unchanged, an "OOA SKIP" line), and float16's GradScaler
+   scale is floored at SCALE_FLOOR (a collapsed scale made the unscale write nan into every weight unnoticed), (f) a
+   NaN guard: the run stops (exit code NAN_EXIT, before anything is saved) after NAN_STEPS such steps in a row,
+   SKIP_STOP skipped steps in a row, or a validation bpb that is not a number, saying whether the weights themselves
+   are finite, so a run that went unstable never saves a broken model over a good one.
 3. nonfinite_tensors / check_model_dir: which tensors of a saved model or optimizer state hold nan / inf (torch is
    imported only there: Colab cells 7-8 and the PC scripts check a model before they train, test or install it).
 """
@@ -190,24 +193,142 @@ for _i, (_name, _rows) in enumerate(_task_files):
 '''
 
 
-NAN_STEPS = 5                        # consecutive steps with a training loss that is not a number -> stop
+NAN_STEPS = 5                        # steps in a row whose loss / gradients are not a number -> stop
+SKIP_STOP = 50                       # steps in a row skipped for any reason (float16 overflow too) -> stop
+SCALE_FLOOR = 1.0                    # float16: the GradScaler's scale is never let below this (see the step guard)
 NAN_EXIT = 86                        # chat_sft's exit code then (train_pc.py and Colab cell 7 recognise it)
 NAN_MARK = "OOA NAN STOP"            # the line it prints first
+SKIP_MARK = "OOA SKIP"               # a training step that was skipped (nothing in the model changed)
 LOSS_LOG_ANCHOR = '    print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f}'
 VAL_ANCHOR = '        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")\n'
-LOSS_GUARD = f'''    # OOA: a loss that is not a number (nan / inf) for {NAN_STEPS} steps in a row means the run went unstable: stop
-    # before anything is saved (a checkpoint is written only at the last step), so a broken model never replaces a
-    # good one. train_loss is the step's own loss (the printed loss is a running average that stays nan for good).
-    _ooa_bad_loss[0] = 0 if _ooa_math.isfinite(train_loss.item()) else _ooa_bad_loss[0] + 1
-    if _ooa_bad_loss[0] >= {NAN_STEPS}:
-        print0(f"{NAN_MARK}: the training loss was not a number (nan/inf) for {NAN_STEPS} steps in a row (step {{step}}): "
-               "the training went unstable. Stopped; nothing was saved.")
+
+# --- the step guard (float16 with GradScaler, and bfloat16 / float32) -----------------------------------------------
+# Why (the Colab T4 float16 incident: chunk 4 nan from step ~3447; the v5 run that ended with ALL weights nan):
+#  - GradScaler checks the SCALED gradients for inf/nan, then multiplies them by 1/scale; the result is never checked.
+#    Every skipped step halves the scale (it doubles only after 2000 clean steps), so frequent float16 overflows push
+#    it down. At scale <= 2^-128, 1/scale is inf in float32 and the unscale turns zero gradients into nan WITHOUT
+#    flagging the step: the optimizer then writes nan into every weight. Already at scale <= 2^-88 the few gradient
+#    elements that did not underflow come back huge (6e-8 / 2^-110 ~ 1e26): AdamW's grad^2 overflows to inf, and its
+#    state and weights go nan on the next step. -> the scale is floored at SCALE_FLOOR, and the gradients are checked
+#    AFTER the unscale (their total norm): a step whose gradients are not finite is skipped whatever the scaler said.
+#  - chat_sft looked at the LAST micro-batch's loss only: an overflow in micro-batches 1-3 skipped a step silently and
+#    never counted for the NaN guard, and the printed loss (a running average) stayed nan for good after one nan step.
+#    -> every micro-batch's loss is checked; a step with one that is not a number is skipped and printed (SKIP_MARK:
+#    which micro-batch, the gradient norm, the scale), and the running average leaves it out.
+#  - no gradient clipping: what broke the weights is the scale collapse above, not large real gradients (Muon
+#    normalises its updates anyway); clipping would change the training against the chunks already trained.
+# A skipped step changes nothing in the model or the optimizer state (no optimizer step, the gradients are dropped);
+# with float16 the scale still drops (scaler.update with the step marked as overflowed), never below the floor.
+MICRO_ANCHOR = ("    for micro_step in range(grad_accum_steps):\n        loss = model(x, y)\n"
+                "        train_loss = loss.detach() # for logging\n")
+MICRO_NEW = ("    _ooa_losses = []   # OOA: every micro-batch's loss (chat_sft looked at the last one only)\n"
+             "    for micro_step in range(grad_accum_steps):\n        loss = model(x, y)\n"
+             "        if (step + 1, micro_step + 1) in _ooa_inject:   # OOA test hook (env OOA_TEST_NAN): a nan loss\n"
+             "            loss = loss * float(\"nan\")\n"
+             "        _ooa_losses.append(loss.detach().float())\n"
+             "        train_loss = loss.detach() # for logging\n")
+OPT_ANCHOR = """    if scaler is not None:
+        scaler.unscale_(optimizer)
+        if is_ddp_initialized():
+            for v in scaler._found_inf_per_device(optimizer).values():
+                dist.all_reduce(v, op=dist.ReduceOp.MAX)
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        optimizer.step()
+    model.zero_grad(set_to_none=True)
+"""
+OPT_NEW = """    _ooa_found = 0.0
+    if scaler is not None:
+        scaler.unscale_(optimizer)
+        if is_ddp_initialized():
+            for v in scaler._found_inf_per_device(optimizer).values():
+                dist.all_reduce(v, op=dist.ReduceOp.MAX)
+        if scaler.is_enabled():
+            _ooa_found = float(sum(v.item() for v in scaler._found_inf_per_device(optimizer).values()))
+    # OOA step guard (sft_setup): the micro-batch losses and the UNSCALED gradients must be finite, else no step
+    _ooa_g = [p.grad.detach() for p in orig_model.parameters() if p.grad is not None]
+    _ooa_gn = (torch.linalg.vector_norm(torch.stack([torch.linalg.vector_norm(g.float()) for g in _ooa_g]))
+               if _ooa_g else torch.zeros((), device=device))
+    _ooa_v = torch.cat([torch.stack(_ooa_losses), _ooa_gn.reshape(1).float()])
+    _ooa_flags = torch.stack([(~torch.isfinite(_ooa_v[:-1])).any(), ~torch.isfinite(_ooa_v[-1])]).float()
+    if is_ddp_initialized():
+        dist.all_reduce(_ooa_flags, op=dist.ReduceOp.MAX)   # every rank skips the same steps
+    _ooa_vals = _ooa_v.tolist()
+    _ooa_loss_bad, _ooa_grad_bad = bool(_ooa_flags[0].item()), bool(_ooa_flags[1].item())
+    _ooa_gnorm = _ooa_vals[-1]
+    # counts for the NaN stop: a loss that is not a number, or gradients that are not finite although the scaler saw
+    # no overflow; a float16 overflow the scaler caught (finite losses) is its normal working: only skipped
+    _ooa_bad_step = _ooa_loss_bad or (_ooa_grad_bad and _ooa_found == 0)
+    if not _ooa_loss_bad:
+        _ooa_step_loss[0] = sum(_ooa_vals[:-1]) / len(_ooa_vals[:-1])   # the step's loss: mean of its micro-batches
+    if _ooa_loss_bad or _ooa_grad_bad or _ooa_found > 0:
+        _ooa_skipped[0] += 1
+        _ooa_skip_run[0] += 1
+        _ooa_scale_was = scaler.get_scale() if scaler is not None and scaler.is_enabled() else None
+        if _ooa_scale_was is not None:
+            for v in scaler._found_inf_per_device(optimizer).values():
+                v.fill_(1.0)                                 # marked as overflowed: update() lowers the scale
+            scaler.update()
+            if scaler.get_scale() < SCALE_FLOOR:
+                scaler.update(new_scale=SCALE_FLOOR)         # never below the floor: 1/scale stays sane
+        _ooa_mb = [i + 1 for i, v in enumerate(_ooa_vals[:-1]) if not _ooa_math.isfinite(v)]
+        print0("SKIP_MARK step " + f"{step + 1:05d}: "
+               + (f"loss not a number in micro-batch {_ooa_mb} of {grad_accum_steps}; " if _ooa_mb else "")
+               + f"gradient norm {_ooa_gnorm:.4g}"
+               + (f"; float16 overflow caught by GradScaler" if _ooa_found > 0 and not _ooa_mb else "")
+               + (f"; scale {_ooa_scale_was:g} -> {scaler.get_scale():g}" if _ooa_scale_was is not None else "")
+               + f": step skipped, the model is unchanged ({_ooa_skipped[0]} skipped in this run, "
+               f"{_ooa_skip_run[0]} in a row)")
+    else:
+        _ooa_skip_run[0] = 0
+        if scaler is not None:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+    if scaler is not None and scaler.is_enabled() and scaler.get_scale() < SCALE_FLOOR:
+        scaler.update(new_scale=SCALE_FLOOR)   # never below the floor: 1/scale stays sane
+    model.zero_grad(set_to_none=True)
+""".replace("SKIP_MARK", SKIP_MARK).replace("SCALE_FLOOR", repr(SCALE_FLOOR))
+EMA_OLD = ("    smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss.item() "
+           "# EMA the training loss\n")
+EMA_NEW = ("    if not _ooa_loss_bad:   # OOA: a skipped step's nan never enters the running average (mean of the "
+           "micro-batches)\n"
+           "        smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * _ooa_step_loss[0]\n")
+LOSS_TAIL_OLD = '| epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")'
+LOSS_TAIL_NEW = ('| epoch: {current_epoch} | total time: {total_training_time/60:.2f}m | gnorm: {_ooa_gnorm:.3g}'
+                 ' | scale: {scaler.get_scale() if scaler is not None and scaler.is_enabled() else 1:g}'
+                 ' | skipped: {_ooa_skipped[0]}")')
+STEP_SETUP = ('skipped_long = [0]\n_ooa_bad_loss = [0]\n_ooa_skipped = [0]\n_ooa_skip_run = [0]\n'
+              '_ooa_step_loss = [0.0]\n_ooa_loss_bad = False\n_ooa_gnorm = 0.0\n'
+              '_ooa_inject = {tuple(int(v) for v in _p.split(":")) for _p in os.environ.get("OOA_TEST_NAN", "")'
+              '.split(",") if _p}\n')
+WEIGHT_NOTE = '''
+def _ooa_weight_note(m):   # OOA: are the weights themselves broken, or only this computation?
+    import torch as _t
+    _bad = [n for n, p in m.named_parameters() if not bool(_t.isfinite(p.detach()).all())]
+    if _bad:
+        return f"{len(_bad)} weight tensor(s) hold nan/inf: " + ", ".join(_bad[:6])
+    _big = max(((float(p.detach().abs().max()), n) for n, p in m.named_parameters()), default=(0.0, "-"))
+    return (f"the weights are all finite (largest |w| {_big[0]:.4g} in {_big[1]}): the {COMPUTE_DTYPE} computation "
+            "overflowed, the model itself is not nan")'''
+LOSS_GUARD = f'''    # OOA: a step whose loss or gradients are not a number was skipped above (the model is unchanged); {NAN_STEPS} such
+    # steps in a row (or {SKIP_STOP} skipped steps in a row for any reason) mean the run went unstable: stop before
+    # anything is saved (a checkpoint is written only at the last step), so a broken model never replaces a good one.
+    _ooa_bad_loss[0] = _ooa_bad_loss[0] + 1 if _ooa_bad_step else 0
+    if _ooa_bad_loss[0] >= {NAN_STEPS} or _ooa_skip_run[0] >= {SKIP_STOP}:
+        print0(f"{NAN_MARK}: " + (f"the training loss / gradients were not a number (nan/inf) for {NAN_STEPS} steps in "
+               f"a row (step {{step}})" if _ooa_bad_loss[0] >= {NAN_STEPS} else f"{SKIP_STOP} steps in a row were "
+               f"skipped (step {{step}}: float16 overflow the GradScaler could not get under)")
+               + ": the training went unstable; " + _ooa_weight_note(orig_model) + ". Stopped; nothing was saved.")
         raise SystemExit({NAN_EXIT})
 '''
 VAL_GUARD = f'''        if not _ooa_math.isfinite(val_bpb):   # OOA: the model gives nan / inf: stop before anything is saved
             print0(f"{NAN_MARK}: Validation bpb is not a number ({{val_bpb}}) at step {{step}}"
                    + (": the start model is broken before any training step" if step == 0 else
-                      ": the training went unstable") + ". Stopped; nothing was saved.")
+                      ": the training went unstable") + "; " + _ooa_weight_note(orig_model)
+                   + ". Stopped; nothing was saved.")
             raise SystemExit({NAN_EXIT})
 '''
 
@@ -238,8 +359,10 @@ def patch_chat_sft(s, sft_dir, views, smoltalk_rows=0, seed=1, window_fix=True):
     for a in (WINDOW_ANCHOR, META_ANCHOR, TASKS_START, TASKS_END, IMPORT_ANCHOR, LOADER_OLD, STEP_ANCHOR, END_ANCHOR,
               LOSS_LOG_ANCHOR, VAL_ANCHOR):
         assert s.count(a) >= 1, "chat_sft.py changed upstream, cannot patch: " + a[:60]
+    for a in (MICRO_ANCHOR, OPT_ANCHOR, EMA_OLD, LOSS_TAIL_OLD):          # the step guard: each exactly once
+        assert s.count(a) == 1, "chat_sft.py changed upstream, cannot patch: " + a.strip()[:60]
     s = s.replace(IMPORT_ANCHOR, IMPORT_ANCHOR + "\nfrom tasks.ooa import OOADialogues\nimport math as _ooa_math"
-                  + ("\nimport os as _os_ooa" + TOK_SHA if window_fix else ""), 1)
+                  + ("\nimport os as _os_ooa" + TOK_SHA if window_fix else "") + WEIGHT_NOTE, 1)
     a = s.index(TASKS_START)
     b = s.index("\n", s.index(TASKS_END))
     s = s[:a] + tasks_block(sft_dir, views, smoltalk_rows, seed) + s[b:]
@@ -247,7 +370,9 @@ def patch_chat_sft(s, sft_dir, views, smoltalk_rows=0, seed=1, window_fix=True):
         s = s.replace(WINDOW_ANCHOR, WINDOW_FIX + WINDOW_ANCHOR, 1)
         s = s.replace(META_ANCHOR, META_FIX, 1)
     s = s.replace(LOADER_OLD, LOADER_NEW, 1)
-    s = s.replace(STEP_ANCHOR, "skipped_long = [0]\n_ooa_bad_loss = [0]\n" + STEP_ANCHOR, 1)
+    s = s.replace(STEP_ANCHOR, STEP_SETUP + STEP_ANCHOR, 1)
+    for a, b in ((MICRO_ANCHOR, MICRO_NEW), (OPT_ANCHOR, OPT_NEW), (EMA_OLD, EMA_NEW), (LOSS_TAIL_OLD, LOSS_TAIL_NEW)):
+        s = s.replace(a, b, 1)
     s = s.replace(END_ANCHOR, END_REPORT + END_ANCHOR, 1)
     i = s.index("\n", s.index(LOSS_LOG_ANCHOR)) + 1                  # after the whole "step ... | loss:" line
     s = s[:i] + LOSS_GUARD + s[i:]
