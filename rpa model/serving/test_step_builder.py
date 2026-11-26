@@ -437,6 +437,37 @@ def test_a_guided_sample_starts_with_the_actions_the_step_words_point_at():
     assert m.batches == [3 * len(SB.STEP_TEMPERATURES) + 1]          # the guided sample is in the same batch
 
 
+def test_app_pick_guides_a_step_that_names_its_app():
+    r = TL.router(BatchAware(lambda *a: ""))
+    assert SB.app_pick(r, "Cancel the long running statement in Snowflake") == ["ooa.snowflake/cancel_statement"]
+    assert SB.app_pick(r, "Move the files to the archive folder") == []          # no app named in the step
+    for text in ("Send the customer a follow-up from Gmail", "Find the running EC2 instances of the dev team"):
+        picked = SB.app_pick(r, text)                    # never a delete / reboot / ... the step does not say
+        assert not any(set(a.split("/")[-1].split("_")) & SB.SAID_VERBS for a in picked), picked
+
+
+def test_find_the_one_inside_a_loop_is_an_if_and_or_that_is_an_else():
+    st = SB.split_steps("For each order in the backlog sheet, find the ones with a missing address and email the "
+                        "customer a reminder; then log how many were reminded.")
+    assert kinds(st)[:3] == [("loop", None, "children"), ("if", 0, "children"), ("do", 1, "children")]
+    assert st[1]["text"] == "If the order has a missing address"
+    st = SB.split_steps("Read the failed builds from builds.csv, open a ticket for each one; then email the release "
+                        "manager how many failed, or that all builds passed.")
+    tail = [(s["kind"], s["branch"], s["text"]) for s in st[-3:]]
+    assert tail == [("if", "children", "if there are any"), ("do", "children", "email the release manager how many failed"),
+                    ("do", "else", "email the release manager that all builds passed")], tail
+
+
+def test_now_is_read_once_before_the_loop():
+    flow = {"steps": [{"action": "ooa.csv/read", "out": {"table": "t"}},
+                      {"action": "core/loop", "args": {"over": "$t$", "as": "row"}, "children": [
+                          {"action": "ooa.datetime/now", "out": {"value": "now"}},
+                          {"action": "core/if", "args": {"condition": "x"}, "children": [{"action": "core/log"}]}]}]}
+    got = SB.hoist_now(flow)
+    assert [s["action"] for s in got["steps"]] == ["ooa.csv/read", "ooa.datetime/now", "core/loop"]
+    assert [s["action"] for s in got["steps"][2]["children"]] == ["core/if"]
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

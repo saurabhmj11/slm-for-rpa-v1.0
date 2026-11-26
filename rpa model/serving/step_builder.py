@@ -257,6 +257,11 @@ def refers_back(info, earlier_text):
     return bool(words) and (head in seen or words[-1] in seen) and not _PREP.search(" " + info["phrase"])
 
 
+_FIND_ONE = re.compile(r"^(?:find|pick|get|take|select|look for|spot)\s+(?:out\s+)?the\s+(?:ones?|items?|records?|rows?|"
+                       r"entries|entry)\s+(with|whose|where|that|which)\s+(.+)$", re.I)
+_OR_THAT = re.compile(r"^(.+?),?\s+or\s+(?:else\s+)?(?:that|say that)\s+(.+)$", re.I)
+
+
 def split_steps(request):
     """The request as steps to build, in order: [{"text", "kind": do|loop|if, "parent", "branch", ...}].
     parent: the index of the loop / if step whose body the step goes into (None: the top level); branch: "children"
@@ -319,6 +324,22 @@ def split_steps(request):
             add_if(f"If the {noun} {filt}", filter=True)
         return i
 
+    def add_find(piece):
+        """Inside a loop, "find the one with the wrong address" picks items: an if on each item (True: added)."""
+        m = _FIND_ONE.match(piece)
+        loops = [k for k in stack if steps[k]["kind"] == "loop"]
+        if not m or not loops:
+            return False
+        loop = steps[loops[-1]]
+        noun = loop.get("thing") or loop.get("item") or "item"
+        word, rest = m.group(1).lower(), m.group(2).strip(" ,")
+        if word == "whose":
+            cond = f"If the {noun}'s {rest}"
+        else:
+            cond = f"If the {noun} {'has' if word == 'with' else word} {rest}"
+        stack.append(add(cond, "if", filter=True))
+        return True
+
     for piece, hard in raw:
         piece = _LEAD.sub("", piece).strip(" ,.")
         if _META.match(piece) or piece.endswith("?"):
@@ -352,7 +373,7 @@ def split_steps(request):
         if _LOOP_HEAD.match(piece):
             head, body = _split_loop_head(piece)
             add_loop(head)
-            if body:
+            if body and not add_find(body):
                 add(body, "do")
             continue
         if _IF_HEAD.match(piece):
@@ -360,6 +381,24 @@ def split_steps(request):
                 stack.pop()
             add_if(piece)
             continue
+        if add_find(piece):
+            continue
+        alt = _OR_THAT.match(piece)
+        if alt and _TO_PERSON.match(piece) and steps:
+            # "email QA lead how many failed, or that everything passed": an if, the message, else the other one
+            first, other = alt.group(1).strip(" ,"), alt.group(2).strip(" ,")
+            who = _REPHRASE_EMAIL.match(first)
+            if who:
+                while stack and steps[stack[-1]]["kind"] == "if" and not steps[stack[-1]].get("filter"):
+                    stack.pop()
+                i = add("if there are any", "if")
+                stack.append(i)
+                add(first, "do")
+                branch[i] = "else"
+                verb = first.split()[0]
+                add(f"{verb} {who.group(1)} that {other}", "do")
+                stack.pop()
+                continue
         if not stack and _EACH_INSIDE.search(piece) and not _AFTER_LOOP.search(piece):
             m = _EACH_INSIDE.search(piece)
             # the each phrase up to the next verb ("each one", "every quote whose ... has passed")
@@ -386,6 +425,7 @@ GUIDED_SAMPLE = True           # a step whose own words clearly point at actions
                                # answer starts with those actions as its plan (guided_prefix); the model writes the
                                # flow for it, and the checker and fragment_score judge it as any other sample
 GUIDED_BONUS = 1.0             # a checked guided piece's extra score: its actions come from the step's own words
+GUIDED_APP_BONUS = 0.5         # ... and a guided piece of the app a step names (app_pick)
 SIMILAR_FIRST_ONLY = True      # only a step's first sample sees the similar examples; the freer ones do not (a short
                                # step request copies a similar example's whole outline too readily)
 _CONTAINER = {"loop": "core/loop", "if": "core/if"}
@@ -591,6 +631,31 @@ def app_swaps(router, flow, named, hints, known, text):
     return out
 
 
+def app_pick(router, text):
+    """For a step that names its app itself ("Check on the statement in Snowflake", "Read the test points in Azure
+    DevOps"): that app's best action for the step's words when the search over the whole catalog has it among its
+    first 3 too (both searches agree), as [id]; else []."""
+    named = F.named_apps(text)
+    if len(named) != 1 or router.index is None:
+        return []
+    try:
+        top = router.index.search(text, 1, only={named[0]})
+    except TypeError:
+        return []
+    every = {e["id"] for e in router.index.search(text, 3)}
+    if not top or top[0]["id"] not in every or top[0]["id"] not in router.cat:
+        return []
+    for verb in top[0]["id"].split("/")[-1].split("_"):
+        if verb in SAID_VERBS and not re.search(r"\b" + verb, text, re.I):
+            return []                     # "email ... from Gmail" is no Gmail delete, "find the instances" no reboot
+    return [top[0]["id"]]
+
+
+# an action of one of these verbs is never guided unless the step says the verb itself
+SAID_VERBS = set("""delete remove reboot restart stop terminate cancel revoke purge drop destroy disable mark connect
+disconnect end close archive move lock unlock start empty clear reset kill""".split())
+
+
 def guided_prefix(router, text, kind, ids):
     """The given start of a guided sample's answer: one plan line per action the step's words point at (their plain
     words from the catalog), then for an if step its condition as an if, then "Flow:" (a thinking model gets the
@@ -712,6 +777,34 @@ def assemble(parts, steps):
                 boxes[i]["children"] = []
                 boxes[i].pop("else", None)
     return {"steps": top}
+
+
+def hoist_now(flow):
+    """The current date and time read once, before the loops: a datetime/now step without arguments inside a loop
+    moves to just before the outermost loop it is in (the training flows read it there)."""
+    top = flow.get("steps") or []
+    out = []
+    for s in top:
+        if isinstance(s, dict) and s.get("action") == "core/loop":
+            moved = []
+
+            def pull(body):
+                keep = []
+                for x in body:
+                    if (isinstance(x, dict) and x.get("action") == "ooa.datetime/now" and not (x.get("args") or {})
+                            and not moved):
+                        moved.append(x)
+                        continue
+                    if isinstance(x, dict):
+                        for k in ("children", "else"):
+                            if isinstance(x.get(k), list):
+                                x[k] = pull(x[k])
+                    keep.append(x)
+                return keep
+            s["children"] = pull(s.get("children") or [])
+            out.extend(moved)
+        out.append(s)
+    return {**flow, "steps": out}
 
 
 def _made(flow):
@@ -912,7 +1005,7 @@ class _StepRun:
         (fragment_score). last: {i: (previous answer, problems)} of steps asked again. Returns {i: piece or None}
         and records the problems of the steps that failed in last."""
         r = self.r
-        items, owner, meta, guided_at = [], [], {}, set()
+        items, owner, meta, guided_at = [], [], {}, {}
         for i, (text, kind) in asks.items():
             known = self.known(i)
             hints = step_hints(r.index, r.cat, text, step_toolkits(self.request, self.built[:i]))
@@ -939,9 +1032,12 @@ class _StepRun:
                 items.append(it)
                 owner.append(i)
             strong = [a for a in hint_ids(text) if a in r.cat]
+            bonus = GUIDED_BONUS
+            if not strong and kind == "do":
+                strong, bonus = app_pick(r, text), GUIDED_APP_BONUS
             guided = guided_prefix(r, text, kind, strong) if GUIDED_SAMPLE and strong and r.can_batch() else None
             if guided:
-                guided_at.add(len(items))
+                guided_at[len(items)] = bonus
                 items.append({"prompt": prompt, "attempt": rnd, "max_tokens": STEP_MAX_TOKENS, "prefix": guided,
                               "temperature": self.temps[0], "seed": 4000 + 97 * i + 13 * rnd + 11})
                 owner.append(i)
@@ -968,7 +1064,7 @@ class _StepRun:
             for k, cand in enumerate([flow] + app_swaps(r, flow, named, hints, known, text)):
                 sc = fragment_score(cand, step, [b for b in self.built[:i] if b is not None], relevant, verbs, named)
                 sc += 0.5 if k else 0.0            # the named app's own action
-                sc += GUIDED_BONUS if n in guided_at else 0.0
+                sc += guided_at.get(n, 0.0)
                 if feeds and any(v.get("type") in _COLLECTION for v in _made(cand)):
                     sc += 2.0                      # the loop after it needs a table or list to go through
                 ok.setdefault(i, []).append((sc, cand))
@@ -1074,7 +1170,7 @@ class _StepRun:
         linked, links = F.link_part_variables(have, self.base)
         it = iter(linked)
         parts = [next(it) if b is not None else None for b in self.built]
-        joined = assemble(parts, self.steps)
+        joined = hoist_now(assemble(parts, self.steps))
         flow, notes = self.r.verify(F.compact(joined), self.base, None, self.request)
         self.tried.append({"source": "local", "steps_joined": self.info["built"], "ok": flow is not None})
         if flow is None:
