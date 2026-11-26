@@ -41,6 +41,13 @@ WANT = {
     "beginner_train.jsonl": 4,       # beginner wording (gen_beginner.py): restate, then plan; friendly questions
     "v5_train.jsonl": 6,             # v5 hand-written: business words, app / action choice, Hinglish & voice, asking
     "session_train.jsonl": 5,        # sign in / open once, later steps use the session, sign out / close at the end
+    # 8-16-step processes across 2-3 apps with the glue steps (to_records, now/parse/difference, json/to_table, OCR ->
+    # extract) and parts as the step builder asks them: the combinations the model misses most. 4, not v5's 6: its
+    # ~960 long rows come from 36 processes in ~27 variants each, so a process is already seen ~100 times at 4
+    "decomposition_train.jsonl": 4,
+    # messy wording (Indian English, story, voice, Hinglish, typos, very short; asking when a detail is missing) for
+    # ~180 flows: each flow already has 6-9 phrasings, so 3 views give each flow about as many sights as a v5 row
+    "wording_train.jsonl": 3,
 }
 LONG_FILES = ("long_train.jsonl", "business2_train.jsonl", "scenarios_train.jsonl", "synth_pattern.jsonl")
 LONG_CAP = 3.0
@@ -447,7 +454,8 @@ def plan_for_notebook(sft_dir, steps, tokens_per_step, smoltalk_rows=0, smoltalk
 # The neutral-record files of Drive sft/ that Colab cell 6d renders into sft_render (cell 1 NEW_FILES; the local
 # notebook renders the same files when Drive has no sft_render). test_train_pc.py checks they match cell 1.
 RENDER_EXTRA = ("long_train.jsonl", "business2_train.jsonl", "targeted_train.jsonl", "fix_train.jsonl",
-                "clarify_train.jsonl", "beginner_train.jsonl", "v5_train.jsonl", "session_train.jsonl")
+                "clarify_train.jsonl", "beginner_train.jsonl", "v5_train.jsonl", "session_train.jsonl",
+                "decomposition_train.jsonl", "wording_train.jsonl")
 # A top-up continues the newest SFT model for a few hundred steps on a CPU (about 1/25 of the Colab budget). Spread
 # like the full mix, every file would get about 0.1-0.3 views and the round would teach little; so a top-up spends
 # most of its tokens where the model is weakest and the data is newest: beginner wording (restate, then plan; ask

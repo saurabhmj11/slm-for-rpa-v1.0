@@ -173,7 +173,9 @@ NEW_FILES = {"long_train.jsonl": 15, "business2_train.jsonl": 15, "targeted_trai
              "fix_train.jsonl": 5, "clarify_train.jsonl": 5,                                     # -> times per epoch
              "beginner_train.jsonl": 4,   # beginner wording: answers start "Clear request: ..." (gen_beginner.py)
              "v5_train.jsonl": 5,         # v5: business words -> steps, which app / action, natural Hinglish & voice, asking
-             "session_train.jsonl": 5}    # connect / sign in once, later steps use the session (platform sessions, new actions)
+             "session_train.jsonl": 5,    # connect / sign in once, later steps use the session (platform sessions, new actions)
+             "decomposition_train.jsonl": 4,   # long multi-app processes with glue steps + step-builder parts
+             "wording_train.jsonl": 3}    # Indian English, story, voice, Hinglish, typos, short; asking for a missing detail
 ASSISTANT_EVAL = True      # cell 8 also scores the full assistant (real action names only, repair, loop guard), as users get it
 MODE_EVAL = True           # cell 8 also scores the assistant's modes (fast / smart / ultra / auto: serving/ooa_server.MODES)
 SMOLTALK_ROWS = 3000       # a little general chat data mixed in so the model still talks; 0 = OOA data only
