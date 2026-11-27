@@ -218,8 +218,8 @@ class ClearAware(BatchAware):
 
     def generate(self, prompt, attempt=0, max_tokens=2500, on_plan=None, prefix=None):
         self.asked_prefix = getattr(self, "asked_prefix", []) + [prefix]
-        if prefix == F.CLEAR_HEAD + " ":
-            return prefix + self.clear + "\n" + super().generate(prompt, attempt, max_tokens, on_plan, None)
+        if prefix == F.CLEAR_HEAD:
+            return prefix + " " + self.clear + "\n" + super().generate(prompt, attempt, max_tokens, on_plan, None)
         return super().generate(prompt, attempt, max_tokens, on_plan, prefix)
 
 
@@ -230,7 +230,7 @@ def test_understander():
     answer = lambda req, prompt, attempt: plan_answer(CSV_TO_EXCEL)
     m = ClearAware(answer, info={"rewrite": True})
     res = router(m, mode="ultra").run(CSV_REQ, assistant=True)
-    assert m.asked_prefix[:4] == [F.CLEAR_HEAD + " "] * 3 + [None], m.asked_prefix      # the last sample is free
+    assert m.asked_prefix[:4] == [F.CLEAR_HEAD] * 3 + [None], m.asked_prefix      # the last sample is free
     assert res["understood"] == ClearAware.clear, res.get("understood")
     notes = json.loads(res["flow"])["notes"]
     assert notes.startswith(S.UNDERSTOOD + "Read the CSV file") and "Mode: Ultra" in notes, notes

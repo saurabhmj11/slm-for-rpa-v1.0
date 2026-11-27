@@ -730,7 +730,8 @@ class Router:
                 # the understander: every sample but the last starts with "Clear request: "; the last is free, so the
                 # model can still ask a question (a restatement start never turns into one)
                 for it in items[:-1]:
-                    it["prefix"] = F.CLEAR_HEAD + " "
+                    it["prefix"] = F.CLEAR_HEAD      # no trailing space: in training the space belongs to the next
+                    #                                  word's token (" Read"); a lone " " token garbled the restatement
             t = time.time()
             try:
                 outs = self.generate_many(items, hard)

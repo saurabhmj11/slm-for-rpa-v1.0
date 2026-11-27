@@ -388,7 +388,8 @@ class NanochatLocal:
             con = self.constraints[attempt % len(self.constraints)]
             ids, reason, ncon, nch = C.generate(
                 self.model, prompt, con, max_tokens, temperature, 50, seed,
-                {self.assistant_end, self.bos}, lambda t: self._tok_text[t] or self.tok.decode([t]), g, flow=flow)
+                {self.assistant_end, self.bos}, lambda t: self._tok_text[t] or self.tok.decode([t]), g, flow=flow,
+                prefix=prefix)
             if reason.startswith("loop: ") and g is not None and g.kind == "plan":
                 reason = "plan: " + g.reason
             self.last_stats = {"tokens": len(ids), "stop": reason, "seconds": round(time.time() - t0, 2), "ids": ids,
@@ -409,7 +410,7 @@ class NanochatLocal:
                 break
             if flow:
                 import constrained as C
-                if C.not_a_flow(out, lambda t: self.tok.decode([t])):
+                if C.not_a_flow(out, lambda t: self.tok.decode([t]), prefix):
                     reason = "not a flow"
                     break
         stream.close()
@@ -449,7 +450,8 @@ class NanochatLocal:
             temp = it.get("temperature")
             rows.append(C.BatchRow(prompt, self.token_budget(prompt, it.get("max_tokens") or MAX_ANSWER),
                                    0.2 + 0.3 * attempt if temp is None else temp,
-                                   it.get("seed") if it.get("seed") is not None else 1000 + attempt, con, g, flow=True))
+                                   it.get("seed") if it.get("seed") is not None else 1000 + attempt, con, g, flow=True,
+                                   prefix=prefix))
             guards.append(g)
             prefixes.append(prefix)
         if not hasattr(self, "_tok_text"):

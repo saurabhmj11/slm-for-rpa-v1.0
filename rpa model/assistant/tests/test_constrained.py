@@ -69,6 +69,11 @@ def test_not_a_flow():
     assert not C.not_a_flow([1, 6], dec)                 # only spaces so far: undecided
     assert not C.not_a_flow([1, 3], dec)                 # opens a JSON object
     assert C.not_a_flow([4], dec) and C.not_a_flow([1, 4, 5], dec)
+    # a reply started with a given prefix ("Clear request:" in the prompt): the restatement after it is not chat
+    words = ["", " Read", " the", " CSV", "Clear request:"]
+    wdec = lambda t: words[t]
+    assert not C.not_a_flow([1, 2, 3], wdec, "Clear request:")
+    assert C.not_a_flow([1, 2, 3], wdec)                 # without the prefix the same words are chat
 
 
 

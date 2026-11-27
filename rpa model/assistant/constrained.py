@@ -176,9 +176,11 @@ def token_strings(tok, vocab_size):
 REPLY_STARTS = ("{", "Plan:", "Question:", "Flow:", "Clear request:", "Understand:")   # Understand: a thinking answer
 
 
-def not_a_flow(out, decode):
-    """True once the reply's start is known to be none of REPLY_STARTS (a chat reply, not a flow or a question)."""
-    head = "".join(decode(t) for t in out[:8]).lstrip()
+def not_a_flow(out, decode, prefix=""):
+    """True once the reply's start is known to be none of REPLY_STARTS (a chat reply, not a flow or a question).
+    prefix: text the reply was started with (given in the prompt, not generated, e.g. "Clear request:"); it counts as
+    the reply's start, so a given restatement start is never taken for chat."""
+    head = ((prefix or "") + "".join(decode(t) for t in out[:8])).lstrip()
     if not head:
         return False
     return not any(p.startswith(head) or head.startswith(p) for p in REPLY_STARTS)
@@ -209,7 +211,7 @@ class FlowGate:
 
 
 def generate(model, prompt_ids, constraint, max_tokens, temperature, top_k, seed, stop_ids, decode, guard=None,
-             first_k=256, flow=False):
+             first_k=256, flow=False, prefix=""):
     """Decode one reply with the catalog lock. Returns (ids, stop_reason, n_constrained_steps, n_changed).
     decode(token_id) -> text (used to keep the JSON tracker in step). Sampling matches nanochat's Engine.
     flow=True: stop at once (reason "not a flow") when the reply opens with none of REPLY_STARTS (a request it read as
@@ -249,7 +251,7 @@ def generate(model, prompt_ids, constraint, max_tokens, temperature, top_k, seed
                 break
             out.append(nxt)
             tracker.feed(gate.feed(decode(nxt)))
-            if flow and not_a_flow(out, decode):
+            if flow and not_a_flow(out, decode, prefix):
                 reason = "not a flow"
                 break
             if guard is not None and guard.push(nxt):
@@ -340,9 +342,10 @@ class BatchRow:
     """One prompt of a batched generation: its own sampling (temperature, seed), catalog lock, guards and limits."""
 
     def __init__(self, prompt_ids, max_tokens, temperature=0.2, seed=1000, constraint=None, guard=None, flow=False,
-                 top_k=50):
+                 top_k=50, prefix=""):
         self.prompt, self.max_tokens, self.temperature, self.seed = list(prompt_ids), int(max_tokens), temperature, seed
         self.constraint, self.guard, self.flow, self.top_k = constraint, guard, flow, top_k
+        self.prefix = prefix or ""          # the reply's given start (part of the prompt ids), for not_a_flow
         self.out, self.reason, self.n_con, self.n_changed, self.done = [], "max_tokens", 0, 0, False
 
 
@@ -420,7 +423,7 @@ def generate_batch(model, rows, stop_ids, decode, first_k=256, deadline=None):
                     continue
                 r.out.append(t)
                 trackers[b].feed(gates[b].feed(decode(t)))
-                if r.flow and not_a_flow(r.out, decode):
+                if r.flow and not_a_flow(r.out, decode, r.prefix):
                     r.reason, r.done = "not a flow", True
                     continue
                 if r.guard is not None and r.guard.push(t):
